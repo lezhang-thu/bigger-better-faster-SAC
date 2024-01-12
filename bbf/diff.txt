@@ -1,0 +1,21 @@
+429,433d428
+<         self.policy_projection = FeatureLayer(
+<             int(self.hidden_dim),
+<             dtype=jnp.float32,
+<             initializer=initializer,
+<         )
+480,484c475
+<                 self.policy(
+<                     nn.relu(
+<                         self.policy_projection(
+<                             jax.lax.stop_gradient(y.representation),
+<                             eval_mode))))
+---
+>                 self.policy(nn.relu(self.project(y.representation, eval_mode))))
+487,490c478
+<         x = self.encode(x, False)
+<         x = x.reshape(-1)
+<         x = jax.lax.stop_gradient(x)
+<         logits = self.policy(nn.relu(self.policy_projection(x, False)))
+---
+>         logits = self.policy(nn.relu(self.encode_project(x, False)))

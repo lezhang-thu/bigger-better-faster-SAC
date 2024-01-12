@@ -1,0 +1,10 @@
+25c25,26
+< BBFAgent.reset_every = 20_000 # Change if you change the replay ratio
+---
+> #BBFAgent.reset_every = 20_000 # Change if you change the replay ratio
+> BBFAgent.reset_every = 10_000 # Change if you change the replay ratio
+31c32,33
+< BBFAgent.replay_ratio = 64
+---
+> #BBFAgent.replay_ratio = 64
+> BBFAgent.replay_ratio = 128 

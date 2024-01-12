@@ -1,0 +1,799 @@
++ for seed in 7779 7780 7999 8000
++ CUDA_VISIBLE_DEVICES=0
++ python -m bbf.train --agent=BBF --gin_files=bbf/configs/BBF.gin --base_dir=/tmp/online_rl/bbf/cuda0/7779 --run_number=0 --agent_seed=7779 --no_seeding=False
+2023-08-10 09:33:20.276726: I tensorflow/core/util/port.cc:110] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2023-08-10 09:33:20.298092: I tensorflow/core/platform/cpu_feature_guard.cc:182] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2023-08-10 09:33:20.583687: W tensorflow/compiler/tf2tensorrt/utils/py_utils.cc:38] TF-TRT Warning: Could not find TensorRT
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gin/tf/__init__.py:48: DeprecationWarning: distutils Version classes are deprecated. Use packaging.version instead.
+  if (distutils.version.LooseVersion(tf.__version__) <
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/jax/_src/pjit.py:307: DeprecationWarning: backend and device argument on jit is deprecated. You can use a `jax.sharding.Mesh` context manager or device_put the arguments before passing them to `jit`. Please see https://jax.readthedocs.io/en/latest/notebooks/Distributed_arrays_and_automatic_parallelization.html for more information.
+  warnings.warn(
+[INFO 2023-08-10 09:33:22,270 train.py:175] Setting random seed: 7779
+[INFO 2023-08-10 09:33:22,274 train.py:242] Using MaxEpisodeEvalRunner for evaluation.
+[WARNING 2023-08-10 09:33:22,274 run_experiment.py:267] DEPRECATION WARNING: Logger is being deprecated. Please switch to CollectorDispatcher!
+A.L.E: Arcade Learning Environment (version 0.7.5+db37282)
+[Powered by Stella]
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/core.py:329: DeprecationWarning: [33mWARN: Initializing wrapper in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.[0m
+  deprecation(
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/wrappers/step_api_compatibility.py:39: DeprecationWarning: [33mWARN: Initializing environment in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.[0m
+  deprecation(
+[INFO 2023-08-10 09:33:22,347 spr_agent.py:749] Creating BBFAgent agent with the following parameters:
+[INFO 2023-08-10 09:33:22,347 spr_agent.py:753] 	 double_dqn: True
+[INFO 2023-08-10 09:33:22,347 spr_agent.py:754] 	 distributional: True
+[INFO 2023-08-10 09:33:22,347 spr_agent.py:755] 	 data_augmentation: True
+[INFO 2023-08-10 09:33:22,347 spr_agent.py:756] 	 num_updates_per_train_step: 1
+[INFO 2023-08-10 09:33:22,390 xla_bridge.py:603] Unable to initialize backend 'rocm': NOT_FOUND: Could not find registered platform with name: "rocm". Available platform names are: CUDA Interpreter
+[INFO 2023-08-10 09:33:22,390 xla_bridge.py:603] Unable to initialize backend 'tpu': module 'jaxlib.xla_extension' has no attribute 'get_tpu_client'
+[INFO 2023-08-10 09:33:23,344 spr_agent.py:840] 	 Found following local devices: [gpu(id=0)]
+[INFO 2023-08-10 09:33:23,344 spr_agent.py:855] 	 Running with dtype <class 'jax.numpy.float32'>
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:278] Creating BBFAgent agent with the following parameters:
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:280] 	 gamma: 0.997000
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:281] 	 update_horizon: 10.000000
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:282] 	 min_replay_history: 2000
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:283] 	 update_period: 1
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:284] 	 target_update_period: 1
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:285] 	 epsilon_train: 0.000000
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:286] 	 epsilon_eval: 0.001000
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:287] 	 epsilon_decay_period: 2001
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:288] 	 optimizer: adam
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:289] 	 seed: 7779
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:290] 	 loss_type: mse
+[INFO 2023-08-10 09:33:23,345 dqn_agent.py:291] 	 preprocess_fn: None
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:854] Creating a PrioritizedJaxSubsequenceParallelEnvReplayBuffer replay memory with the following parameters:
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:857] 	 observation_shape: (84, 84)
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:858] 	 observation_dtype: <class 'jax.numpy.uint8'>
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:859] 	 terminal_dtype: <class 'numpy.uint8'>
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:860] 	 stack_size: 4
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:861] 	 use_next_state: 1
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:862] 	 replay_capacity: 200000
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:863] 	 batch_size: 32
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:864] 	 update_horizon: 10
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:865] 	 gamma: 0.997000
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:152] Creating a OutOfGraphReplayBuffer replay memory with the following parameters:
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:155] 	 observation_shape: (84, 84)
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:156] 	 observation_dtype: <class 'jax.numpy.uint8'>
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:157] 	 terminal_dtype: <class 'numpy.uint8'>
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:158] 	 stack_size: 4
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:159] 	 replay_capacity: 100000
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:160] 	 batch_size: 32
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:161] 	 update_horizon: 1
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:162] 	 gamma: 0.990000
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:163] 	 trajectory_value: return
+[INFO 2023-08-10 09:33:23,387 subsequence_replay_buffer.py:164] 	 replay_forgetting: default
+[INFO 2023-08-10 09:33:27,329 spr_agent.py:676] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-08-10 09:33:27,329 spr_agent.py:676] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-08-10 09:33:27,329 spr_agent.py:676] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-08-10 09:33:27,715 spr_agent.py:999] 	 Operating with 1 environments, batch size 32 and replay ratio 64
+[INFO 2023-08-10 09:33:27,715 spr_agent.py:1006] 	 Calculated 2 updates per update phase
+[INFO 2023-08-10 09:33:27,715 spr_agent.py:1010] 	 Calculated update frequency of 1 step
+[INFO 2023-08-10 09:33:27,715 spr_agent.py:1015] 	 Setting min_replay_history to 2000.0 from 2000
+[INFO 2023-08-10 09:33:27,715 spr_agent.py:1020] 	 Setting epsilon_decay_period to 2001.0 from 2001
+[INFO 2023-08-10 09:33:27,715 spr_agent.py:1040] 	 Running 1 groups of 2 batches per 1 env step
+[INFO 2023-08-10 09:33:27,716 eval_run_experiment.py:201] Num evaluation episodes: 100
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/utils/passive_env_checker.py:227: DeprecationWarning: [33mWARN: Core environment is written in old step API which returns one bool instead of two. It is recommended to rewrite the environment with new step API. [0m
+  logger.deprecation(
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/utils/passive_env_checker.py:233: DeprecationWarning: `np.bool8` is a deprecated alias for `np.bool_`.  (Deprecated NumPy 1.24)
+  if not isinstance(done, (bool, np.bool8)):
+[INFO 2023-08-10 09:33:27,941 eval_run_experiment.py:630] Beginning training...
+[INFO 2023-08-10 09:33:27,941 eval_run_experiment.py:549] Starting iteration 0
+[INFO 2023-08-10 09:33:28,862 eval_run_experiment.py:407] steps executed:      682, num episodes:        1, episode length:      682, return:    210.0, normalized return:   -0.003
+[INFO 2023-08-10 09:33:29,564 eval_run_experiment.py:407] steps executed:     1230, num episodes:        2, episode length:      548, return:    190.0, normalized return:   -0.005
+[INFO 2023-08-10 09:33:30,156 eval_run_experiment.py:407] steps executed:     1712, num episodes:        3, episode length:      482, return:    150.0, normalized return:   -0.011
+[INFO 2023-08-10 09:34:28,621 eval_run_experiment.py:407] steps executed:     2223, num episodes:        4, episode length:      511, return:    230.0, normalized return:      0.0
+[INFO 2023-08-10 09:36:20,500 eval_run_experiment.py:407] steps executed:     2731, num episodes:        5, episode length:      508, return:    220.0, normalized return:   -0.001
+[INFO 2023-08-10 09:38:04,898 eval_run_experiment.py:407] steps executed:     3205, num episodes:        6, episode length:      474, return:    100.0, normalized return:   -0.019
+[INFO 2023-08-10 09:39:51,664 eval_run_experiment.py:407] steps executed:     3690, num episodes:        7, episode length:      485, return:    270.0, normalized return:    0.006
+[INFO 2023-08-10 09:41:51,381 eval_run_experiment.py:407] steps executed:     4234, num episodes:        8, episode length:      544, return:    270.0, normalized return:    0.006
+[INFO 2023-08-10 09:44:02,680 eval_run_experiment.py:407] steps executed:     4831, num episodes:        9, episode length:      597, return:    370.0, normalized return:    0.021
+[INFO 2023-08-10 09:47:15,785 eval_run_experiment.py:407] steps executed:     5709, num episodes:       10, episode length:      878, return:   1020.0, normalized return:    0.115
+[INFO 2023-08-10 09:49:22,640 eval_run_experiment.py:407] steps executed:     6286, num episodes:       11, episode length:      577, return:   1090.0, normalized return:    0.125
+[INFO 2023-08-10 09:50:51,303 eval_run_experiment.py:407] steps executed:     6689, num episodes:       12, episode length:      403, return:    340.0, normalized return:    0.016
+[INFO 2023-08-10 09:52:26,496 eval_run_experiment.py:407] steps executed:     7122, num episodes:       13, episode length:      433, return:    350.0, normalized return:    0.018
+[INFO 2023-08-10 09:54:41,284 eval_run_experiment.py:407] steps executed:     7735, num episodes:       14, episode length:      613, return:    420.0, normalized return:    0.028
+[INFO 2023-08-10 09:56:29,176 eval_run_experiment.py:407] steps executed:     8226, num episodes:       15, episode length:      491, return:    360.0, normalized return:    0.019
+[INFO 2023-08-10 09:58:30,366 eval_run_experiment.py:407] steps executed:     8777, num episodes:       16, episode length:      551, return:    460.0, normalized return:    0.034
+[INFO 2023-08-10 10:00:29,573 eval_run_experiment.py:407] steps executed:     9319, num episodes:       17, episode length:      542, return:    440.0, normalized return:    0.031
+[INFO 2023-08-10 10:02:53,602 eval_run_experiment.py:407] steps executed:     9974, num episodes:       18, episode length:      655, return:    610.0, normalized return:    0.055
+[INFO 2023-08-10 10:05:11,451 eval_run_experiment.py:407] steps executed:    10601, num episodes:       19, episode length:      627, return:    670.0, normalized return:    0.064
+[INFO 2023-08-10 10:07:33,468 eval_run_experiment.py:407] steps executed:    11247, num episodes:       20, episode length:      646, return:    570.0, normalized return:     0.05
+[INFO 2023-08-10 10:09:01,471 eval_run_experiment.py:407] steps executed:    11647, num episodes:       21, episode length:      400, return:    460.0, normalized return:    0.034
+[INFO 2023-08-10 10:11:27,862 eval_run_experiment.py:407] steps executed:    12313, num episodes:       22, episode length:      666, return:    570.0, normalized return:     0.05
+[INFO 2023-08-10 10:13:59,169 eval_run_experiment.py:407] steps executed:    13001, num episodes:       23, episode length:      688, return:    480.0, normalized return:    0.037
+[INFO 2023-08-10 10:16:00,060 eval_run_experiment.py:407] steps executed:    13551, num episodes:       24, episode length:      550, return:    610.0, normalized return:    0.055
+[INFO 2023-08-10 10:18:41,640 eval_run_experiment.py:407] steps executed:    14286, num episodes:       25, episode length:      735, return:    930.0, normalized return:    0.102
+[INFO 2023-08-10 10:23:00,505 eval_run_experiment.py:407] steps executed:    15464, num episodes:       26, episode length:     1178, return:    650.0, normalized return:    0.061
+[INFO 2023-08-10 10:25:07,917 eval_run_experiment.py:407] steps executed:    16044, num episodes:       27, episode length:      580, return:    490.0, normalized return:    0.038
+[INFO 2023-08-10 10:28:45,267 eval_run_experiment.py:407] steps executed:    17033, num episodes:       28, episode length:      989, return:   2090.0, normalized return:     0.27
+[INFO 2023-08-10 10:31:53,399 eval_run_experiment.py:407] steps executed:    17889, num episodes:       29, episode length:      856, return:    670.0, normalized return:    0.064
+[INFO 2023-08-10 10:34:20,678 eval_run_experiment.py:407] steps executed:    18559, num episodes:       30, episode length:      670, return:   1120.0, normalized return:    0.129
+[INFO 2023-08-10 10:36:05,133 eval_run_experiment.py:407] steps executed:    19034, num episodes:       31, episode length:      475, return:    370.0, normalized return:    0.021
+[INFO 2023-08-10 10:38:37,112 eval_run_experiment.py:407] steps executed:    19726, num episodes:       32, episode length:      692, return:    630.0, normalized return:    0.058
+[INFO 2023-08-10 10:39:37,925 spr_agent.py:1114] 	 Resetting weights at step 20002.
+[INFO 2023-08-10 10:39:39,024 spr_agent.py:1153] Running 0 gradient steps after reset
+[INFO 2023-08-10 10:41:22,823 eval_run_experiment.py:407] steps executed:    20474, num episodes:       33, episode length:      748, return:    490.0, normalized return:    0.038
+[INFO 2023-08-10 10:43:06,188 eval_run_experiment.py:407] steps executed:    20942, num episodes:       34, episode length:      468, return:    180.0, normalized return:   -0.007
+[INFO 2023-08-10 10:44:48,594 eval_run_experiment.py:407] steps executed:    21406, num episodes:       35, episode length:      464, return:    360.0, normalized return:    0.019
+[INFO 2023-08-10 10:47:37,811 eval_run_experiment.py:407] steps executed:    22173, num episodes:       36, episode length:      767, return:   1000.0, normalized return:    0.112
+[INFO 2023-08-10 10:50:00,397 eval_run_experiment.py:407] steps executed:    22819, num episodes:       37, episode length:      646, return:    550.0, normalized return:    0.047
+[INFO 2023-08-10 10:52:31,564 eval_run_experiment.py:407] steps executed:    23504, num episodes:       38, episode length:      685, return:    960.0, normalized return:    0.106
+[INFO 2023-08-10 10:56:08,252 eval_run_experiment.py:407] steps executed:    24486, num episodes:       39, episode length:      982, return:    750.0, normalized return:    0.076
+[INFO 2023-08-10 10:58:28,156 eval_run_experiment.py:407] steps executed:    25120, num episodes:       40, episode length:      634, return:   1530.0, normalized return:    0.189
+[INFO 2023-08-10 11:01:32,616 eval_run_experiment.py:407] steps executed:    25956, num episodes:       41, episode length:      836, return:   1670.0, normalized return:    0.209
+[INFO 2023-08-10 11:04:55,202 eval_run_experiment.py:407] steps executed:    26875, num episodes:       42, episode length:      919, return:   1170.0, normalized return:    0.137
+[INFO 2023-08-10 11:08:19,312 eval_run_experiment.py:407] steps executed:    27801, num episodes:       43, episode length:      926, return:   1100.0, normalized return:    0.126
+[INFO 2023-08-10 11:10:37,544 eval_run_experiment.py:407] steps executed:    28428, num episodes:       44, episode length:      627, return:    490.0, normalized return:    0.038
+[INFO 2023-08-10 11:12:53,987 eval_run_experiment.py:407] steps executed:    29047, num episodes:       45, episode length:      619, return:   2080.0, normalized return:    0.268
+[INFO 2023-08-10 11:15:32,461 eval_run_experiment.py:407] steps executed:    29766, num episodes:       46, episode length:      719, return:    610.0, normalized return:    0.055
+[INFO 2023-08-10 11:17:33,251 eval_run_experiment.py:407] steps executed:    30314, num episodes:       47, episode length:      548, return:   1120.0, normalized return:    0.129
+[INFO 2023-08-10 11:21:44,405 eval_run_experiment.py:407] steps executed:    31453, num episodes:       48, episode length:     1139, return:    820.0, normalized return:    0.086
+[INFO 2023-08-10 11:25:26,631 eval_run_experiment.py:407] steps executed:    32461, num episodes:       49, episode length:     1008, return:    710.0, normalized return:     0.07
+[INFO 2023-08-10 11:27:10,300 eval_run_experiment.py:407] steps executed:    32931, num episodes:       50, episode length:      470, return:   1110.0, normalized return:    0.128
+[INFO 2023-08-10 11:31:31,246 eval_run_experiment.py:407] steps executed:    34115, num episodes:       51, episode length:     1184, return:    790.0, normalized return:    0.081
+[INFO 2023-08-10 11:34:23,982 eval_run_experiment.py:407] steps executed:    34899, num episodes:       52, episode length:      784, return:    710.0, normalized return:     0.07
+[INFO 2023-08-10 11:36:48,838 eval_run_experiment.py:407] steps executed:    35556, num episodes:       53, episode length:      657, return:   1150.0, normalized return:    0.134
+[INFO 2023-08-10 11:39:59,062 eval_run_experiment.py:407] steps executed:    36419, num episodes:       54, episode length:      863, return:    640.0, normalized return:     0.06
+[INFO 2023-08-10 11:42:00,314 eval_run_experiment.py:407] steps executed:    36969, num episodes:       55, episode length:      550, return:    460.0, normalized return:    0.034
+[INFO 2023-08-10 11:45:54,395 eval_run_experiment.py:407] steps executed:    38031, num episodes:       56, episode length:     1062, return:    830.0, normalized return:    0.087
+[INFO 2023-08-10 11:49:07,419 eval_run_experiment.py:407] steps executed:    38907, num episodes:       57, episode length:      876, return:   2270.0, normalized return:    0.296
+[INFO 2023-08-10 11:51:52,798 eval_run_experiment.py:407] steps executed:    39657, num episodes:       58, episode length:      750, return:    530.0, normalized return:    0.044
+[INFO 2023-08-10 11:53:09,327 spr_agent.py:1114] 	 Resetting weights at step 40003.
+[INFO 2023-08-10 11:53:09,331 spr_agent.py:1153] Running 0 gradient steps after reset
+[INFO 2023-08-10 11:54:54,817 eval_run_experiment.py:407] steps executed:    40483, num episodes:       59, episode length:      826, return:   1100.0, normalized return:    0.126
+[INFO 2023-08-10 11:56:55,929 eval_run_experiment.py:407] steps executed:    41032, num episodes:       60, episode length:      549, return:    140.0, normalized return:   -0.013
+[INFO 2023-08-10 11:59:06,790 eval_run_experiment.py:407] steps executed:    41625, num episodes:       61, episode length:      593, return:    340.0, normalized return:    0.016
+[INFO 2023-08-10 12:00:56,884 eval_run_experiment.py:407] steps executed:    42124, num episodes:       62, episode length:      499, return:    400.0, normalized return:    0.025
+[INFO 2023-08-10 12:03:29,132 eval_run_experiment.py:407] steps executed:    42814, num episodes:       63, episode length:      690, return:    320.0, normalized return:    0.013
+[INFO 2023-08-10 12:06:32,493 eval_run_experiment.py:407] steps executed:    43645, num episodes:       64, episode length:      831, return:   1150.0, normalized return:    0.134
+[INFO 2023-08-10 12:08:56,375 eval_run_experiment.py:407] steps executed:    44297, num episodes:       65, episode length:      652, return:    640.0, normalized return:     0.06
+[INFO 2023-08-10 12:11:48,400 eval_run_experiment.py:407] steps executed:    45077, num episodes:       66, episode length:      780, return:    760.0, normalized return:    0.077
+[INFO 2023-08-10 12:13:50,818 eval_run_experiment.py:407] steps executed:    45632, num episodes:       67, episode length:      555, return:    650.0, normalized return:    0.061
+[INFO 2023-08-10 12:15:58,345 eval_run_experiment.py:407] steps executed:    46210, num episodes:       68, episode length:      578, return:    510.0, normalized return:    0.041
+[INFO 2023-08-10 12:18:40,060 eval_run_experiment.py:407] steps executed:    46943, num episodes:       69, episode length:      733, return:    750.0, normalized return:    0.076
+[INFO 2023-08-10 12:20:51,247 eval_run_experiment.py:407] steps executed:    47538, num episodes:       70, episode length:      595, return:   1190.0, normalized return:    0.139
+[INFO 2023-08-10 12:22:59,121 eval_run_experiment.py:407] steps executed:    48118, num episodes:       71, episode length:      580, return:    480.0, normalized return:    0.037
+[INFO 2023-08-10 12:26:15,836 eval_run_experiment.py:407] steps executed:    49010, num episodes:       72, episode length:      892, return:    730.0, normalized return:    0.073
+[INFO 2023-08-10 12:30:14,925 eval_run_experiment.py:407] steps executed:    50094, num episodes:       73, episode length:     1084, return:   1750.0, normalized return:    0.221
+[INFO 2023-08-10 12:33:23,076 eval_run_experiment.py:407] steps executed:    50947, num episodes:       74, episode length:      853, return:    710.0, normalized return:     0.07
+[INFO 2023-08-10 12:35:49,563 eval_run_experiment.py:407] steps executed:    51611, num episodes:       75, episode length:      664, return:   1270.0, normalized return:    0.151
+[INFO 2023-08-10 12:38:46,468 eval_run_experiment.py:407] steps executed:    52413, num episodes:       76, episode length:      802, return:    580.0, normalized return:    0.051
+[INFO 2023-08-10 12:41:45,707 eval_run_experiment.py:407] steps executed:    53226, num episodes:       77, episode length:      813, return:    800.0, normalized return:    0.083
+[INFO 2023-08-10 12:43:48,118 eval_run_experiment.py:407] steps executed:    53781, num episodes:       78, episode length:      555, return:   1100.0, normalized return:    0.126
+[INFO 2023-08-10 12:48:02,672 eval_run_experiment.py:407] steps executed:    54935, num episodes:       79, episode length:     1154, return:    670.0, normalized return:    0.064
+[INFO 2023-08-10 12:51:26,764 eval_run_experiment.py:407] steps executed:    55860, num episodes:       80, episode length:      925, return:   1330.0, normalized return:     0.16
+[INFO 2023-08-10 12:54:35,811 eval_run_experiment.py:407] steps executed:    56717, num episodes:       81, episode length:      857, return:    590.0, normalized return:    0.052
+[INFO 2023-08-10 12:55:56,985 eval_run_experiment.py:407] steps executed:    57085, num episodes:       82, episode length:      368, return:    320.0, normalized return:    0.013
+[INFO 2023-08-10 12:59:35,052 eval_run_experiment.py:407] steps executed:    58074, num episodes:       83, episode length:      989, return:   1220.0, normalized return:    0.144
+[INFO 2023-08-10 13:01:58,615 eval_run_experiment.py:407] steps executed:    58725, num episodes:       84, episode length:      651, return:    560.0, normalized return:    0.048
+[INFO 2023-08-10 13:05:21,989 eval_run_experiment.py:407] steps executed:    59647, num episodes:       85, episode length:      922, return:    950.0, normalized return:    0.105
+[INFO 2023-08-10 13:06:40,997 spr_agent.py:1114] 	 Resetting weights at step 60004.
+[INFO 2023-08-10 13:06:41,000 spr_agent.py:1153] Running 0 gradient steps after reset
+[INFO 2023-08-10 13:07:24,439 eval_run_experiment.py:407] steps executed:    60202, num episodes:       86, episode length:      555, return:    460.0, normalized return:    0.034
+[INFO 2023-08-10 13:09:09,269 eval_run_experiment.py:407] steps executed:    60677, num episodes:       87, episode length:      475, return:    100.0, normalized return:   -0.019
+[INFO 2023-08-10 13:10:52,452 eval_run_experiment.py:407] steps executed:    61144, num episodes:       88, episode length:      467, return:    100.0, normalized return:   -0.019
+[INFO 2023-08-10 13:13:12,042 eval_run_experiment.py:407] steps executed:    61776, num episodes:       89, episode length:      632, return:   2070.0, normalized return:    0.267
+[INFO 2023-08-10 13:17:25,965 eval_run_experiment.py:407] steps executed:    62926, num episodes:       90, episode length:     1150, return:   2350.0, normalized return:    0.308
+[INFO 2023-08-10 13:20:13,623 eval_run_experiment.py:407] steps executed:    63686, num episodes:       91, episode length:      760, return:   1380.0, normalized return:    0.167
+[INFO 2023-08-10 13:22:45,613 eval_run_experiment.py:407] steps executed:    64375, num episodes:       92, episode length:      689, return:   1280.0, normalized return:    0.152
+[INFO 2023-08-10 13:25:16,537 eval_run_experiment.py:407] steps executed:    65059, num episodes:       93, episode length:      684, return:   1020.0, normalized return:    0.115
+[INFO 2023-08-10 13:28:00,861 eval_run_experiment.py:407] steps executed:    65804, num episodes:       94, episode length:      745, return:   2290.0, normalized return:    0.299
+[INFO 2023-08-10 13:30:36,163 eval_run_experiment.py:407] steps executed:    66508, num episodes:       95, episode length:      704, return:    610.0, normalized return:    0.055
+[INFO 2023-08-10 13:32:47,630 eval_run_experiment.py:407] steps executed:    67104, num episodes:       96, episode length:      596, return:   1100.0, normalized return:    0.126
+[INFO 2023-08-10 13:36:13,115 eval_run_experiment.py:407] steps executed:    68036, num episodes:       97, episode length:      932, return:    800.0, normalized return:    0.083
+[INFO 2023-08-10 13:39:34,896 eval_run_experiment.py:407] steps executed:    68951, num episodes:       98, episode length:      915, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 13:42:36,760 eval_run_experiment.py:407] steps executed:    69776, num episodes:       99, episode length:      825, return:    710.0, normalized return:     0.07
+[INFO 2023-08-10 13:45:59,302 eval_run_experiment.py:407] steps executed:    70695, num episodes:      100, episode length:      919, return:   1390.0, normalized return:    0.168
+[INFO 2023-08-10 13:50:59,471 eval_run_experiment.py:407] steps executed:    72058, num episodes:      101, episode length:     1363, return:    840.0, normalized return:    0.089
+[INFO 2023-08-10 13:55:03,251 eval_run_experiment.py:407] steps executed:    73165, num episodes:      102, episode length:     1107, return:    890.0, normalized return:    0.096
+[INFO 2023-08-10 13:57:19,356 eval_run_experiment.py:407] steps executed:    73783, num episodes:      103, episode length:      618, return:    610.0, normalized return:    0.055
+[INFO 2023-08-10 13:59:13,671 eval_run_experiment.py:407] steps executed:    74302, num episodes:      104, episode length:      519, return:    650.0, normalized return:    0.061
+[INFO 2023-08-10 14:01:30,232 eval_run_experiment.py:407] steps executed:    74922, num episodes:      105, episode length:      620, return:    660.0, normalized return:    0.063
+[INFO 2023-08-10 14:06:00,430 eval_run_experiment.py:407] steps executed:    76149, num episodes:      106, episode length:     1227, return:   1310.0, normalized return:    0.157
+[INFO 2023-08-10 14:08:55,081 eval_run_experiment.py:407] steps executed:    76942, num episodes:      107, episode length:      793, return:   1260.0, normalized return:     0.15
+[INFO 2023-08-10 14:12:06,033 eval_run_experiment.py:407] steps executed:    77809, num episodes:      108, episode length:      867, return:    900.0, normalized return:    0.097
+[INFO 2023-08-10 14:14:53,434 eval_run_experiment.py:407] steps executed:    78569, num episodes:      109, episode length:      760, return:    800.0, normalized return:    0.083
+[INFO 2023-08-10 14:19:00,583 eval_run_experiment.py:407] steps executed:    79691, num episodes:      110, episode length:     1122, return:   1440.0, normalized return:    0.176
+[INFO 2023-08-10 14:20:09,987 spr_agent.py:1108] 	 Not resetting at step 80005, as need at least 20000 before 100000 to recover.
+[INFO 2023-08-10 14:23:49,981 eval_run_experiment.py:407] steps executed:    81005, num episodes:      111, episode length:     1314, return:    940.0, normalized return:    0.103
+[INFO 2023-08-10 14:28:06,483 eval_run_experiment.py:407] steps executed:    82170, num episodes:      112, episode length:     1165, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 14:30:33,116 eval_run_experiment.py:407] steps executed:    82836, num episodes:      113, episode length:      666, return:    770.0, normalized return:    0.079
+[INFO 2023-08-10 14:34:11,793 eval_run_experiment.py:407] steps executed:    83829, num episodes:      114, episode length:      993, return:   1340.0, normalized return:    0.161
+[INFO 2023-08-10 14:35:36,793 eval_run_experiment.py:407] steps executed:    84215, num episodes:      115, episode length:      386, return:    550.0, normalized return:    0.047
+[INFO 2023-08-10 14:38:36,203 eval_run_experiment.py:407] steps executed:    85030, num episodes:      116, episode length:      815, return:    810.0, normalized return:    0.084
+[INFO 2023-08-10 14:43:31,043 eval_run_experiment.py:407] steps executed:    86369, num episodes:      117, episode length:     1339, return:   1370.0, normalized return:    0.166
+[INFO 2023-08-10 14:47:01,717 eval_run_experiment.py:407] steps executed:    87326, num episodes:      118, episode length:      957, return:    950.0, normalized return:    0.105
+[INFO 2023-08-10 14:49:52,833 eval_run_experiment.py:407] steps executed:    88103, num episodes:      119, episode length:      777, return:    800.0, normalized return:    0.083
+[INFO 2023-08-10 14:52:28,495 eval_run_experiment.py:407] steps executed:    88810, num episodes:      120, episode length:      707, return:    660.0, normalized return:    0.063
+[INFO 2023-08-10 14:55:50,385 eval_run_experiment.py:407] steps executed:    89727, num episodes:      121, episode length:      917, return:   1500.0, normalized return:    0.184
+[INFO 2023-08-10 14:59:39,146 eval_run_experiment.py:407] steps executed:    90766, num episodes:      122, episode length:     1039, return:   1480.0, normalized return:    0.181
+[INFO 2023-08-10 15:03:29,424 eval_run_experiment.py:407] steps executed:    91812, num episodes:      123, episode length:     1046, return:   1480.0, normalized return:    0.181
+[INFO 2023-08-10 15:07:16,427 eval_run_experiment.py:407] steps executed:    92843, num episodes:      124, episode length:     1031, return:   1000.0, normalized return:    0.112
+[INFO 2023-08-10 15:10:41,235 eval_run_experiment.py:407] steps executed:    93773, num episodes:      125, episode length:      930, return:   1460.0, normalized return:    0.179
+[INFO 2023-08-10 15:16:04,755 eval_run_experiment.py:407] steps executed:    95243, num episodes:      126, episode length:     1470, return:   2460.0, normalized return:    0.324
+[INFO 2023-08-10 15:19:47,307 eval_run_experiment.py:407] steps executed:    96254, num episodes:      127, episode length:     1011, return:   2030.0, normalized return:    0.261
+[INFO 2023-08-10 15:22:42,381 eval_run_experiment.py:407] steps executed:    97049, num episodes:      128, episode length:      795, return:   1350.0, normalized return:    0.163
+[INFO 2023-08-10 15:25:17,702 eval_run_experiment.py:407] steps executed:    97754, num episodes:      129, episode length:      705, return:    730.0, normalized return:    0.073
+[INFO 2023-08-10 15:29:45,130 eval_run_experiment.py:407] steps executed:    98972, num episodes:      130, episode length:     1218, return:    990.0, normalized return:     0.11
+[INFO 2023-08-10 15:31:45,712 eval_run_experiment.py:407] steps executed:    99524, num episodes:      131, episode length:      552, return:    770.0, normalized return:    0.079
+Got gin bindings:
+[]
+Sanitized gin bindings to:
+[]
+********************
+ self.target_eval_mode: False
+ self.target_action_selection: True
+ num_actions: 18
+ self.reset_target: True
+ self._num_updates_per_train_step: 1
+ self._batches_to_group: 2
+Found devices [gpu(id=0)]
+[INFO 2023-08-10 15:33:29,904 eval_run_experiment.py:492] Average undiscounted return per training episode: 859.16
+[INFO 2023-08-10 15:33:29,904 eval_run_experiment.py:494] Average normalized return per training episode: 0.09
+[INFO 2023-08-10 15:33:29,904 eval_run_experiment.py:496] Average training steps per second: 4.61
+[INFO 2023-08-10 15:34:12,941 eval_run_experiment.py:407] steps executed:    45900, num episodes:        1, episode length:      459, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 15:34:12,946 eval_run_experiment.py:407] steps executed:    45900, num episodes:        2, episode length:      459, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 15:34:18,827 eval_run_experiment.py:407] steps executed:    52074, num episodes:        3, episode length:      522, return:    680.0, normalized return:    0.066
+[INFO 2023-08-10 15:34:18,842 eval_run_experiment.py:407] steps executed:    52074, num episodes:        4, episode length:      522, return:    680.0, normalized return:    0.066
+[INFO 2023-08-10 15:34:18,846 eval_run_experiment.py:407] steps executed:    52074, num episodes:        5, episode length:      522, return:    680.0, normalized return:    0.066
+[INFO 2023-08-10 15:34:18,848 eval_run_experiment.py:407] steps executed:    52074, num episodes:        6, episode length:      522, return:    680.0, normalized return:    0.066
+[INFO 2023-08-10 15:34:18,863 eval_run_experiment.py:407] steps executed:    52074, num episodes:        7, episode length:      522, return:    680.0, normalized return:    0.066
+[INFO 2023-08-10 15:34:20,912 eval_run_experiment.py:407] steps executed:    52818, num episodes:        8, episode length:      530, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 15:34:26,232 eval_run_experiment.py:407] steps executed:    58338, num episodes:        9, episode length:      590, return:    800.0, normalized return:    0.083
+[INFO 2023-08-10 15:34:28,030 eval_run_experiment.py:407] steps executed:    58702, num episodes:       10, episode length:      594, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 15:34:28,034 eval_run_experiment.py:407] steps executed:    58702, num episodes:       11, episode length:      594, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 15:34:28,043 eval_run_experiment.py:407] steps executed:    58702, num episodes:       12, episode length:      594, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 15:34:28,052 eval_run_experiment.py:407] steps executed:    58702, num episodes:       13, episode length:      594, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 15:34:28,062 eval_run_experiment.py:407] steps executed:    58702, num episodes:       14, episode length:      594, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 15:34:28,073 eval_run_experiment.py:407] steps executed:    58702, num episodes:       15, episode length:      594, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 15:34:41,643 eval_run_experiment.py:407] steps executed:    76467, num episodes:       16, episode length:      803, return:   1400.0, normalized return:     0.17
+[INFO 2023-08-10 15:34:41,646 eval_run_experiment.py:407] steps executed:    76467, num episodes:       17, episode length:      803, return:   1400.0, normalized return:     0.17
+[INFO 2023-08-10 15:34:41,656 eval_run_experiment.py:407] steps executed:    76467, num episodes:       18, episode length:      803, return:   1400.0, normalized return:     0.17
+[INFO 2023-08-10 15:34:41,662 eval_run_experiment.py:407] steps executed:    76467, num episodes:       19, episode length:      803, return:   1400.0, normalized return:     0.17
+[INFO 2023-08-10 15:34:43,238 eval_run_experiment.py:407] steps executed:    76710, num episodes:       20, episode length:      806, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:43,246 eval_run_experiment.py:407] steps executed:    76710, num episodes:       21, episode length:      806, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:43,266 eval_run_experiment.py:407] steps executed:    76710, num episodes:       22, episode length:      806, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:43,270 eval_run_experiment.py:407] steps executed:    76710, num episodes:       23, episode length:      806, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:44,763 eval_run_experiment.py:407] steps executed:    76787, num episodes:       24, episode length:      807, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:44,772 eval_run_experiment.py:407] steps executed:    76787, num episodes:       25, episode length:      807, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:44,777 eval_run_experiment.py:407] steps executed:    76787, num episodes:       26, episode length:      807, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:46,163 eval_run_experiment.py:407] steps executed:    76861, num episodes:       27, episode length:      808, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:46,166 eval_run_experiment.py:407] steps executed:    76861, num episodes:       28, episode length:      808, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:46,171 eval_run_experiment.py:407] steps executed:    76861, num episodes:       29, episode length:      808, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:46,185 eval_run_experiment.py:407] steps executed:    76861, num episodes:       30, episode length:      808, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:47,507 eval_run_experiment.py:407] steps executed:    76931, num episodes:       31, episode length:      809, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:47,508 eval_run_experiment.py:407] steps executed:    76931, num episodes:       32, episode length:      809, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:47,516 eval_run_experiment.py:407] steps executed:    76931, num episodes:       33, episode length:      809, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:47,523 eval_run_experiment.py:407] steps executed:    76931, num episodes:       34, episode length:      809, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:47,525 eval_run_experiment.py:407] steps executed:    76931, num episodes:       35, episode length:      809, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:47,527 eval_run_experiment.py:407] steps executed:    76931, num episodes:       36, episode length:      809, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:47,533 eval_run_experiment.py:407] steps executed:    76931, num episodes:       37, episode length:      809, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:48,786 eval_run_experiment.py:407] steps executed:    76994, num episodes:       38, episode length:      810, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:48,795 eval_run_experiment.py:407] steps executed:    76994, num episodes:       39, episode length:      810, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:48,796 eval_run_experiment.py:407] steps executed:    76994, num episodes:       40, episode length:      810, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:50,020 eval_run_experiment.py:407] steps executed:    77054, num episodes:       41, episode length:      811, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:51,236 eval_run_experiment.py:407] steps executed:    77113, num episodes:       42, episode length:      812, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:52,436 eval_run_experiment.py:407] steps executed:    77171, num episodes:       43, episode length:      813, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:52,451 eval_run_experiment.py:407] steps executed:    77171, num episodes:       44, episode length:      813, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:53,618 eval_run_experiment.py:407] steps executed:    77227, num episodes:       45, episode length:      814, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:53,622 eval_run_experiment.py:407] steps executed:    77227, num episodes:       46, episode length:      814, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:53,633 eval_run_experiment.py:407] steps executed:    77227, num episodes:       47, episode length:      814, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:54,769 eval_run_experiment.py:407] steps executed:    77280, num episodes:       48, episode length:      815, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:54,777 eval_run_experiment.py:407] steps executed:    77280, num episodes:       49, episode length:      815, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:54,784 eval_run_experiment.py:407] steps executed:    77280, num episodes:       50, episode length:      815, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:54,787 eval_run_experiment.py:407] steps executed:    77280, num episodes:       51, episode length:      815, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:55,879 eval_run_experiment.py:407] steps executed:    77329, num episodes:       52, episode length:      816, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:55,889 eval_run_experiment.py:407] steps executed:    77329, num episodes:       53, episode length:      816, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:55,891 eval_run_experiment.py:407] steps executed:    77329, num episodes:       54, episode length:      816, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:55,895 eval_run_experiment.py:407] steps executed:    77329, num episodes:       55, episode length:      816, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 15:34:57,899 eval_run_experiment.py:407] steps executed:    78814, num episodes:       56, episode length:      849, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 15:34:59,082 eval_run_experiment.py:407] steps executed:    79078, num episodes:       57, episode length:      855, return:   1970.0, normalized return:    0.252
+[INFO 2023-08-10 15:34:59,085 eval_run_experiment.py:407] steps executed:    79078, num episodes:       58, episode length:      855, return:   1970.0, normalized return:    0.252
+[INFO 2023-08-10 15:34:59,088 eval_run_experiment.py:407] steps executed:    79078, num episodes:       59, episode length:      855, return:   1970.0, normalized return:    0.252
+[INFO 2023-08-10 15:34:59,093 eval_run_experiment.py:407] steps executed:    79078, num episodes:       60, episode length:      855, return:   1970.0, normalized return:    0.252
+[INFO 2023-08-10 15:34:59,095 eval_run_experiment.py:407] steps executed:    79078, num episodes:       61, episode length:      855, return:   1970.0, normalized return:    0.252
+[INFO 2023-08-10 15:35:00,516 eval_run_experiment.py:407] steps executed:    79819, num episodes:       62, episode length:      874, return:    850.0, normalized return:     0.09
+[INFO 2023-08-10 15:35:00,517 eval_run_experiment.py:407] steps executed:    79819, num episodes:       63, episode length:      874, return:    850.0, normalized return:     0.09
+[INFO 2023-08-10 15:35:00,521 eval_run_experiment.py:407] steps executed:    79819, num episodes:       64, episode length:      874, return:    850.0, normalized return:     0.09
+[INFO 2023-08-10 15:35:00,529 eval_run_experiment.py:407] steps executed:    79819, num episodes:       65, episode length:      874, return:    850.0, normalized return:     0.09
+[INFO 2023-08-10 15:35:00,531 eval_run_experiment.py:407] steps executed:    79819, num episodes:       66, episode length:      874, return:    850.0, normalized return:     0.09
+[INFO 2023-08-10 15:35:00,533 eval_run_experiment.py:407] steps executed:    79819, num episodes:       67, episode length:      874, return:    850.0, normalized return:     0.09
+[INFO 2023-08-10 15:35:01,733 eval_run_experiment.py:407] steps executed:    80281, num episodes:       68, episode length:      888, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 15:35:01,735 eval_run_experiment.py:407] steps executed:    80281, num episodes:       69, episode length:      888, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 15:35:01,736 eval_run_experiment.py:407] steps executed:    80281, num episodes:       70, episode length:      888, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 15:35:01,737 eval_run_experiment.py:407] steps executed:    80281, num episodes:       71, episode length:      888, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 15:35:01,739 eval_run_experiment.py:407] steps executed:    80281, num episodes:       72, episode length:      888, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 15:35:01,747 eval_run_experiment.py:407] steps executed:    80281, num episodes:       73, episode length:      888, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 15:35:02,975 eval_run_experiment.py:407] steps executed:    80713, num episodes:       74, episode length:      904, return:    950.0, normalized return:    0.105
+[INFO 2023-08-10 15:35:04,379 eval_run_experiment.py:407] steps executed:    81571, num episodes:       75, episode length:      937, return:   1900.0, normalized return:    0.242
+[INFO 2023-08-10 15:35:04,382 eval_run_experiment.py:407] steps executed:    81571, num episodes:       76, episode length:      937, return:   1900.0, normalized return:    0.242
+[INFO 2023-08-10 15:35:05,203 eval_run_experiment.py:407] steps executed:    81595, num episodes:       77, episode length:      938, return:    980.0, normalized return:    0.109
+[INFO 2023-08-10 15:35:05,210 eval_run_experiment.py:407] steps executed:    81595, num episodes:       78, episode length:      938, return:    980.0, normalized return:    0.109
+[INFO 2023-08-10 15:35:07,526 eval_run_experiment.py:407] steps executed:    83861, num episodes:       79, episode length:     1041, return:   1540.0, normalized return:     0.19
+[INFO 2023-08-10 15:35:07,527 eval_run_experiment.py:407] steps executed:    83861, num episodes:       80, episode length:     1041, return:   1540.0, normalized return:     0.19
+[INFO 2023-08-10 15:35:07,529 eval_run_experiment.py:407] steps executed:    83861, num episodes:       81, episode length:     1041, return:   1540.0, normalized return:     0.19
+[INFO 2023-08-10 15:35:07,532 eval_run_experiment.py:407] steps executed:    83861, num episodes:       82, episode length:     1041, return:   1540.0, normalized return:     0.19
+[INFO 2023-08-10 15:35:08,397 eval_run_experiment.py:407] steps executed:    84023, num episodes:       83, episode length:     1050, return:   1470.0, normalized return:     0.18
+[INFO 2023-08-10 15:35:09,457 eval_run_experiment.py:407] steps executed:    84499, num episodes:       84, episode length:     1078, return:   1410.0, normalized return:    0.171
+[INFO 2023-08-10 15:35:09,458 eval_run_experiment.py:407] steps executed:    84499, num episodes:       85, episode length:     1078, return:   1410.0, normalized return:    0.171
+[INFO 2023-08-10 15:35:09,459 eval_run_experiment.py:407] steps executed:    84499, num episodes:       86, episode length:     1078, return:   1410.0, normalized return:    0.171
+[INFO 2023-08-10 15:35:09,460 eval_run_experiment.py:407] steps executed:    84499, num episodes:       87, episode length:     1078, return:   1410.0, normalized return:    0.171
+[INFO 2023-08-10 15:35:09,461 eval_run_experiment.py:407] steps executed:    84499, num episodes:       88, episode length:     1078, return:   1410.0, normalized return:    0.171
+[INFO 2023-08-10 15:35:09,462 eval_run_experiment.py:407] steps executed:    84499, num episodes:       89, episode length:     1078, return:   1410.0, normalized return:    0.171
+[INFO 2023-08-10 15:35:10,347 eval_run_experiment.py:407] steps executed:    84774, num episodes:       90, episode length:     1103, return:   1020.0, normalized return:    0.115
+[INFO 2023-08-10 15:35:10,347 eval_run_experiment.py:407] steps executed:    84774, num episodes:       91, episode length:     1103, return:   1020.0, normalized return:    0.115
+[INFO 2023-08-10 15:35:10,349 eval_run_experiment.py:407] steps executed:    84774, num episodes:       92, episode length:     1103, return:   1020.0, normalized return:    0.115
+[INFO 2023-08-10 15:35:10,350 eval_run_experiment.py:407] steps executed:    84774, num episodes:       93, episode length:     1103, return:   1020.0, normalized return:    0.115
+[INFO 2023-08-10 15:35:11,084 eval_run_experiment.py:407] steps executed:    84872, num episodes:       94, episode length:     1117, return:   1520.0, normalized return:    0.187
+[INFO 2023-08-10 15:35:11,084 eval_run_experiment.py:407] steps executed:    84872, num episodes:       95, episode length:     1117, return:   1520.0, normalized return:    0.187
+[INFO 2023-08-10 15:35:11,085 eval_run_experiment.py:407] steps executed:    84872, num episodes:       96, episode length:     1117, return:   1520.0, normalized return:    0.187
+[INFO 2023-08-10 15:35:11,085 eval_run_experiment.py:407] steps executed:    84872, num episodes:       97, episode length:     1117, return:   1520.0, normalized return:    0.187
+[INFO 2023-08-10 15:35:11,085 eval_run_experiment.py:407] steps executed:    84872, num episodes:       98, episode length:     1117, return:   1520.0, normalized return:    0.187
+[INFO 2023-08-10 15:35:11,751 eval_run_experiment.py:407] steps executed:    84920, num episodes:       99, episode length:     1141, return:   1500.0, normalized return:    0.184
+[INFO 2023-08-10 15:35:11,751 eval_run_experiment.py:407] steps executed:    84920, num episodes:      100, episode length:     1141, return:   1500.0, normalized return:    0.184
+[INFO 2023-08-10 15:35:11,775 eval_run_experiment.py:533] Average undiscounted return per evaluation episode: 1064.70
+[INFO 2023-08-10 15:35:11,775 eval_run_experiment.py:540] Average normalized return per evaluation episode: 0.12
+/home/cs_faculty/lezhang.thu/bigger_better_faster/bbf/replay_memory/subsequence_replay_buffer.py:1501: FutureWarning: GzipFile was opened for writing, but this will change in future Python releases.  Specify the mode argument for opening it for writing.
+  with gzip.GzipFile(fileobj=f) as outfile:
++ for seed in 7779 7780 7999 8000
++ CUDA_VISIBLE_DEVICES=0
++ python -m bbf.train --agent=BBF --gin_files=bbf/configs/BBF.gin --base_dir=/tmp/online_rl/bbf/cuda0/7780 --run_number=0 --agent_seed=7780 --no_seeding=False
+2023-08-10 15:35:30.157094: I tensorflow/core/util/port.cc:110] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2023-08-10 15:35:30.178601: I tensorflow/core/platform/cpu_feature_guard.cc:182] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2023-08-10 15:35:30.465740: W tensorflow/compiler/tf2tensorrt/utils/py_utils.cc:38] TF-TRT Warning: Could not find TensorRT
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gin/tf/__init__.py:48: DeprecationWarning: distutils Version classes are deprecated. Use packaging.version instead.
+  if (distutils.version.LooseVersion(tf.__version__) <
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/jax/_src/pjit.py:307: DeprecationWarning: backend and device argument on jit is deprecated. You can use a `jax.sharding.Mesh` context manager or device_put the arguments before passing them to `jit`. Please see https://jax.readthedocs.io/en/latest/notebooks/Distributed_arrays_and_automatic_parallelization.html for more information.
+  warnings.warn(
+[INFO 2023-08-10 15:35:32,161 train.py:175] Setting random seed: 7780
+[INFO 2023-08-10 15:35:32,165 train.py:242] Using MaxEpisodeEvalRunner for evaluation.
+[WARNING 2023-08-10 15:35:32,165 run_experiment.py:267] DEPRECATION WARNING: Logger is being deprecated. Please switch to CollectorDispatcher!
+A.L.E: Arcade Learning Environment (version 0.7.5+db37282)
+[Powered by Stella]
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/core.py:329: DeprecationWarning: [33mWARN: Initializing wrapper in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.[0m
+  deprecation(
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/wrappers/step_api_compatibility.py:39: DeprecationWarning: [33mWARN: Initializing environment in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.[0m
+  deprecation(
+[INFO 2023-08-10 15:35:32,236 spr_agent.py:749] Creating BBFAgent agent with the following parameters:
+[INFO 2023-08-10 15:35:32,236 spr_agent.py:753] 	 double_dqn: True
+[INFO 2023-08-10 15:35:32,236 spr_agent.py:754] 	 distributional: True
+[INFO 2023-08-10 15:35:32,236 spr_agent.py:755] 	 data_augmentation: True
+[INFO 2023-08-10 15:35:32,236 spr_agent.py:756] 	 num_updates_per_train_step: 1
+[INFO 2023-08-10 15:35:32,282 xla_bridge.py:603] Unable to initialize backend 'rocm': NOT_FOUND: Could not find registered platform with name: "rocm". Available platform names are: CUDA Interpreter
+[INFO 2023-08-10 15:35:32,282 xla_bridge.py:603] Unable to initialize backend 'tpu': module 'jaxlib.xla_extension' has no attribute 'get_tpu_client'
+[INFO 2023-08-10 15:35:33,137 spr_agent.py:840] 	 Found following local devices: [gpu(id=0)]
+[INFO 2023-08-10 15:35:33,137 spr_agent.py:855] 	 Running with dtype <class 'jax.numpy.float32'>
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:278] Creating BBFAgent agent with the following parameters:
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:280] 	 gamma: 0.997000
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:281] 	 update_horizon: 10.000000
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:282] 	 min_replay_history: 2000
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:283] 	 update_period: 1
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:284] 	 target_update_period: 1
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:285] 	 epsilon_train: 0.000000
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:286] 	 epsilon_eval: 0.001000
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:287] 	 epsilon_decay_period: 2001
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:288] 	 optimizer: adam
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:289] 	 seed: 7780
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:290] 	 loss_type: mse
+[INFO 2023-08-10 15:35:33,137 dqn_agent.py:291] 	 preprocess_fn: None
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:854] Creating a PrioritizedJaxSubsequenceParallelEnvReplayBuffer replay memory with the following parameters:
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:857] 	 observation_shape: (84, 84)
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:858] 	 observation_dtype: <class 'jax.numpy.uint8'>
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:859] 	 terminal_dtype: <class 'numpy.uint8'>
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:860] 	 stack_size: 4
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:861] 	 use_next_state: 1
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:862] 	 replay_capacity: 200000
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:863] 	 batch_size: 32
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:864] 	 update_horizon: 10
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:865] 	 gamma: 0.997000
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:152] Creating a OutOfGraphReplayBuffer replay memory with the following parameters:
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:155] 	 observation_shape: (84, 84)
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:156] 	 observation_dtype: <class 'jax.numpy.uint8'>
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:157] 	 terminal_dtype: <class 'numpy.uint8'>
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:158] 	 stack_size: 4
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:159] 	 replay_capacity: 100000
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:160] 	 batch_size: 32
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:161] 	 update_horizon: 1
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:162] 	 gamma: 0.990000
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:163] 	 trajectory_value: return
+[INFO 2023-08-10 15:35:33,180 subsequence_replay_buffer.py:164] 	 replay_forgetting: default
+[INFO 2023-08-10 15:35:37,170 spr_agent.py:676] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-08-10 15:35:37,170 spr_agent.py:676] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-08-10 15:35:37,171 spr_agent.py:676] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-08-10 15:35:37,604 spr_agent.py:999] 	 Operating with 1 environments, batch size 32 and replay ratio 64
+[INFO 2023-08-10 15:35:37,604 spr_agent.py:1006] 	 Calculated 2 updates per update phase
+[INFO 2023-08-10 15:35:37,604 spr_agent.py:1010] 	 Calculated update frequency of 1 step
+[INFO 2023-08-10 15:35:37,604 spr_agent.py:1015] 	 Setting min_replay_history to 2000.0 from 2000
+[INFO 2023-08-10 15:35:37,604 spr_agent.py:1020] 	 Setting epsilon_decay_period to 2001.0 from 2001
+[INFO 2023-08-10 15:35:37,604 spr_agent.py:1040] 	 Running 1 groups of 2 batches per 1 env step
+[INFO 2023-08-10 15:35:37,605 eval_run_experiment.py:201] Num evaluation episodes: 100
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/utils/passive_env_checker.py:227: DeprecationWarning: [33mWARN: Core environment is written in old step API which returns one bool instead of two. It is recommended to rewrite the environment with new step API. [0m
+  logger.deprecation(
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/utils/passive_env_checker.py:233: DeprecationWarning: `np.bool8` is a deprecated alias for `np.bool_`.  (Deprecated NumPy 1.24)
+  if not isinstance(done, (bool, np.bool8)):
+[INFO 2023-08-10 15:35:37,819 eval_run_experiment.py:630] Beginning training...
+[INFO 2023-08-10 15:35:37,819 eval_run_experiment.py:549] Starting iteration 0
+[INFO 2023-08-10 15:35:38,797 eval_run_experiment.py:407] steps executed:      738, num episodes:        1, episode length:      738, return:    240.0, normalized return:    0.002
+[INFO 2023-08-10 15:35:39,476 eval_run_experiment.py:407] steps executed:     1271, num episodes:        2, episode length:      533, return:    150.0, normalized return:   -0.011
+[INFO 2023-08-10 15:35:40,166 eval_run_experiment.py:407] steps executed:     1821, num episodes:        3, episode length:      550, return:    170.0, normalized return:   -0.008
+[INFO 2023-08-10 15:37:17,682 eval_run_experiment.py:407] steps executed:     2401, num episodes:        4, episode length:      580, return:    300.0, normalized return:     0.01
+[INFO 2023-08-10 15:39:26,816 eval_run_experiment.py:407] steps executed:     2986, num episodes:        5, episode length:      585, return:    170.0, normalized return:   -0.008
+[INFO 2023-08-10 15:41:59,925 eval_run_experiment.py:407] steps executed:     3680, num episodes:        6, episode length:      694, return:    180.0, normalized return:   -0.007
+[INFO 2023-08-10 15:45:00,458 eval_run_experiment.py:407] steps executed:     4499, num episodes:        7, episode length:      819, return:    430.0, normalized return:    0.029
+[INFO 2023-08-10 15:47:09,166 eval_run_experiment.py:407] steps executed:     5083, num episodes:        8, episode length:      584, return:    410.0, normalized return:    0.026
+[INFO 2023-08-10 15:48:42,160 eval_run_experiment.py:407] steps executed:     5505, num episodes:        9, episode length:      422, return:    350.0, normalized return:    0.018
+[INFO 2023-08-10 15:51:49,172 eval_run_experiment.py:407] steps executed:     6354, num episodes:       10, episode length:      849, return:    400.0, normalized return:    0.025
+[INFO 2023-08-10 15:54:44,754 eval_run_experiment.py:407] steps executed:     7151, num episodes:       11, episode length:      797, return:    530.0, normalized return:    0.044
+[INFO 2023-08-10 15:56:35,066 eval_run_experiment.py:407] steps executed:     7652, num episodes:       12, episode length:      501, return:    590.0, normalized return:    0.052
+[INFO 2023-08-10 15:58:02,327 eval_run_experiment.py:407] steps executed:     8048, num episodes:       13, episode length:      396, return:    370.0, normalized return:    0.021
+[INFO 2023-08-10 15:59:58,380 eval_run_experiment.py:407] steps executed:     8575, num episodes:       14, episode length:      527, return:    510.0, normalized return:    0.041
+[INFO 2023-08-10 16:03:32,988 eval_run_experiment.py:407] steps executed:     9550, num episodes:       15, episode length:      975, return:    460.0, normalized return:    0.034
+[INFO 2023-08-10 16:06:02,154 eval_run_experiment.py:407] steps executed:    10228, num episodes:       16, episode length:      678, return:    490.0, normalized return:    0.038
+[INFO 2023-08-10 16:08:07,841 eval_run_experiment.py:407] steps executed:    10799, num episodes:       17, episode length:      571, return:    350.0, normalized return:    0.018
+[INFO 2023-08-10 16:11:24,474 eval_run_experiment.py:407] steps executed:    11692, num episodes:       18, episode length:      893, return:    490.0, normalized return:    0.038
+[INFO 2023-08-10 16:15:07,179 eval_run_experiment.py:407] steps executed:    12704, num episodes:       19, episode length:     1012, return:   1040.0, normalized return:    0.118
+[INFO 2023-08-10 16:17:27,743 eval_run_experiment.py:407] steps executed:    13343, num episodes:       20, episode length:      639, return:    730.0, normalized return:    0.073
+[INFO 2023-08-10 16:20:43,091 eval_run_experiment.py:407] steps executed:    14231, num episodes:       21, episode length:      888, return:   1110.0, normalized return:    0.128
+[INFO 2023-08-10 16:22:35,465 eval_run_experiment.py:407] steps executed:    14742, num episodes:       22, episode length:      511, return:    480.0, normalized return:    0.037
+[INFO 2023-08-10 16:24:18,161 eval_run_experiment.py:407] steps executed:    15209, num episodes:       23, episode length:      467, return:    490.0, normalized return:    0.038
+[INFO 2023-08-10 16:26:55,271 eval_run_experiment.py:407] steps executed:    15923, num episodes:       24, episode length:      714, return:    550.0, normalized return:    0.047
+[INFO 2023-08-10 16:29:16,551 eval_run_experiment.py:407] steps executed:    16565, num episodes:       25, episode length:      642, return:    480.0, normalized return:    0.037
+[INFO 2023-08-10 16:30:49,859 eval_run_experiment.py:407] steps executed:    16989, num episodes:       26, episode length:      424, return:    410.0, normalized return:    0.026
+[INFO 2023-08-10 16:33:53,182 eval_run_experiment.py:407] steps executed:    17822, num episodes:       27, episode length:      833, return:    570.0, normalized return:     0.05
+[INFO 2023-08-10 16:35:52,460 eval_run_experiment.py:407] steps executed:    18364, num episodes:       28, episode length:      542, return:    570.0, normalized return:     0.05
+[INFO 2023-08-10 16:38:24,875 eval_run_experiment.py:407] steps executed:    19057, num episodes:       29, episode length:      693, return:    630.0, normalized return:    0.058
+[INFO 2023-08-10 16:41:52,897 spr_agent.py:1114] 	 Resetting weights at step 20002.
+[INFO 2023-08-10 16:41:53,989 spr_agent.py:1153] Running 0 gradient steps after reset
+[INFO 2023-08-10 16:42:04,769 eval_run_experiment.py:407] steps executed:    20052, num episodes:       30, episode length:      995, return:    530.0, normalized return:    0.044
+[INFO 2023-08-10 16:44:23,192 eval_run_experiment.py:407] steps executed:    20679, num episodes:       31, episode length:      627, return:    140.0, normalized return:   -0.013
+[INFO 2023-08-10 16:46:17,719 eval_run_experiment.py:407] steps executed:    21197, num episodes:       32, episode length:      518, return:    140.0, normalized return:   -0.013
+[INFO 2023-08-10 16:48:20,164 eval_run_experiment.py:407] steps executed:    21751, num episodes:       33, episode length:      554, return:    380.0, normalized return:    0.022
+[INFO 2023-08-10 16:51:37,156 eval_run_experiment.py:407] steps executed:    22643, num episodes:       34, episode length:      892, return:    320.0, normalized return:    0.013
+[INFO 2023-08-10 16:53:27,997 eval_run_experiment.py:407] steps executed:    23145, num episodes:       35, episode length:      502, return:    520.0, normalized return:    0.042
+[INFO 2023-08-10 16:55:45,759 eval_run_experiment.py:407] steps executed:    23769, num episodes:       36, episode length:      624, return:    570.0, normalized return:     0.05
+[INFO 2023-08-10 16:57:43,911 eval_run_experiment.py:407] steps executed:    24304, num episodes:       37, episode length:      535, return:    540.0, normalized return:    0.045
+[INFO 2023-08-10 17:01:11,986 eval_run_experiment.py:407] steps executed:    25247, num episodes:       38, episode length:      943, return:    610.0, normalized return:    0.055
+[INFO 2023-08-10 17:03:59,228 eval_run_experiment.py:407] steps executed:    26005, num episodes:       39, episode length:      758, return:    650.0, normalized return:    0.061
+[INFO 2023-08-10 17:06:10,974 eval_run_experiment.py:407] steps executed:    26602, num episodes:       40, episode length:      597, return:    480.0, normalized return:    0.037
+[INFO 2023-08-10 17:09:56,498 eval_run_experiment.py:407] steps executed:    27624, num episodes:       41, episode length:     1022, return:    760.0, normalized return:    0.077
+[INFO 2023-08-10 17:12:02,838 eval_run_experiment.py:407] steps executed:    28196, num episodes:       42, episode length:      572, return:    450.0, normalized return:    0.032
+[INFO 2023-08-10 17:13:42,291 eval_run_experiment.py:407] steps executed:    28647, num episodes:       43, episode length:      451, return:    530.0, normalized return:    0.044
+[INFO 2023-08-10 17:16:26,221 eval_run_experiment.py:407] steps executed:    29390, num episodes:       44, episode length:      743, return:   1740.0, normalized return:    0.219
+[INFO 2023-08-10 17:18:56,861 eval_run_experiment.py:407] steps executed:    30073, num episodes:       45, episode length:      683, return:   1280.0, normalized return:    0.152
+[INFO 2023-08-10 17:22:35,328 eval_run_experiment.py:407] steps executed:    31064, num episodes:       46, episode length:      991, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 17:24:27,732 eval_run_experiment.py:407] steps executed:    31574, num episodes:       47, episode length:      510, return:    480.0, normalized return:    0.037
+[INFO 2023-08-10 17:27:45,315 eval_run_experiment.py:407] steps executed:    32470, num episodes:       48, episode length:      896, return:    840.0, normalized return:    0.089
+[INFO 2023-08-10 17:29:56,268 eval_run_experiment.py:407] steps executed:    33064, num episodes:       49, episode length:      594, return:    500.0, normalized return:    0.039
+[INFO 2023-08-10 17:32:33,327 eval_run_experiment.py:407] steps executed:    33776, num episodes:       50, episode length:      712, return:    520.0, normalized return:    0.042
+[INFO 2023-08-10 17:34:07,007 eval_run_experiment.py:407] steps executed:    34201, num episodes:       51, episode length:      425, return:    390.0, normalized return:    0.024
+[INFO 2023-08-10 17:36:19,334 eval_run_experiment.py:407] steps executed:    34801, num episodes:       52, episode length:      600, return:    380.0, normalized return:    0.022
+[INFO 2023-08-10 17:38:02,287 eval_run_experiment.py:407] steps executed:    35268, num episodes:       53, episode length:      467, return:    530.0, normalized return:    0.044
+[INFO 2023-08-10 17:40:54,694 eval_run_experiment.py:407] steps executed:    36050, num episodes:       54, episode length:      782, return:    700.0, normalized return:    0.068
+[INFO 2023-08-10 17:44:06,229 eval_run_experiment.py:407] steps executed:    36919, num episodes:       55, episode length:      869, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 17:46:43,809 eval_run_experiment.py:407] steps executed:    37634, num episodes:       56, episode length:      715, return:    750.0, normalized return:    0.076
+[INFO 2023-08-10 17:49:27,142 eval_run_experiment.py:407] steps executed:    38375, num episodes:       57, episode length:      741, return:    500.0, normalized return:    0.039
+[INFO 2023-08-10 17:51:25,523 eval_run_experiment.py:407] steps executed:    38912, num episodes:       58, episode length:      537, return:    360.0, normalized return:    0.019
+[INFO 2023-08-10 17:54:26,493 eval_run_experiment.py:407] steps executed:    39733, num episodes:       59, episode length:      821, return:    640.0, normalized return:     0.06
+[INFO 2023-08-10 17:55:26,284 spr_agent.py:1114] 	 Resetting weights at step 40003.
+[INFO 2023-08-10 17:55:26,287 spr_agent.py:1153] Running 0 gradient steps after reset
+[INFO 2023-08-10 17:57:03,545 eval_run_experiment.py:407] steps executed:    40445, num episodes:       60, episode length:      712, return:    310.0, normalized return:    0.012
+[INFO 2023-08-10 17:59:26,203 eval_run_experiment.py:407] steps executed:    41091, num episodes:       61, episode length:      646, return:    390.0, normalized return:    0.024
+[INFO 2023-08-10 18:01:44,253 eval_run_experiment.py:407] steps executed:    41716, num episodes:       62, episode length:      625, return:    430.0, normalized return:    0.029
+[INFO 2023-08-10 18:03:47,701 eval_run_experiment.py:407] steps executed:    42275, num episodes:       63, episode length:      559, return:    410.0, normalized return:    0.026
+[INFO 2023-08-10 18:06:04,727 eval_run_experiment.py:407] steps executed:    42896, num episodes:       64, episode length:      621, return:    460.0, normalized return:    0.034
+[INFO 2023-08-10 18:08:43,168 eval_run_experiment.py:407] steps executed:    43614, num episodes:       65, episode length:      718, return:   1230.0, normalized return:    0.145
+[INFO 2023-08-10 18:10:41,971 eval_run_experiment.py:407] steps executed:    44152, num episodes:       66, episode length:      538, return:    500.0, normalized return:    0.039
+[INFO 2023-08-10 18:12:59,815 eval_run_experiment.py:407] steps executed:    44777, num episodes:       67, episode length:      625, return:    730.0, normalized return:    0.073
+[INFO 2023-08-10 18:15:40,622 eval_run_experiment.py:407] steps executed:    45506, num episodes:       68, episode length:      729, return:    630.0, normalized return:    0.058
+[INFO 2023-08-10 18:18:58,010 eval_run_experiment.py:407] steps executed:    46401, num episodes:       69, episode length:      895, return:    740.0, normalized return:    0.074
+[INFO 2023-08-10 18:22:04,353 eval_run_experiment.py:407] steps executed:    47246, num episodes:       70, episode length:      845, return:   1330.0, normalized return:     0.16
+[INFO 2023-08-10 18:24:28,130 eval_run_experiment.py:407] steps executed:    47898, num episodes:       71, episode length:      652, return:    590.0, normalized return:    0.052
+[INFO 2023-08-10 18:26:19,930 eval_run_experiment.py:407] steps executed:    48405, num episodes:       72, episode length:      507, return:    490.0, normalized return:    0.038
+[INFO 2023-08-10 18:29:57,130 eval_run_experiment.py:407] steps executed:    49390, num episodes:       73, episode length:      985, return:    780.0, normalized return:     0.08
+[INFO 2023-08-10 18:33:16,032 eval_run_experiment.py:407] steps executed:    50292, num episodes:       74, episode length:      902, return:    760.0, normalized return:    0.077
+[INFO 2023-08-10 18:35:58,929 eval_run_experiment.py:407] steps executed:    51031, num episodes:       75, episode length:      739, return:    640.0, normalized return:     0.06
+[INFO 2023-08-10 18:37:53,603 eval_run_experiment.py:407] steps executed:    51551, num episodes:       76, episode length:      520, return:    600.0, normalized return:    0.054
+[INFO 2023-08-10 18:40:04,132 eval_run_experiment.py:407] steps executed:    52143, num episodes:       77, episode length:      592, return:    670.0, normalized return:    0.064
+[INFO 2023-08-10 18:42:57,848 eval_run_experiment.py:407] steps executed:    52931, num episodes:       78, episode length:      788, return:   1320.0, normalized return:    0.158
+[INFO 2023-08-10 18:46:34,141 eval_run_experiment.py:407] steps executed:    53912, num episodes:       79, episode length:      981, return:    940.0, normalized return:    0.103
+[INFO 2023-08-10 18:49:30,322 eval_run_experiment.py:407] steps executed:    54711, num episodes:       80, episode length:      799, return:   1380.0, normalized return:    0.167
+[INFO 2023-08-10 18:52:30,899 eval_run_experiment.py:407] steps executed:    55530, num episodes:       81, episode length:      819, return:    700.0, normalized return:    0.068
+[INFO 2023-08-10 18:54:25,934 eval_run_experiment.py:407] steps executed:    56052, num episodes:       82, episode length:      522, return:    770.0, normalized return:    0.079
+[INFO 2023-08-10 18:57:26,059 eval_run_experiment.py:407] steps executed:    56869, num episodes:       83, episode length:      817, return:    880.0, normalized return:    0.095
+[INFO 2023-08-10 19:00:46,014 eval_run_experiment.py:407] steps executed:    57776, num episodes:       84, episode length:      907, return:    770.0, normalized return:    0.079
+[INFO 2023-08-10 19:02:36,623 eval_run_experiment.py:407] steps executed:    58278, num episodes:       85, episode length:      502, return:    560.0, normalized return:    0.048
+[INFO 2023-08-10 19:05:02,115 eval_run_experiment.py:407] steps executed:    58938, num episodes:       86, episode length:      660, return:    680.0, normalized return:    0.066
+[INFO 2023-08-10 19:07:36,606 eval_run_experiment.py:407] steps executed:    59639, num episodes:       87, episode length:      701, return:    680.0, normalized return:    0.066
+[INFO 2023-08-10 19:08:57,296 spr_agent.py:1114] 	 Resetting weights at step 60004.
+[INFO 2023-08-10 19:08:57,300 spr_agent.py:1153] Running 0 gradient steps after reset
+[INFO 2023-08-10 19:10:37,953 eval_run_experiment.py:407] steps executed:    60462, num episodes:       88, episode length:      823, return:    700.0, normalized return:    0.068
+[INFO 2023-08-10 19:13:04,944 eval_run_experiment.py:407] steps executed:    61128, num episodes:       89, episode length:      666, return:    140.0, normalized return:   -0.013
+[INFO 2023-08-10 19:14:57,064 eval_run_experiment.py:407] steps executed:    61636, num episodes:       90, episode length:      508, return:    210.0, normalized return:   -0.003
+[INFO 2023-08-10 19:16:27,165 eval_run_experiment.py:407] steps executed:    62044, num episodes:       91, episode length:      408, return:    560.0, normalized return:    0.048
+[INFO 2023-08-10 19:18:52,782 eval_run_experiment.py:407] steps executed:    62704, num episodes:       92, episode length:      660, return:   1210.0, normalized return:    0.142
+[INFO 2023-08-10 19:21:21,799 eval_run_experiment.py:407] steps executed:    63379, num episodes:       93, episode length:      675, return:    620.0, normalized return:    0.057
+[INFO 2023-08-10 19:24:08,381 eval_run_experiment.py:407] steps executed:    64134, num episodes:       94, episode length:      755, return:    720.0, normalized return:    0.071
+[INFO 2023-08-10 19:26:47,002 eval_run_experiment.py:407] steps executed:    64853, num episodes:       95, episode length:      719, return:    600.0, normalized return:    0.054
+[INFO 2023-08-10 19:28:41,469 eval_run_experiment.py:407] steps executed:    65372, num episodes:       96, episode length:      519, return:    640.0, normalized return:     0.06
+[INFO 2023-08-10 19:30:29,270 eval_run_experiment.py:407] steps executed:    65861, num episodes:       97, episode length:      489, return:    460.0, normalized return:    0.034
+[INFO 2023-08-10 19:33:18,354 eval_run_experiment.py:407] steps executed:    66628, num episodes:       98, episode length:      767, return:    710.0, normalized return:     0.07
+[INFO 2023-08-10 19:35:30,644 eval_run_experiment.py:407] steps executed:    67228, num episodes:       99, episode length:      600, return:    620.0, normalized return:    0.057
+[INFO 2023-08-10 19:38:12,704 eval_run_experiment.py:407] steps executed:    67963, num episodes:      100, episode length:      735, return:    560.0, normalized return:    0.048
+[INFO 2023-08-10 19:41:20,957 eval_run_experiment.py:407] steps executed:    68817, num episodes:      101, episode length:      854, return:    830.0, normalized return:    0.087
+[INFO 2023-08-10 19:45:12,738 eval_run_experiment.py:407] steps executed:    69868, num episodes:      102, episode length:     1051, return:   1370.0, normalized return:    0.166
+[INFO 2023-08-10 19:47:40,705 eval_run_experiment.py:407] steps executed:    70539, num episodes:      103, episode length:      671, return:    700.0, normalized return:    0.068
+[INFO 2023-08-10 19:49:23,938 eval_run_experiment.py:407] steps executed:    71007, num episodes:      104, episode length:      468, return:    630.0, normalized return:    0.058
+[INFO 2023-08-10 19:52:23,231 eval_run_experiment.py:407] steps executed:    71820, num episodes:      105, episode length:      813, return:    810.0, normalized return:    0.084
+[INFO 2023-08-10 19:55:11,444 eval_run_experiment.py:407] steps executed:    72583, num episodes:      106, episode length:      763, return:    830.0, normalized return:    0.087
+[INFO 2023-08-10 19:57:49,886 eval_run_experiment.py:407] steps executed:    73302, num episodes:      107, episode length:      719, return:    840.0, normalized return:    0.089
+[INFO 2023-08-10 20:00:32,586 eval_run_experiment.py:407] steps executed:    74040, num episodes:      108, episode length:      738, return:   1410.0, normalized return:    0.171
+[INFO 2023-08-10 20:03:01,862 eval_run_experiment.py:407] steps executed:    74717, num episodes:      109, episode length:      677, return:    650.0, normalized return:    0.061
+[INFO 2023-08-10 20:06:14,582 eval_run_experiment.py:407] steps executed:    75591, num episodes:      110, episode length:      874, return:   2400.0, normalized return:    0.315
+[INFO 2023-08-10 20:09:37,883 eval_run_experiment.py:407] steps executed:    76513, num episodes:      111, episode length:      922, return:    850.0, normalized return:     0.09
+[INFO 2023-08-10 20:12:01,163 eval_run_experiment.py:407] steps executed:    77163, num episodes:      112, episode length:      650, return:    730.0, normalized return:    0.073
+[INFO 2023-08-10 20:14:46,745 eval_run_experiment.py:407] steps executed:    77914, num episodes:      113, episode length:      751, return:    750.0, normalized return:    0.076
+[INFO 2023-08-10 20:16:18,449 eval_run_experiment.py:407] steps executed:    78330, num episodes:      114, episode length:      416, return:    650.0, normalized return:    0.061
+[INFO 2023-08-10 20:19:31,247 eval_run_experiment.py:407] steps executed:    79205, num episodes:      115, episode length:      875, return:    960.0, normalized return:    0.106
+[INFO 2023-08-10 20:22:27,719 spr_agent.py:1108] 	 Not resetting at step 80005, as need at least 20000 before 100000 to recover.
+[INFO 2023-08-10 20:22:37,179 eval_run_experiment.py:407] steps executed:    80049, num episodes:      116, episode length:      844, return:    910.0, normalized return:    0.099
+[INFO 2023-08-10 20:25:53,564 eval_run_experiment.py:407] steps executed:    80940, num episodes:      117, episode length:      891, return:   1430.0, normalized return:    0.174
+[INFO 2023-08-10 20:27:50,856 eval_run_experiment.py:407] steps executed:    81472, num episodes:      118, episode length:      532, return:    770.0, normalized return:    0.079
+[INFO 2023-08-10 20:30:50,744 eval_run_experiment.py:407] steps executed:    82288, num episodes:      119, episode length:      816, return:    840.0, normalized return:    0.089
+[INFO 2023-08-10 20:32:35,660 eval_run_experiment.py:407] steps executed:    82764, num episodes:      120, episode length:      476, return:    700.0, normalized return:    0.068
+[INFO 2023-08-10 20:35:27,741 eval_run_experiment.py:407] steps executed:    83545, num episodes:      121, episode length:      781, return:    810.0, normalized return:    0.084
+[INFO 2023-08-10 20:38:09,074 eval_run_experiment.py:407] steps executed:    84277, num episodes:      122, episode length:      732, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 20:40:01,480 eval_run_experiment.py:407] steps executed:    84787, num episodes:      123, episode length:      510, return:    780.0, normalized return:     0.08
+[INFO 2023-08-10 20:42:55,541 eval_run_experiment.py:407] steps executed:    85577, num episodes:      124, episode length:      790, return:    880.0, normalized return:    0.095
+[INFO 2023-08-10 20:45:28,905 eval_run_experiment.py:407] steps executed:    86273, num episodes:      125, episode length:      696, return:    860.0, normalized return:    0.092
+[INFO 2023-08-10 20:47:56,270 eval_run_experiment.py:407] steps executed:    86942, num episodes:      126, episode length:      669, return:   1300.0, normalized return:    0.155
+[INFO 2023-08-10 20:51:22,941 eval_run_experiment.py:407] steps executed:    87880, num episodes:      127, episode length:      938, return:    880.0, normalized return:    0.095
+[INFO 2023-08-10 20:53:48,569 eval_run_experiment.py:407] steps executed:    88541, num episodes:      128, episode length:      661, return:    830.0, normalized return:    0.087
+[INFO 2023-08-10 20:57:07,099 eval_run_experiment.py:407] steps executed:    89442, num episodes:      129, episode length:      901, return:    890.0, normalized return:    0.096
+[INFO 2023-08-10 21:00:21,463 eval_run_experiment.py:407] steps executed:    90324, num episodes:      130, episode length:      882, return:    810.0, normalized return:    0.084
+[INFO 2023-08-10 21:04:16,124 eval_run_experiment.py:407] steps executed:    91389, num episodes:      131, episode length:     1065, return:   1000.0, normalized return:    0.112
+[INFO 2023-08-10 21:06:47,995 eval_run_experiment.py:407] steps executed:    92078, num episodes:      132, episode length:      689, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 21:10:03,028 eval_run_experiment.py:407] steps executed:    92963, num episodes:      133, episode length:      885, return:   2460.0, normalized return:    0.324
+[INFO 2023-08-10 21:12:46,671 eval_run_experiment.py:407] steps executed:    93706, num episodes:      134, episode length:      743, return:    820.0, normalized return:    0.086
+[INFO 2023-08-10 21:15:29,662 eval_run_experiment.py:407] steps executed:    94446, num episodes:      135, episode length:      740, return:    810.0, normalized return:    0.084
+[INFO 2023-08-10 21:19:06,913 eval_run_experiment.py:407] steps executed:    95432, num episodes:      136, episode length:      986, return:   1470.0, normalized return:     0.18
+[INFO 2023-08-10 21:22:27,770 eval_run_experiment.py:407] steps executed:    96344, num episodes:      137, episode length:      912, return:    950.0, normalized return:    0.105
+[INFO 2023-08-10 21:25:32,514 eval_run_experiment.py:407] steps executed:    97182, num episodes:      138, episode length:      838, return:   1330.0, normalized return:     0.16
+[INFO 2023-08-10 21:28:10,707 eval_run_experiment.py:407] steps executed:    97900, num episodes:      139, episode length:      718, return:    790.0, normalized return:    0.081
+[INFO 2023-08-10 21:31:03,336 eval_run_experiment.py:407] steps executed:    98686, num episodes:      140, episode length:      786, return:   1360.0, normalized return:    0.164
+[INFO 2023-08-10 21:34:08,851 eval_run_experiment.py:407] steps executed:    99534, num episodes:      141, episode length:      848, return:    790.0, normalized return:    0.081
+Got gin bindings:
+[]
+Sanitized gin bindings to:
+[]
+********************
+ self.target_eval_mode: False
+ self.target_action_selection: True
+ num_actions: 18
+ self.reset_target: True
+ self._num_updates_per_train_step: 1
+ self._batches_to_group: 2
+Found devices [gpu(id=0)]
+[INFO 2023-08-10 21:35:50,999 eval_run_experiment.py:492] Average undiscounted return per training episode: 709.65
+[INFO 2023-08-10 21:35:50,999 eval_run_experiment.py:494] Average normalized return per training episode: 0.07
+[INFO 2023-08-10 21:35:50,999 eval_run_experiment.py:496] Average training steps per second: 4.61
+[INFO 2023-08-10 21:36:41,089 eval_run_experiment.py:407] steps executed:    55000, num episodes:        1, episode length:      550, return:   1160.0, normalized return:    0.135
+[INFO 2023-08-10 21:36:41,111 eval_run_experiment.py:407] steps executed:    55000, num episodes:        2, episode length:      550, return:   1160.0, normalized return:    0.135
+[INFO 2023-08-10 21:36:41,125 eval_run_experiment.py:407] steps executed:    55000, num episodes:        3, episode length:      550, return:   1160.0, normalized return:    0.135
+[INFO 2023-08-10 21:36:43,239 eval_run_experiment.py:407] steps executed:    55776, num episodes:        4, episode length:      558, return:    640.0, normalized return:     0.06
+[INFO 2023-08-10 21:36:46,396 eval_run_experiment.py:407] steps executed:    58176, num episodes:        5, episode length:      583, return:    810.0, normalized return:    0.084
+[INFO 2023-08-10 21:36:46,411 eval_run_experiment.py:407] steps executed:    58176, num episodes:        6, episode length:      583, return:    810.0, normalized return:    0.084
+[INFO 2023-08-10 21:36:46,419 eval_run_experiment.py:407] steps executed:    58176, num episodes:        7, episode length:      583, return:    810.0, normalized return:    0.084
+[INFO 2023-08-10 21:36:49,080 eval_run_experiment.py:407] steps executed:    59850, num episodes:        8, episode length:      601, return:    610.0, normalized return:    0.055
+[INFO 2023-08-10 21:36:49,091 eval_run_experiment.py:407] steps executed:    59850, num episodes:        9, episode length:      601, return:    610.0, normalized return:    0.055
+[INFO 2023-08-10 21:36:49,102 eval_run_experiment.py:407] steps executed:    59850, num episodes:       10, episode length:      601, return:    610.0, normalized return:    0.055
+[INFO 2023-08-10 21:36:49,106 eval_run_experiment.py:407] steps executed:    59850, num episodes:       11, episode length:      601, return:    610.0, normalized return:    0.055
+[INFO 2023-08-10 21:36:49,109 eval_run_experiment.py:407] steps executed:    59850, num episodes:       12, episode length:      601, return:    610.0, normalized return:    0.055
+[INFO 2023-08-10 21:36:51,837 eval_run_experiment.py:407] steps executed:    61786, num episodes:       13, episode length:      623, return:    700.0, normalized return:    0.068
+[INFO 2023-08-10 21:36:51,847 eval_run_experiment.py:407] steps executed:    61786, num episodes:       14, episode length:      623, return:    700.0, normalized return:    0.068
+[INFO 2023-08-10 21:36:51,863 eval_run_experiment.py:407] steps executed:    61786, num episodes:       15, episode length:      623, return:    700.0, normalized return:    0.068
+[INFO 2023-08-10 21:36:51,865 eval_run_experiment.py:407] steps executed:    61786, num episodes:       16, episode length:      623, return:    700.0, normalized return:    0.068
+[INFO 2023-08-10 21:36:51,873 eval_run_experiment.py:407] steps executed:    61786, num episodes:       17, episode length:      623, return:    700.0, normalized return:    0.068
+[INFO 2023-08-10 21:36:53,901 eval_run_experiment.py:407] steps executed:    62699, num episodes:       18, episode length:      634, return:    810.0, normalized return:    0.084
+[INFO 2023-08-10 21:36:56,245 eval_run_experiment.py:407] steps executed:    64093, num episodes:       19, episode length:      651, return:    770.0, normalized return:    0.079
+[INFO 2023-08-10 21:36:58,176 eval_run_experiment.py:407] steps executed:    64741, num episodes:       20, episode length:      659, return:    890.0, normalized return:    0.096
+[INFO 2023-08-10 21:36:58,188 eval_run_experiment.py:407] steps executed:    64741, num episodes:       21, episode length:      659, return:    890.0, normalized return:    0.096
+[INFO 2023-08-10 21:36:58,196 eval_run_experiment.py:407] steps executed:    64741, num episodes:       22, episode length:      659, return:    890.0, normalized return:    0.096
+[INFO 2023-08-10 21:36:58,201 eval_run_experiment.py:407] steps executed:    64741, num episodes:       23, episode length:      659, return:    890.0, normalized return:    0.096
+[INFO 2023-08-10 21:36:58,203 eval_run_experiment.py:407] steps executed:    64741, num episodes:       24, episode length:      659, return:    890.0, normalized return:    0.096
+[INFO 2023-08-10 21:36:58,214 eval_run_experiment.py:407] steps executed:    64741, num episodes:       25, episode length:      659, return:    890.0, normalized return:    0.096
+[INFO 2023-08-10 21:37:00,625 eval_run_experiment.py:407] steps executed:    66391, num episodes:       26, episode length:      681, return:    830.0, normalized return:    0.087
+[INFO 2023-08-10 21:37:00,639 eval_run_experiment.py:407] steps executed:    66391, num episodes:       27, episode length:      681, return:    830.0, normalized return:    0.087
+[INFO 2023-08-10 21:37:00,642 eval_run_experiment.py:407] steps executed:    66391, num episodes:       28, episode length:      681, return:    830.0, normalized return:    0.087
+[INFO 2023-08-10 21:37:00,647 eval_run_experiment.py:407] steps executed:    66391, num episodes:       29, episode length:      681, return:    830.0, normalized return:    0.087
+[INFO 2023-08-10 21:37:00,656 eval_run_experiment.py:407] steps executed:    66391, num episodes:       30, episode length:      681, return:    830.0, normalized return:    0.087
+[INFO 2023-08-10 21:37:03,331 eval_run_experiment.py:407] steps executed:    68491, num episodes:       31, episode length:      711, return:    790.0, normalized return:    0.081
+[INFO 2023-08-10 21:37:04,977 eval_run_experiment.py:407] steps executed:    69043, num episodes:       32, episode length:      719, return:   1850.0, normalized return:    0.235
+[INFO 2023-08-10 21:37:04,992 eval_run_experiment.py:407] steps executed:    69043, num episodes:       33, episode length:      719, return:   1850.0, normalized return:    0.235
+[INFO 2023-08-10 21:37:06,329 eval_run_experiment.py:407] steps executed:    69177, num episodes:       34, episode length:      721, return:    640.0, normalized return:     0.06
+[INFO 2023-08-10 21:37:06,345 eval_run_experiment.py:407] steps executed:    69177, num episodes:       35, episode length:      721, return:    640.0, normalized return:     0.06
+[INFO 2023-08-10 21:37:06,350 eval_run_experiment.py:407] steps executed:    69177, num episodes:       36, episode length:      721, return:    640.0, normalized return:     0.06
+[INFO 2023-08-10 21:37:06,353 eval_run_experiment.py:407] steps executed:    69177, num episodes:       37, episode length:      721, return:    640.0, normalized return:     0.06
+[INFO 2023-08-10 21:37:08,008 eval_run_experiment.py:407] steps executed:    69870, num episodes:       38, episode length:      732, return:    730.0, normalized return:    0.073
+[INFO 2023-08-10 21:37:08,012 eval_run_experiment.py:407] steps executed:    69870, num episodes:       39, episode length:      732, return:    730.0, normalized return:    0.073
+[INFO 2023-08-10 21:37:08,015 eval_run_experiment.py:407] steps executed:    69870, num episodes:       40, episode length:      732, return:    730.0, normalized return:    0.073
+[INFO 2023-08-10 21:37:08,021 eval_run_experiment.py:407] steps executed:    69870, num episodes:       41, episode length:      732, return:    730.0, normalized return:    0.073
+[INFO 2023-08-10 21:37:08,025 eval_run_experiment.py:407] steps executed:    69870, num episodes:       42, episode length:      732, return:    730.0, normalized return:    0.073
+[INFO 2023-08-10 21:37:08,032 eval_run_experiment.py:407] steps executed:    69870, num episodes:       43, episode length:      732, return:    730.0, normalized return:    0.073
+[INFO 2023-08-10 21:37:09,318 eval_run_experiment.py:407] steps executed:    70098, num episodes:       44, episode length:      736, return:   1200.0, normalized return:    0.141
+[INFO 2023-08-10 21:37:09,324 eval_run_experiment.py:407] steps executed:    70098, num episodes:       45, episode length:      736, return:   1200.0, normalized return:    0.141
+[INFO 2023-08-10 21:37:09,330 eval_run_experiment.py:407] steps executed:    70098, num episodes:       46, episode length:      736, return:   1200.0, normalized return:    0.141
+[INFO 2023-08-10 21:37:09,333 eval_run_experiment.py:407] steps executed:    70098, num episodes:       47, episode length:      736, return:   1200.0, normalized return:    0.141
+[INFO 2023-08-10 21:37:09,337 eval_run_experiment.py:407] steps executed:    70098, num episodes:       48, episode length:      736, return:   1200.0, normalized return:    0.141
+[INFO 2023-08-10 21:37:10,722 eval_run_experiment.py:407] steps executed:    70566, num episodes:       49, episode length:      745, return:    900.0, normalized return:    0.097
+[INFO 2023-08-10 21:37:10,723 eval_run_experiment.py:407] steps executed:    70566, num episodes:       50, episode length:      745, return:    900.0, normalized return:    0.097
+[INFO 2023-08-10 21:37:10,729 eval_run_experiment.py:407] steps executed:    70566, num episodes:       51, episode length:      745, return:    900.0, normalized return:    0.097
+[INFO 2023-08-10 21:37:10,733 eval_run_experiment.py:407] steps executed:    70566, num episodes:       52, episode length:      745, return:    900.0, normalized return:    0.097
+[INFO 2023-08-10 21:37:10,734 eval_run_experiment.py:407] steps executed:    70566, num episodes:       53, episode length:      745, return:    900.0, normalized return:    0.097
+[INFO 2023-08-10 21:37:10,740 eval_run_experiment.py:407] steps executed:    70566, num episodes:       54, episode length:      745, return:    900.0, normalized return:    0.097
+[INFO 2023-08-10 21:37:11,829 eval_run_experiment.py:407] steps executed:    70658, num episodes:       55, episode length:      747, return:    630.0, normalized return:    0.058
+[INFO 2023-08-10 21:37:13,660 eval_run_experiment.py:407] steps executed:    71873, num episodes:       56, episode length:      774, return:    800.0, normalized return:    0.083
+[INFO 2023-08-10 21:37:13,661 eval_run_experiment.py:407] steps executed:    71873, num episodes:       57, episode length:      774, return:    800.0, normalized return:    0.083
+[INFO 2023-08-10 21:37:13,668 eval_run_experiment.py:407] steps executed:    71873, num episodes:       58, episode length:      774, return:    800.0, normalized return:    0.083
+[INFO 2023-08-10 21:37:14,776 eval_run_experiment.py:407] steps executed:    72041, num episodes:       59, episode length:      778, return:   1250.0, normalized return:    0.148
+[INFO 2023-08-10 21:37:15,955 eval_run_experiment.py:407] steps executed:    72328, num episodes:       60, episode length:      785, return:   1350.0, normalized return:    0.163
+[INFO 2023-08-10 21:37:15,956 eval_run_experiment.py:407] steps executed:    72328, num episodes:       61, episode length:      785, return:   1350.0, normalized return:    0.163
+[INFO 2023-08-10 21:37:15,968 eval_run_experiment.py:407] steps executed:    72328, num episodes:       62, episode length:      785, return:   1350.0, normalized return:    0.163
+[INFO 2023-08-10 21:37:17,345 eval_run_experiment.py:407] steps executed:    72974, num episodes:       63, episode length:      802, return:    910.0, normalized return:    0.099
+[INFO 2023-08-10 21:37:17,349 eval_run_experiment.py:407] steps executed:    72974, num episodes:       64, episode length:      802, return:    910.0, normalized return:    0.099
+[INFO 2023-08-10 21:37:18,532 eval_run_experiment.py:407] steps executed:    73370, num episodes:       65, episode length:      813, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 21:37:18,537 eval_run_experiment.py:407] steps executed:    73370, num episodes:       66, episode length:      813, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 21:37:18,539 eval_run_experiment.py:407] steps executed:    73370, num episodes:       67, episode length:      813, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 21:37:18,540 eval_run_experiment.py:407] steps executed:    73370, num episodes:       68, episode length:      813, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 21:37:18,544 eval_run_experiment.py:407] steps executed:    73370, num episodes:       69, episode length:      813, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 21:37:18,546 eval_run_experiment.py:407] steps executed:    73370, num episodes:       70, episode length:      813, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 21:37:18,548 eval_run_experiment.py:407] steps executed:    73370, num episodes:       71, episode length:      813, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 21:37:19,525 eval_run_experiment.py:407] steps executed:    73399, num episodes:       72, episode length:      814, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 21:37:19,531 eval_run_experiment.py:407] steps executed:    73399, num episodes:       73, episode length:      814, return:    920.0, normalized return:      0.1
+[INFO 2023-08-10 21:37:22,049 eval_run_experiment.py:407] steps executed:    76018, num episodes:       74, episode length:      911, return:   1330.0, normalized return:     0.16
+[INFO 2023-08-10 21:37:22,050 eval_run_experiment.py:407] steps executed:    76018, num episodes:       75, episode length:      911, return:   1330.0, normalized return:     0.16
+[INFO 2023-08-10 21:37:22,051 eval_run_experiment.py:407] steps executed:    76018, num episodes:       76, episode length:      911, return:   1330.0, normalized return:     0.16
+[INFO 2023-08-10 21:37:22,059 eval_run_experiment.py:407] steps executed:    76018, num episodes:       77, episode length:      911, return:   1330.0, normalized return:     0.16
+[INFO 2023-08-10 21:37:23,392 eval_run_experiment.py:407] steps executed:    76731, num episodes:       78, episode length:      942, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 21:37:23,396 eval_run_experiment.py:407] steps executed:    76731, num episodes:       79, episode length:      942, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 21:37:23,398 eval_run_experiment.py:407] steps executed:    76731, num episodes:       80, episode length:      942, return:    870.0, normalized return:    0.093
+[INFO 2023-08-10 21:37:24,690 eval_run_experiment.py:407] steps executed:    77491, num episodes:       81, episode length:      980, return:   1350.0, normalized return:    0.163
+[INFO 2023-08-10 21:37:24,691 eval_run_experiment.py:407] steps executed:    77491, num episodes:       82, episode length:      980, return:   1350.0, normalized return:    0.163
+[INFO 2023-08-10 21:37:24,692 eval_run_experiment.py:407] steps executed:    77491, num episodes:       83, episode length:      980, return:   1350.0, normalized return:    0.163
+[INFO 2023-08-10 21:37:24,692 eval_run_experiment.py:407] steps executed:    77491, num episodes:       84, episode length:      980, return:   1350.0, normalized return:    0.163
+[INFO 2023-08-10 21:37:24,693 eval_run_experiment.py:407] steps executed:    77491, num episodes:       85, episode length:      980, return:   1350.0, normalized return:    0.163
+[INFO 2023-08-10 21:37:24,694 eval_run_experiment.py:407] steps executed:    77491, num episodes:       86, episode length:      980, return:   1350.0, normalized return:    0.163
+[INFO 2023-08-10 21:37:24,695 eval_run_experiment.py:407] steps executed:    77491, num episodes:       87, episode length:      980, return:   1350.0, normalized return:    0.163
+[INFO 2023-08-10 21:37:25,397 eval_run_experiment.py:407] steps executed:    77504, num episodes:       88, episode length:      981, return:    990.0, normalized return:     0.11
+[INFO 2023-08-10 21:37:25,400 eval_run_experiment.py:407] steps executed:    77504, num episodes:       89, episode length:      981, return:    990.0, normalized return:     0.11
+[INFO 2023-08-10 21:37:25,401 eval_run_experiment.py:407] steps executed:    77504, num episodes:       90, episode length:      981, return:    990.0, normalized return:     0.11
+[INFO 2023-08-10 21:37:25,401 eval_run_experiment.py:407] steps executed:    77504, num episodes:       91, episode length:      981, return:    990.0, normalized return:     0.11
+[INFO 2023-08-10 21:37:26,120 eval_run_experiment.py:407] steps executed:    77594, num episodes:       92, episode length:      991, return:   2470.0, normalized return:    0.325
+[INFO 2023-08-10 21:37:26,120 eval_run_experiment.py:407] steps executed:    77594, num episodes:       93, episode length:      991, return:   2470.0, normalized return:    0.325
+[INFO 2023-08-10 21:37:26,121 eval_run_experiment.py:407] steps executed:    77594, num episodes:       94, episode length:      991, return:   2470.0, normalized return:    0.325
+[INFO 2023-08-10 21:37:26,121 eval_run_experiment.py:407] steps executed:    77594, num episodes:       95, episode length:      991, return:   2470.0, normalized return:    0.325
+[INFO 2023-08-10 21:37:26,121 eval_run_experiment.py:407] steps executed:    77594, num episodes:       96, episode length:      991, return:   2470.0, normalized return:    0.325
+[INFO 2023-08-10 21:37:26,122 eval_run_experiment.py:407] steps executed:    77594, num episodes:       97, episode length:      991, return:   2470.0, normalized return:    0.325
+[INFO 2023-08-10 21:37:26,750 eval_run_experiment.py:407] steps executed:    77597, num episodes:       98, episode length:      992, return:   2470.0, normalized return:    0.325
+[INFO 2023-08-10 21:37:27,742 eval_run_experiment.py:407] steps executed:    77927, num episodes:       99, episode length:     1157, return:   2490.0, normalized return:    0.328
+[INFO 2023-08-10 21:37:27,742 eval_run_experiment.py:407] steps executed:    77927, num episodes:      100, episode length:     1157, return:   2490.0, normalized return:    0.328
+[INFO 2023-08-10 21:37:27,767 eval_run_experiment.py:533] Average undiscounted return per evaluation episode: 1090.40
+[INFO 2023-08-10 21:37:27,768 eval_run_experiment.py:540] Average normalized return per evaluation episode: 0.13
+/home/cs_faculty/lezhang.thu/bigger_better_faster/bbf/replay_memory/subsequence_replay_buffer.py:1501: FutureWarning: GzipFile was opened for writing, but this will change in future Python releases.  Specify the mode argument for opening it for writing.
+  with gzip.GzipFile(fileobj=f) as outfile:
++ for seed in 7779 7780 7999 8000
++ CUDA_VISIBLE_DEVICES=0
++ python -m bbf.train --agent=BBF --gin_files=bbf/configs/BBF.gin --base_dir=/tmp/online_rl/bbf/cuda0/7999 --run_number=0 --agent_seed=7999 --no_seeding=False
+2023-08-10 21:37:45.846801: I tensorflow/core/util/port.cc:110] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2023-08-10 21:37:45.868090: I tensorflow/core/platform/cpu_feature_guard.cc:182] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2023-08-10 21:37:46.152919: W tensorflow/compiler/tf2tensorrt/utils/py_utils.cc:38] TF-TRT Warning: Could not find TensorRT
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gin/tf/__init__.py:48: DeprecationWarning: distutils Version classes are deprecated. Use packaging.version instead.
+  if (distutils.version.LooseVersion(tf.__version__) <
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/jax/_src/pjit.py:307: DeprecationWarning: backend and device argument on jit is deprecated. You can use a `jax.sharding.Mesh` context manager or device_put the arguments before passing them to `jit`. Please see https://jax.readthedocs.io/en/latest/notebooks/Distributed_arrays_and_automatic_parallelization.html for more information.
+  warnings.warn(
+[INFO 2023-08-10 21:37:47,847 train.py:175] Setting random seed: 7999
+[INFO 2023-08-10 21:37:47,851 train.py:242] Using MaxEpisodeEvalRunner for evaluation.
+[WARNING 2023-08-10 21:37:47,851 run_experiment.py:267] DEPRECATION WARNING: Logger is being deprecated. Please switch to CollectorDispatcher!
+A.L.E: Arcade Learning Environment (version 0.7.5+db37282)
+[Powered by Stella]
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/core.py:329: DeprecationWarning: [33mWARN: Initializing wrapper in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.[0m
+  deprecation(
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/wrappers/step_api_compatibility.py:39: DeprecationWarning: [33mWARN: Initializing environment in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.[0m
+  deprecation(
+[INFO 2023-08-10 21:37:47,921 spr_agent.py:749] Creating BBFAgent agent with the following parameters:
+[INFO 2023-08-10 21:37:47,922 spr_agent.py:753] 	 double_dqn: True
+[INFO 2023-08-10 21:37:47,922 spr_agent.py:754] 	 distributional: True
+[INFO 2023-08-10 21:37:47,922 spr_agent.py:755] 	 data_augmentation: True
+[INFO 2023-08-10 21:37:47,922 spr_agent.py:756] 	 num_updates_per_train_step: 1
+[INFO 2023-08-10 21:37:47,972 xla_bridge.py:603] Unable to initialize backend 'rocm': NOT_FOUND: Could not find registered platform with name: "rocm". Available platform names are: Interpreter CUDA
+[INFO 2023-08-10 21:37:47,972 xla_bridge.py:603] Unable to initialize backend 'tpu': module 'jaxlib.xla_extension' has no attribute 'get_tpu_client'
+[INFO 2023-08-10 21:37:48,826 spr_agent.py:840] 	 Found following local devices: [gpu(id=0)]
+[INFO 2023-08-10 21:37:48,826 spr_agent.py:855] 	 Running with dtype <class 'jax.numpy.float32'>
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:278] Creating BBFAgent agent with the following parameters:
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:280] 	 gamma: 0.997000
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:281] 	 update_horizon: 10.000000
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:282] 	 min_replay_history: 2000
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:283] 	 update_period: 1
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:284] 	 target_update_period: 1
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:285] 	 epsilon_train: 0.000000
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:286] 	 epsilon_eval: 0.001000
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:287] 	 epsilon_decay_period: 2001
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:288] 	 optimizer: adam
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:289] 	 seed: 7999
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:290] 	 loss_type: mse
+[INFO 2023-08-10 21:37:48,826 dqn_agent.py:291] 	 preprocess_fn: None
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:854] Creating a PrioritizedJaxSubsequenceParallelEnvReplayBuffer replay memory with the following parameters:
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:857] 	 observation_shape: (84, 84)
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:858] 	 observation_dtype: <class 'jax.numpy.uint8'>
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:859] 	 terminal_dtype: <class 'numpy.uint8'>
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:860] 	 stack_size: 4
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:861] 	 use_next_state: 1
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:862] 	 replay_capacity: 200000
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:863] 	 batch_size: 32
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:864] 	 update_horizon: 10
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:865] 	 gamma: 0.997000
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:152] Creating a OutOfGraphReplayBuffer replay memory with the following parameters:
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:155] 	 observation_shape: (84, 84)
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:156] 	 observation_dtype: <class 'jax.numpy.uint8'>
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:157] 	 terminal_dtype: <class 'numpy.uint8'>
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:158] 	 stack_size: 4
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:159] 	 replay_capacity: 100000
+[INFO 2023-08-10 21:37:48,869 subsequence_replay_buffer.py:160] 	 batch_size: 32
+[INFO 2023-08-10 21:37:48,870 subsequence_replay_buffer.py:161] 	 update_horizon: 1
+[INFO 2023-08-10 21:37:48,870 subsequence_replay_buffer.py:162] 	 gamma: 0.990000
+[INFO 2023-08-10 21:37:48,870 subsequence_replay_buffer.py:163] 	 trajectory_value: return
+[INFO 2023-08-10 21:37:48,870 subsequence_replay_buffer.py:164] 	 replay_forgetting: default
+[INFO 2023-08-10 21:37:52,792 spr_agent.py:676] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-08-10 21:37:52,792 spr_agent.py:676] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-08-10 21:37:52,792 spr_agent.py:676] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-08-10 21:37:53,184 spr_agent.py:999] 	 Operating with 1 environments, batch size 32 and replay ratio 64
+[INFO 2023-08-10 21:37:53,184 spr_agent.py:1006] 	 Calculated 2 updates per update phase
+[INFO 2023-08-10 21:37:53,184 spr_agent.py:1010] 	 Calculated update frequency of 1 step
+[INFO 2023-08-10 21:37:53,184 spr_agent.py:1015] 	 Setting min_replay_history to 2000.0 from 2000
+[INFO 2023-08-10 21:37:53,184 spr_agent.py:1020] 	 Setting epsilon_decay_period to 2001.0 from 2001
+[INFO 2023-08-10 21:37:53,184 spr_agent.py:1040] 	 Running 1 groups of 2 batches per 1 env step
+[INFO 2023-08-10 21:37:53,185 eval_run_experiment.py:201] Num evaluation episodes: 100
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/utils/passive_env_checker.py:227: DeprecationWarning: [33mWARN: Core environment is written in old step API which returns one bool instead of two. It is recommended to rewrite the environment with new step API. [0m
+  logger.deprecation(
+/home/cs_faculty/Downloads/yes/lib/python3.9/site-packages/gym/utils/passive_env_checker.py:233: DeprecationWarning: `np.bool8` is a deprecated alias for `np.bool_`.  (Deprecated NumPy 1.24)
+  if not isinstance(done, (bool, np.bool8)):
+[INFO 2023-08-10 21:37:53,402 eval_run_experiment.py:630] Beginning training...
+[INFO 2023-08-10 21:37:53,402 eval_run_experiment.py:549] Starting iteration 0
+[INFO 2023-08-10 21:37:54,221 eval_run_experiment.py:407] steps executed:      597, num episodes:        1, episode length:      597, return:    180.0, normalized return:   -0.007
+[INFO 2023-08-10 21:37:54,919 eval_run_experiment.py:407] steps executed:     1143, num episodes:        2, episode length:      546, return:    110.0, normalized return:   -0.017
+[INFO 2023-08-10 21:37:55,916 eval_run_experiment.py:407] steps executed:     1948, num episodes:        3, episode length:      805, return:    330.0, normalized return:    0.015
+[INFO 2023-08-10 21:39:28,913 eval_run_experiment.py:407] steps executed:     2381, num episodes:        4, episode length:      433, return:    130.0, normalized return:   -0.014
+[INFO 2023-08-10 21:41:51,377 eval_run_experiment.py:407] steps executed:     3026, num episodes:        5, episode length:      645, return:    290.0, normalized return:    0.009
+[INFO 2023-08-10 21:43:30,154 eval_run_experiment.py:407] steps executed:     3473, num episodes:        6, episode length:      447, return:    230.0, normalized return:      0.0
+[INFO 2023-08-10 21:46:25,114 eval_run_experiment.py:407] steps executed:     4266, num episodes:        7, episode length:      793, return:    400.0, normalized return:    0.025
+[INFO 2023-08-10 21:48:01,025 eval_run_experiment.py:407] steps executed:     4701, num episodes:        8, episode length:      435, return:    330.0, normalized return:    0.015
+[INFO 2023-08-10 21:50:14,415 eval_run_experiment.py:407] steps executed:     5306, num episodes:        9, episode length:      605, return:    440.0, normalized return:    0.031
+[INFO 2023-08-10 21:52:50,049 eval_run_experiment.py:407] steps executed:     6012, num episodes:       10, episode length:      706, return:    620.0, normalized return:    0.057
+[INFO 2023-08-10 21:54:49,126 eval_run_experiment.py:407] steps executed:     6552, num episodes:       11, episode length:      540, return:    340.0, normalized return:    0.016
+[INFO 2023-08-10 21:56:39,362 eval_run_experiment.py:407] steps executed:     7052, num episodes:       12, episode length:      500, return:    580.0, normalized return:    0.051
+[INFO 2023-08-10 21:58:42,767 eval_run_experiment.py:407] steps executed:     7612, num episodes:       13, episode length:      560, return:    420.0, normalized return:    0.028
+[INFO 2023-08-10 22:00:56,599 eval_run_experiment.py:407] steps executed:     8219, num episodes:       14, episode length:      607, return:    440.0, normalized return:    0.031
+[INFO 2023-08-10 22:03:52,576 eval_run_experiment.py:407] steps executed:     9017, num episodes:       15, episode length:      798, return:    570.0, normalized return:     0.05
+[INFO 2023-08-10 22:06:02,448 eval_run_experiment.py:407] steps executed:     9606, num episodes:       16, episode length:      589, return:    460.0, normalized return:    0.034
+[INFO 2023-08-10 22:08:53,421 eval_run_experiment.py:407] steps executed:    10382, num episodes:       17, episode length:      776, return:    580.0, normalized return:    0.051
+[INFO 2023-08-10 22:11:34,935 eval_run_experiment.py:407] steps executed:    11115, num episodes:       18, episode length:      733, return:    340.0, normalized return:    0.016
+[INFO 2023-08-10 22:13:48,876 eval_run_experiment.py:407] steps executed:    11723, num episodes:       19, episode length:      608, return:    320.0, normalized return:    0.013
+[INFO 2023-08-10 22:16:26,547 eval_run_experiment.py:407] steps executed:    12439, num episodes:       20, episode length:      716, return:    410.0, normalized return:    0.026
+[INFO 2023-08-10 22:18:30,770 eval_run_experiment.py:407] steps executed:    13003, num episodes:       21, episode length:      564, return:    420.0, normalized return:    0.028
+[INFO 2023-08-10 22:21:01,385 eval_run_experiment.py:407] steps executed:    13687, num episodes:       22, episode length:      684, return:    410.0, normalized return:    0.026
+[INFO 2023-08-10 22:22:26,661 eval_run_experiment.py:407] steps executed:    14074, num episodes:       23, episode length:      387, return:    370.0, normalized return:    0.021
+[INFO 2023-08-10 22:24:54,657 eval_run_experiment.py:407] steps executed:    14746, num episodes:       24, episode length:      672, return:    420.0, normalized return:    0.028
+[INFO 2023-08-10 22:27:05,840 eval_run_experiment.py:407] steps executed:    15342, num episodes:       25, episode length:      596, return:    430.0, normalized return:    0.029
+[INFO 2023-08-10 22:29:30,660 eval_run_experiment.py:407] steps executed:    16000, num episodes:       26, episode length:      658, return:    550.0, normalized return:    0.047
+[INFO 2023-08-10 22:31:30,612 eval_run_experiment.py:407] steps executed:    16545, num episodes:       27, episode length:      545, return:    360.0, normalized return:    0.019
+[INFO 2023-08-10 22:33:38,837 eval_run_experiment.py:407] steps executed:    17127, num episodes:       28, episode length:      582, return:    480.0, normalized return:    0.037
+[INFO 2023-08-10 22:35:52,970 eval_run_experiment.py:407] steps executed:    17736, num episodes:       29, episode length:      609, return:    470.0, normalized return:    0.035
+[INFO 2023-08-10 22:39:08,507 eval_run_experiment.py:407] steps executed:    18624, num episodes:       30, episode length:      888, return:    690.0, normalized return:    0.067
+[INFO 2023-08-10 22:42:07,048 eval_run_experiment.py:407] steps executed:    19435, num episodes:       31, episode length:      811, return:    660.0, normalized return:    0.063
+[INFO 2023-08-10 22:43:50,713 eval_run_experiment.py:407] steps executed:    19906, num episodes:       32, episode length:      471, return:    520.0, normalized return:    0.042
+[INFO 2023-08-10 22:44:12,075 spr_agent.py:1114] 	 Resetting weights at step 20002.
+[INFO 2023-08-10 22:44:13,169 spr_agent.py:1153] Running 0 gradient steps after reset
+[INFO 2023-08-10 22:45:21,989 eval_run_experiment.py:407] steps executed:    20314, num episodes:       33, episode length:      408, return:    200.0, normalized return:   -0.004
+[INFO 2023-08-10 22:47:19,122 eval_run_experiment.py:407] steps executed:    20843, num episodes:       34, episode length:      529, return:    140.0, normalized return:   -0.013
+[INFO 2023-08-10 22:48:39,249 eval_run_experiment.py:407] steps executed:    21205, num episodes:       35, episode length:      362, return:    290.0, normalized return:    0.009
+run-cuda0.sh: line 2: 1747690 Killed                  CUDA_VISIBLE_DEVICES=0 python -m bbf.train --agent=BBF --gin_files=bbf/configs/BBF.gin --base_dir=/tmp/online_rl/bbf/cuda0/$seed --run_number=0 --agent_seed=$seed --no_seeding=False

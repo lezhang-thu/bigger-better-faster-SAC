@@ -1,0 +1,775 @@
++ strings=("ChopperCommand")
++ seed=1807987954
++ (( j=1 ))
++ (( j<=1 ))
++ for game_name in "${strings[@]}"
++ echo 'iteration 1'
+iteration 1
++ CUDA_VISIBLE_DEVICES=0
++ python -m bbf.train --agent=BBF --gin_files=bbf/configs/BBF-100K.gin '--gin_bindings=DataEfficientAtariRunner.game_name="ChopperCommand"' --run_number=1
+/home/ubuntu/anaconda3/envs/jax/lib/python3.8/site-packages/jax/_src/pjit.py:307: DeprecationWarning: backend and device argument on jit is deprecated. You can use a `jax.sharding.Mesh` context manager or device_put the arguments before passing them to `jit`. Please see https://jax.readthedocs.io/en/latest/notebooks/Distributed_arrays_and_automatic_parallelization.html for more information.
+  warnings.warn(
+[INFO 2023-11-11 06:30:53,059 train.py:94] Setting random seed: 993234896
+[INFO 2023-11-11 06:30:53,061 train.py:134] Using MaxEpisodeEvalRunner for evaluation.
+[INFO 2023-11-11 06:30:53,061 eval_run_experiment.py:423] game_name: ChopperCommand
+A.L.E: Arcade Learning Environment (version 0.7.5+db37282)
+[Powered by Stella]
+/home/ubuntu/anaconda3/envs/jax/lib/python3.8/site-packages/gym/core.py:317: DeprecationWarning: [33mWARN: Initializing wrapper in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.[0m
+  deprecation(
+/home/ubuntu/anaconda3/envs/jax/lib/python3.8/site-packages/gym/wrappers/step_api_compatibility.py:39: DeprecationWarning: [33mWARN: Initializing environment in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.[0m
+  deprecation(
+[INFO 2023-11-11 06:30:53,125 spr_agent.py:883] Creating BBFAgent agent with the following parameters:
+[INFO 2023-11-11 06:30:53,125 spr_agent.py:887] 	 double_dqn: True
+[INFO 2023-11-11 06:30:53,125 spr_agent.py:888] 	 distributional: True
+[INFO 2023-11-11 06:30:53,125 spr_agent.py:889] 	 data_augmentation: True
+[INFO 2023-11-11 06:30:53,125 spr_agent.py:890] 	 num_updates_per_train_step: 1
+[INFO 2023-11-11 06:30:53,207 xla_bridge.py:603] Unable to initialize backend 'rocm': NOT_FOUND: Could not find registered platform with name: "rocm". Available platform names are: Interpreter CUDA
+[INFO 2023-11-11 06:30:53,207 xla_bridge.py:603] Unable to initialize backend 'tpu': module 'jaxlib.xla_extension' has no attribute 'get_tpu_client'
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:962] 	 Found following local devices: [gpu(id=0)]
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:968] 	 Running with dtype <class 'jax.numpy.float32'>
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:785] Creating BBFAgent agent with the following parameters:
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:787] 	 gamma: 0.997000
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:788] 	 update_horizon: 10.000000
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:789] 	 min_replay_history: 2000
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:790] 	 update_period: 1
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:791] 	 target_update_period: 1
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:792] 	 optimizer: adam
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:793] 	 seed: 993234896
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:794] 	 loss_type: mse
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:795] 	 preprocess_fn: None
+[INFO 2023-11-11 06:30:53,494 spr_agent.py:796] 	 allow_partial_reload: False
+[INFO 2023-11-11 06:30:53,520 subsequence_replay_buffer.py:97] Creating a PrioritizedJaxSubsequenceParallelEnvReplayBuffer replay memory with the following parameters:
+[INFO 2023-11-11 06:30:53,520 subsequence_replay_buffer.py:100] 	 observation_shape: (84, 84)
+[INFO 2023-11-11 06:30:53,520 subsequence_replay_buffer.py:101] 	 observation_dtype: <class 'numpy.uint8'>
+[INFO 2023-11-11 06:30:53,520 subsequence_replay_buffer.py:102] 	 terminal_dtype: <class 'numpy.uint8'>
+[INFO 2023-11-11 06:30:53,520 subsequence_replay_buffer.py:103] 	 stack_size: 4
+[INFO 2023-11-11 06:30:53,520 subsequence_replay_buffer.py:104] 	 use_next_state: 1
+[INFO 2023-11-11 06:30:53,520 subsequence_replay_buffer.py:105] 	 replay_capacity: 200000
+[INFO 2023-11-11 06:30:53,520 subsequence_replay_buffer.py:106] 	 batch_size: 32
+[INFO 2023-11-11 06:30:53,521 subsequence_replay_buffer.py:107] 	 update_horizon: 10
+[INFO 2023-11-11 06:30:53,521 subsequence_replay_buffer.py:108] 	 gamma: 0.997000
+[INFO 2023-11-11 06:30:56,302 spr_agent.py:738] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-11-11 06:30:56,302 spr_agent.py:738] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-11-11 06:30:56,302 spr_agent.py:738] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-11-11 06:30:56,626 spr_agent.py:1117] 	 Operating with 1 environments, batch size 32 and replay ratio 64
+[INFO 2023-11-11 06:30:56,626 spr_agent.py:1124] 	 Calculated 2 updates per update phase
+[INFO 2023-11-11 06:30:56,626 spr_agent.py:1128] 	 Calculated update frequency of 1 step
+[INFO 2023-11-11 06:30:56,626 spr_agent.py:1133] 	 Setting min_replay_history to 2000.0 from 2000
+[INFO 2023-11-11 06:30:56,626 spr_agent.py:1152] 	 Running 1 groups of 2 batches per 1 env step
+Got gin bindings:
+['DataEfficientAtariRunner.game_name="ChopperCommand"']
+Sanitized gin bindings to:
+['DataEfficientAtariRunner.game_name="ChopperCommand"']
+FLAGS.max_episode_eval: True
+self._training_steps: 100000
+********************
+ self.target_eval_mode: False
+ self.target_action_selection: True
+ num_actions: 18
+ self.reset_target: True
+ self._num_updates_per_train_step: 1
+ self._batches_to_group: 2
+explore_end_steps: 90000
+[INFO 2023-11-11 06:30:56,626 eval_run_experiment.py:434] Num evaluation episodes: 100
+/home/ubuntu/anaconda3/envs/jax/lib/python3.8/site-packages/gym/utils/passive_env_checker.py:227: DeprecationWarning: [33mWARN: Core environment is written in old step API which returns one bool instead of two. It is recommended to rewrite the environment with new step API. [0m
+  logger.deprecation(
+/home/ubuntu/anaconda3/envs/jax/lib/python3.8/site-packages/gym/utils/passive_env_checker.py:233: DeprecationWarning: `np.bool8` is a deprecated alias for `np.bool_`.  (Deprecated NumPy 1.24)
+  if not isinstance(done, (bool, np.bool8)):
+[INFO 2023-11-11 06:30:56,776 eval_run_experiment.py:784] Beginning training...
+[INFO 2023-11-11 06:30:56,776 eval_run_experiment.py:760] Starting iteration 0
+[INFO 2023-11-11 06:30:57,283 spr_agent.py:1401] step: 319, x_ent_coef: 0.00996012520045042
+[INFO 2023-11-11 06:30:58,258 eval_run_experiment.py:617] steps executed:     1113, num episodes:        1, episode length:     1113, return:    600.0, normalized return:   -0.032
+[INFO 2023-11-11 06:30:58,626 spr_agent.py:1401] step: 1409, x_ent_coef: 0.009823874570429325
+[INFO 2023-11-11 06:30:59,104 eval_run_experiment.py:617] steps executed:     1804, num episodes:        2, episode length:      691, return:    800.0, normalized return:   -0.002
+[INFO 2023-11-11 06:30:59,206 spr_agent.py:1401] step: 1882, x_ent_coef: 0.009764749556779861
+[INFO 2023-11-11 06:30:59,290 spr_agent.py:1401] step: 1950, x_ent_coef: 0.00975625030696392
+[INFO 2023-11-11 06:31:20,901 spr_agent.py:1401] step: 2250, x_ent_coef: 0.009718749672174454
+[INFO 2023-11-11 06:31:40,075 eval_run_experiment.py:617] steps executed:     2553, num episodes:        3, episode length:      749, return:    900.0, normalized return:    0.014
+[INFO 2023-11-11 06:31:45,536 spr_agent.py:1520] ema entropy: 1.2963959398686402
+[INFO 2023-11-11 06:32:02,047 spr_agent.py:1401] step: 2899, x_ent_coef: 0.009637624956667423
+[INFO 2023-11-11 06:32:04,265 eval_run_experiment.py:617] steps executed:     2934, num episodes:        4, episode length:      381, return:    400.0, normalized return:   -0.062
+[INFO 2023-11-11 06:32:39,551 eval_run_experiment.py:617] steps executed:     3488, num episodes:        5, episode length:      554, return:    800.0, normalized return:   -0.002
+[INFO 2023-11-11 06:33:10,624 spr_agent.py:1520] ema entropy: 1.4770717282150838
+[INFO 2023-11-11 06:33:29,664 eval_run_experiment.py:617] steps executed:     4276, num episodes:        6, episode length:      788, return:    600.0, normalized return:   -0.032
+[INFO 2023-11-11 06:33:50,256 spr_agent.py:1401] step: 4599, x_ent_coef: 0.00942512508481741
+[INFO 2023-11-11 06:33:50,578 spr_agent.py:1401] step: 4604, x_ent_coef: 0.009424500167369843
+[INFO 2023-11-11 06:34:12,029 eval_run_experiment.py:617] steps executed:     4940, num episodes:        7, episode length:      664, return:    800.0, normalized return:   -0.002
+[INFO 2023-11-11 06:34:25,657 eval_run_experiment.py:617] steps executed:     5151, num episodes:        8, episode length:      211, return:    600.0, normalized return:   -0.032
+[INFO 2023-11-11 06:34:38,046 spr_agent.py:1520] ema entropy: 1.142197379283452
+[INFO 2023-11-11 06:35:03,447 spr_agent.py:1520] ema entropy: 1.51717531433421
+[INFO 2023-11-11 06:35:10,658 eval_run_experiment.py:617] steps executed:     5851, num episodes:        9, episode length:      700, return:    800.0, normalized return:   -0.002
+[INFO 2023-11-11 06:35:17,297 spr_agent.py:1520] ema entropy: 0.9243240928904285
+[INFO 2023-11-11 06:35:21,429 spr_agent.py:1520] ema entropy: 1.1340290567437616
+[INFO 2023-11-11 06:35:49,001 eval_run_experiment.py:617] steps executed:     6443, num episodes:       10, episode length:      592, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-11 06:36:03,787 spr_agent.py:1401] step: 6671, x_ent_coef: 0.00916612520813942
+[INFO 2023-11-11 06:36:10,375 eval_run_experiment.py:617] steps executed:     6773, num episodes:       11, episode length:      330, return:    600.0, normalized return:   -0.032
+[INFO 2023-11-11 06:36:46,610 eval_run_experiment.py:617] steps executed:     7332, num episodes:       12, episode length:      559, return:   1000.0, normalized return:    0.029
+[INFO 2023-11-11 06:36:59,777 spr_agent.py:1520] ema entropy: 1.1369421403360171
+[INFO 2023-11-11 06:37:16,476 eval_run_experiment.py:617] steps executed:     7793, num episodes:       13, episode length:      461, return:    900.0, normalized return:    0.014
+[INFO 2023-11-11 06:37:30,931 spr_agent.py:1401] step: 8016, x_ent_coef: 0.00899800006300211
+[INFO 2023-11-11 06:37:41,150 eval_run_experiment.py:617] steps executed:     8174, num episodes:       14, episode length:      381, return:    800.0, normalized return:   -0.002
+[INFO 2023-11-11 06:37:49,757 spr_agent.py:1520] ema entropy: 1.0153569054643947
+[INFO 2023-11-11 06:38:17,476 eval_run_experiment.py:617] steps executed:     8735, num episodes:       15, episode length:      561, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-11 06:38:20,859 spr_agent.py:1401] step: 8787, x_ent_coef: 0.00890162494033575
+[INFO 2023-11-11 06:38:38,049 spr_agent.py:1401] step: 9052, x_ent_coef: 0.008868499659001827
+[INFO 2023-11-11 06:38:49,593 eval_run_experiment.py:617] steps executed:     9230, num episodes:       16, episode length:      495, return:   1000.0, normalized return:    0.029
+[INFO 2023-11-11 06:39:07,684 spr_agent.py:1520] ema entropy: 1.206017325021906
+[INFO 2023-11-11 06:39:29,733 spr_agent.py:1520] ema entropy: 1.3307416132264285
+[INFO 2023-11-11 06:39:47,732 eval_run_experiment.py:617] steps executed:    10127, num episodes:       17, episode length:      897, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-11 06:40:16,085 spr_agent.py:1401] step: 10565, x_ent_coef: 0.008679375052452087
+[INFO 2023-11-11 06:40:51,990 spr_agent.py:1520] ema entropy: 1.3124569699568192
+[INFO 2023-11-11 06:40:54,834 spr_agent.py:1520] ema entropy: 1.3094930695995568
+[INFO 2023-11-11 06:41:37,237 eval_run_experiment.py:617] steps executed:    11837, num episodes:       18, episode length:     1710, return:   1500.0, normalized return:    0.105
+[INFO 2023-11-11 06:41:42,498 spr_agent.py:1401] step: 11920, x_ent_coef: 0.008510000072419643
+[INFO 2023-11-11 06:41:47,523 spr_agent.py:1401] step: 11999, x_ent_coef: 0.008500125259160995
+[INFO 2023-11-11 06:42:04,839 eval_run_experiment.py:617] steps executed:    12272, num episodes:       19, episode length:      435, return:    700.0, normalized return:   -0.017
+[INFO 2023-11-11 06:42:20,503 spr_agent.py:1520] ema entropy: 1.2560986113002104
+[INFO 2023-11-11 06:42:37,448 eval_run_experiment.py:617] steps executed:    12786, num episodes:       20, episode length:      514, return:    800.0, normalized return:   -0.002
+[INFO 2023-11-11 06:43:15,627 spr_agent.py:1401] step: 13387, x_ent_coef: 0.00832662545144558
+[INFO 2023-11-11 06:43:25,412 spr_agent.py:1401] step: 13541, x_ent_coef: 0.008307375013828278
+[INFO 2023-11-11 06:43:29,859 eval_run_experiment.py:617] steps executed:    13611, num episodes:       21, episode length:      825, return:   1300.0, normalized return:    0.074
+[INFO 2023-11-11 06:43:35,841 spr_agent.py:1520] ema entropy: 1.1169293570566523
+[INFO 2023-11-11 06:44:11,691 eval_run_experiment.py:617] steps executed:    14270, num episodes:       22, episode length:      659, return:   1200.0, normalized return:    0.059
+[INFO 2023-11-11 06:44:29,592 spr_agent.py:1401] step: 14553, x_ent_coef: 0.008180875331163406
+[INFO 2023-11-11 06:44:30,167 spr_agent.py:1520] ema entropy: 1.1034501315760232
+[INFO 2023-11-11 06:44:47,877 eval_run_experiment.py:617] steps executed:    14842, num episodes:       23, episode length:      572, return:   1000.0, normalized return:    0.029
+[INFO 2023-11-11 06:45:19,402 spr_agent.py:1401] step: 15340, x_ent_coef: 0.008082499727606773
+[INFO 2023-11-11 06:45:26,085 spr_agent.py:1401] step: 15446, x_ent_coef: 0.008069249801337719
+[INFO 2023-11-11 06:45:31,034 spr_agent.py:1401] step: 15524, x_ent_coef: 0.00805949978530407
+[INFO 2023-11-11 06:45:34,778 eval_run_experiment.py:617] steps executed:    15583, num episodes:       24, episode length:      741, return:    900.0, normalized return:    0.014
+[INFO 2023-11-11 06:45:54,757 spr_agent.py:1401] step: 15899, x_ent_coef: 0.008012625388801098
+[INFO 2023-11-11 06:45:57,921 spr_agent.py:1520] ema entropy: 1.0761515827162198
+[INFO 2023-11-11 06:45:59,503 spr_agent.py:1520] ema entropy: 1.0686536217939098
+[INFO 2023-11-11 06:46:29,120 eval_run_experiment.py:617] steps executed:    16441, num episodes:       25, episode length:      858, return:   1100.0, normalized return:    0.044
+[INFO 2023-11-11 06:46:30,086 spr_agent.py:1401] step: 16456, x_ent_coef: 0.007942999713122845
+[INFO 2023-11-11 06:46:55,188 spr_agent.py:1520] ema entropy: 1.1003252614696308
+[INFO 2023-11-11 06:46:57,530 spr_agent.py:1401] step: 16889, x_ent_coef: 0.007888874970376492
+[INFO 2023-11-11 06:47:10,731 eval_run_experiment.py:617] steps executed:    17097, num episodes:       26, episode length:      656, return:    900.0, normalized return:    0.014
+[INFO 2023-11-11 06:47:41,290 eval_run_experiment.py:617] steps executed:    17580, num episodes:       27, episode length:      483, return:    800.0, normalized return:   -0.002
+[INFO 2023-11-11 06:48:10,433 spr_agent.py:1520] ema entropy: 1.130829788781003
+[INFO 2023-11-11 06:48:16,908 eval_run_experiment.py:617] steps executed:    18141, num episodes:       28, episode length:      561, return:   1100.0, normalized return:    0.044
+[INFO 2023-11-11 06:49:03,532 spr_agent.py:1520] ema entropy: 0.7303431104121363
+[INFO 2023-11-11 06:49:24,065 eval_run_experiment.py:617] steps executed:    19199, num episodes:       29, episode length:     1058, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-11 06:49:41,472 spr_agent.py:1401] step: 19473, x_ent_coef: 0.007565875072032213
+[INFO 2023-11-11 06:49:53,708 spr_agent.py:1520] ema entropy: 1.1913678039148772
+[INFO 2023-11-11 06:50:15,064 spr_agent.py:1210] 	 Resetting weights at step 20002.
+[INFO 2023-11-11 06:50:26,603 eval_run_experiment.py:617] steps executed:    20168, num episodes:       30, episode length:      969, return:   1200.0, normalized return:    0.059
+[INFO 2023-11-11 06:50:55,899 eval_run_experiment.py:617] steps executed:    20630, num episodes:       31, episode length:      462, return:    500.0, normalized return:   -0.047
+[INFO 2023-11-11 06:51:12,886 spr_agent.py:1520] ema entropy: 1.1673237868874222
+[INFO 2023-11-11 06:51:37,674 eval_run_experiment.py:617] steps executed:    21289, num episodes:       32, episode length:      659, return:    500.0, normalized return:   -0.047
+[INFO 2023-11-11 06:51:45,411 spr_agent.py:1401] step: 21411, x_ent_coef: 0.007323625031858683
+[INFO 2023-11-11 06:52:20,564 spr_agent.py:1520] ema entropy: 0.9311396814093265
+[INFO 2023-11-11 06:52:25,834 spr_agent.py:1520] ema entropy: 0.9648998940724346
+[INFO 2023-11-11 06:53:29,071 eval_run_experiment.py:617] steps executed:    23046, num episodes:       33, episode length:     1757, return:   2300.0, normalized return:    0.226
+[INFO 2023-11-11 06:53:44,224 spr_agent.py:1401] step: 23285, x_ent_coef: 0.007089375052601099
+[INFO 2023-11-11 06:54:20,173 spr_agent.py:1520] ema entropy: 1.5911607191595796
+[INFO 2023-11-11 06:54:26,895 spr_agent.py:1401] step: 23959, x_ent_coef: 0.007005124818533659
+[INFO 2023-11-11 06:54:38,054 eval_run_experiment.py:617] steps executed:    24135, num episodes:       34, episode length:     1089, return:   3000.0, normalized return:    0.333
+[INFO 2023-11-11 06:54:46,118 spr_agent.py:1520] ema entropy: 1.2570873617978706
+[INFO 2023-11-11 06:54:59,747 spr_agent.py:1520] ema entropy: 1.2404228026976993
+[INFO 2023-11-11 06:55:02,801 spr_agent.py:1401] step: 24525, x_ent_coef: 0.006934375036507845
+[INFO 2023-11-11 06:56:12,165 eval_run_experiment.py:617] steps executed:    25620, num episodes:       35, episode length:     1485, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-11 06:56:33,409 spr_agent.py:1401] step: 25955, x_ent_coef: 0.006755624897778034
+[INFO 2023-11-11 06:56:43,012 eval_run_experiment.py:617] steps executed:    26107, num episodes:       36, episode length:      487, return:    900.0, normalized return:    0.014
+[INFO 2023-11-11 06:57:14,092 eval_run_experiment.py:617] steps executed:    26598, num episodes:       37, episode length:      491, return:    500.0, normalized return:   -0.047
+[INFO 2023-11-11 06:57:24,686 spr_agent.py:1401] step: 26765, x_ent_coef: 0.006654375232756138
+[INFO 2023-11-11 06:57:33,679 spr_agent.py:1520] ema entropy: 0.9580226035303683
+[INFO 2023-11-11 06:57:49,013 spr_agent.py:1520] ema entropy: 0.8322580328143147
+[INFO 2023-11-11 06:58:10,472 eval_run_experiment.py:617] steps executed:    27488, num episodes:       38, episode length:      890, return:   1200.0, normalized return:    0.059
+[INFO 2023-11-11 06:58:35,309 spr_agent.py:1401] step: 27880, x_ent_coef: 0.006515000015497208
+[INFO 2023-11-11 06:58:39,289 spr_agent.py:1401] step: 27943, x_ent_coef: 0.0065071252174675465
+[INFO 2023-11-11 06:58:40,172 spr_agent.py:1520] ema entropy: 0.6595583515392028
+[INFO 2023-11-11 06:58:57,991 spr_agent.py:1401] step: 28239, x_ent_coef: 0.006470125168561935
+[INFO 2023-11-11 06:59:06,904 eval_run_experiment.py:617] steps executed:    28380, num episodes:       39, episode length:      892, return:   1200.0, normalized return:    0.059
+[INFO 2023-11-11 06:59:33,185 spr_agent.py:1520] ema entropy: 1.0114246760077281
+[INFO 2023-11-11 07:00:01,302 spr_agent.py:1520] ema entropy: 1.2574025733762682
+[INFO 2023-11-11 07:00:11,865 spr_agent.py:1401] step: 29406, x_ent_coef: 0.0063242497853934765
+[INFO 2023-11-11 07:00:35,363 spr_agent.py:1401] step: 29777, x_ent_coef: 0.006277875043451786
+[INFO 2023-11-11 07:00:38,841 spr_agent.py:1520] ema entropy: 1.0401018303888885
+[INFO 2023-11-11 07:00:39,538 eval_run_experiment.py:617] steps executed:    29843, num episodes:       40, episode length:     1463, return:   2500.0, normalized return:    0.257
+[INFO 2023-11-11 07:00:41,250 spr_agent.py:1401] step: 29870, x_ent_coef: 0.006266249809414148
+[INFO 2023-11-11 07:00:49,487 spr_agent.py:1520] ema entropy: 0.7339664731316481
+[INFO 2023-11-11 07:02:36,965 eval_run_experiment.py:617] steps executed:    31699, num episodes:       41, episode length:     1856, return:   2400.0, normalized return:    0.242
+[INFO 2023-11-11 07:02:50,393 spr_agent.py:1520] ema entropy: 0.8945137656060497
+[INFO 2023-11-11 07:03:00,319 spr_agent.py:1401] step: 32068, x_ent_coef: 0.005991499871015549
+[INFO 2023-11-11 07:03:03,801 spr_agent.py:1401] step: 32123, x_ent_coef: 0.005984624847769737
+[INFO 2023-11-11 07:03:08,801 spr_agent.py:1520] ema entropy: 0.8530765045114971
+[INFO 2023-11-11 07:03:12,603 eval_run_experiment.py:617] steps executed:    32262, num episodes:       42, episode length:      563, return:   1200.0, normalized return:    0.059
+[INFO 2023-11-11 07:03:15,151 spr_agent.py:1401] step: 32302, x_ent_coef: 0.0059622498229146
+[INFO 2023-11-11 07:03:51,037 spr_agent.py:1520] ema entropy: 0.6424334094157129
+[INFO 2023-11-11 07:04:05,545 eval_run_experiment.py:617] steps executed:    33098, num episodes:       43, episode length:      836, return:   1300.0, normalized return:    0.074
+[INFO 2023-11-11 07:04:49,406 eval_run_experiment.py:617] steps executed:    33791, num episodes:       44, episode length:      693, return:   1200.0, normalized return:    0.059
+[INFO 2023-11-11 07:05:40,389 spr_agent.py:1401] step: 34596, x_ent_coef: 0.00567549979314208
+[INFO 2023-11-11 07:05:56,275 spr_agent.py:1520] ema entropy: 0.923580348331503
+[INFO 2023-11-11 07:06:05,487 spr_agent.py:1401] step: 34993, x_ent_coef: 0.005625875201076269
+[INFO 2023-11-11 07:06:16,159 spr_agent.py:1520] ema entropy: 0.747991629186236
+[INFO 2023-11-11 07:06:42,395 spr_agent.py:1520] ema entropy: 0.7491853734225137
+[INFO 2023-11-11 07:06:51,568 spr_agent.py:1401] step: 35722, x_ent_coef: 0.005534749943763018
+[INFO 2023-11-11 07:06:56,686 spr_agent.py:1520] ema entropy: 0.876072006574067
+[INFO 2023-11-11 07:07:00,488 spr_agent.py:1401] step: 35863, x_ent_coef: 0.005517125129699707
+[INFO 2023-11-11 07:07:20,071 spr_agent.py:1401] step: 36173, x_ent_coef: 0.0054783751256763935
+[INFO 2023-11-11 07:07:43,595 spr_agent.py:1401] step: 36545, x_ent_coef: 0.005431875120848417
+[INFO 2023-11-11 07:07:53,838 eval_run_experiment.py:617] steps executed:    36707, num episodes:       45, episode length:     2916, return:   3900.0, normalized return:     0.47
+[INFO 2023-11-11 07:08:29,656 spr_agent.py:1401] step: 37273, x_ent_coef: 0.005340875126421452
+[INFO 2023-11-11 07:08:31,423 spr_agent.py:1520] ema entropy: 1.2945157875930893
+[INFO 2023-11-11 07:08:47,042 spr_agent.py:1520] ema entropy: 1.321085419331247
+[INFO 2023-11-11 07:08:57,653 spr_agent.py:1401] step: 37716, x_ent_coef: 0.005285500083118677
+[INFO 2023-11-11 07:09:39,136 spr_agent.py:1401] step: 38373, x_ent_coef: 0.00520337512716651
+[INFO 2023-11-11 07:10:34,070 eval_run_experiment.py:617] steps executed:    39243, num episodes:       46, episode length:     2536, return:   1500.0, normalized return:    0.105
+[INFO 2023-11-11 07:11:22,151 spr_agent.py:1210] 	 Resetting weights at step 40003.
+[INFO 2023-11-11 07:12:02,245 spr_agent.py:1520] ema entropy: 0.10234381403878946
+[INFO 2023-11-11 07:12:10,765 spr_agent.py:1520] ema entropy: 0.05658923852784226
+[INFO 2023-11-11 07:12:27,542 spr_agent.py:1401] step: 41033, x_ent_coef: 0.004870874807238579
+[INFO 2023-11-11 07:12:52,617 spr_agent.py:1401] step: 41428, x_ent_coef: 0.004821499809622765
+[INFO 2023-11-11 07:13:51,145 eval_run_experiment.py:617] steps executed:    42353, num episodes:       47, episode length:     3110, return:   3300.0, normalized return:    0.378
+[INFO 2023-11-11 07:13:53,082 spr_agent.py:1401] step: 42383, x_ent_coef: 0.004702125210314989
+[INFO 2023-11-11 07:14:26,461 eval_run_experiment.py:617] steps executed:    42900, num episodes:       48, episode length:      547, return:   1300.0, normalized return:    0.074
+[INFO 2023-11-11 07:15:01,845 eval_run_experiment.py:617] steps executed:    43447, num episodes:       49, episode length:      547, return:   1100.0, normalized return:    0.044
+[INFO 2023-11-11 07:15:13,451 spr_agent.py:1520] ema entropy: 0.5805125705839691
+[INFO 2023-11-11 07:15:20,962 eval_run_experiment.py:617] steps executed:    43742, num episodes:       50, episode length:      295, return:    800.0, normalized return:   -0.002
+[INFO 2023-11-11 07:15:26,862 spr_agent.py:1401] step: 43833, x_ent_coef: 0.004520874936133623
+[INFO 2023-11-11 07:15:35,333 spr_agent.py:1401] step: 43964, x_ent_coef: 0.0045044999569654465
+[INFO 2023-11-11 07:15:53,161 eval_run_experiment.py:617] steps executed:    44240, num episodes:       51, episode length:      498, return:   1500.0, normalized return:    0.105
+[INFO 2023-11-11 07:16:39,634 eval_run_experiment.py:617] steps executed:    44959, num episodes:       52, episode length:      719, return:   1700.0, normalized return:    0.135
+[INFO 2023-11-11 07:17:20,356 eval_run_experiment.py:617] steps executed:    45589, num episodes:       53, episode length:      630, return:   3200.0, normalized return:    0.363
+[INFO 2023-11-11 07:17:27,540 spr_agent.py:1520] ema entropy: 0.6636384397632547
+[INFO 2023-11-11 07:18:11,370 eval_run_experiment.py:617] steps executed:    46379, num episodes:       54, episode length:      790, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-11 07:18:22,424 spr_agent.py:1401] step: 46550, x_ent_coef: 0.004181249998509884
+[INFO 2023-11-11 07:20:14,240 spr_agent.py:1520] ema entropy: 0.8419946010048959
+[INFO 2023-11-11 07:20:34,410 spr_agent.py:1520] ema entropy: 0.7511503825385483
+[INFO 2023-11-11 07:20:59,481 spr_agent.py:1401] step: 48980, x_ent_coef: 0.00387750007212162
+[INFO 2023-11-11 07:21:19,298 spr_agent.py:1520] ema entropy: 0.8859033797477952
+[INFO 2023-11-11 07:21:21,242 spr_agent.py:1520] ema entropy: 0.9460318321444944
+[INFO 2023-11-11 07:21:39,013 spr_agent.py:1520] ema entropy: 1.12091256883497
+[INFO 2023-11-11 07:22:36,083 spr_agent.py:1401] step: 50476, x_ent_coef: 0.003690500045195222
+[INFO 2023-11-11 07:22:57,526 spr_agent.py:1401] step: 50809, x_ent_coef: 0.0036488750483840704
+[INFO 2023-11-11 07:23:19,473 eval_run_experiment.py:617] steps executed:    51150, num episodes:       55, episode length:     4771, return:   3800.0, normalized return:    0.454
+[INFO 2023-11-11 07:23:28,050 spr_agent.py:1401] step: 51283, x_ent_coef: 0.0035896250046789646
+[INFO 2023-11-11 07:23:33,473 spr_agent.py:1520] ema entropy: 0.7814991778173634
+[INFO 2023-11-11 07:24:17,549 spr_agent.py:1520] ema entropy: 0.7809776239018767
+[INFO 2023-11-11 07:24:30,769 eval_run_experiment.py:617] steps executed:    52257, num episodes:       56, episode length:     1107, return:   1500.0, normalized return:    0.105
+[INFO 2023-11-11 07:24:54,437 spr_agent.py:1401] step: 52624, x_ent_coef: 0.003421999979764223
+[INFO 2023-11-11 07:24:59,517 spr_agent.py:1520] ema entropy: 0.5642697430428227
+[INFO 2023-11-11 07:25:58,103 eval_run_experiment.py:617] steps executed:    53616, num episodes:       57, episode length:     1359, return:   3200.0, normalized return:    0.363
+[INFO 2023-11-11 07:26:05,872 spr_agent.py:1401] step: 53737, x_ent_coef: 0.003282875055447221
+[INFO 2023-11-11 07:27:05,224 eval_run_experiment.py:617] steps executed:    54660, num episodes:       58, episode length:     1044, return:   3300.0, normalized return:    0.378
+[INFO 2023-11-11 07:27:23,264 spr_agent.py:1520] ema entropy: 0.7422060137141818
+[INFO 2023-11-11 07:27:46,608 eval_run_experiment.py:617] steps executed:    55304, num episodes:       59, episode length:      644, return:   1300.0, normalized return:    0.074
+[INFO 2023-11-11 07:28:05,369 spr_agent.py:1401] step: 55596, x_ent_coef: 0.003050500061362982
+[INFO 2023-11-11 07:29:09,145 spr_agent.py:1401] step: 56585, x_ent_coef: 0.0029268749058246613
+[INFO 2023-11-11 07:29:55,706 spr_agent.py:1401] step: 57307, x_ent_coef: 0.0028366250917315483
+[INFO 2023-11-11 07:30:16,414 eval_run_experiment.py:617] steps executed:    57628, num episodes:       60, episode length:     2324, return:   3000.0, normalized return:    0.333
+[INFO 2023-11-11 07:30:58,753 spr_agent.py:1401] step: 58286, x_ent_coef: 0.0027142500039190054
+[INFO 2023-11-11 07:31:49,220 eval_run_experiment.py:617] steps executed:    59075, num episodes:       61, episode length:     1447, return:   6800.0, normalized return:    0.911
+[INFO 2023-11-11 07:32:21,378 spr_agent.py:1520] ema entropy: 0.765336756749612
+[INFO 2023-11-11 07:32:48,797 spr_agent.py:1210] 	 Resetting weights at step 60004.
+[INFO 2023-11-11 07:33:12,451 spr_agent.py:1520] ema entropy: 0.5481913269774712
+[INFO 2023-11-11 07:34:07,214 spr_agent.py:1401] step: 61236, x_ent_coef: 0.00234550004824996
+[INFO 2023-11-11 07:34:08,488 spr_agent.py:1520] ema entropy: 0.016434961163318277
+[INFO 2023-11-11 07:34:18,631 spr_agent.py:1401] step: 61415, x_ent_coef: 0.002323125023394823
+[INFO 2023-11-11 07:35:26,744 spr_agent.py:1520] ema entropy: 0.648863798054396
+[INFO 2023-11-11 07:35:34,479 eval_run_experiment.py:617] steps executed:    62606, num episodes:       62, episode length:     3531, return:   2100.0, normalized return:    0.196
+[INFO 2023-11-11 07:35:40,680 spr_agent.py:1520] ema entropy: 0.5455053320926211
+[INFO 2023-11-11 07:36:14,909 spr_agent.py:1401] step: 63240, x_ent_coef: 0.002094999887049198
+[INFO 2023-11-11 07:36:37,419 eval_run_experiment.py:617] steps executed:    63593, num episodes:       63, episode length:      987, return:    900.0, normalized return:    0.014
+[INFO 2023-11-11 07:38:23,579 spr_agent.py:1520] ema entropy: 0.7152539095662532
+[INFO 2023-11-11 07:39:32,070 spr_agent.py:1520] ema entropy: 0.6109830891282594
+[INFO 2023-11-11 07:39:55,136 eval_run_experiment.py:617] steps executed:    66685, num episodes:       64, episode length:     3092, return:   1600.0, normalized return:     0.12
+[INFO 2023-11-11 07:40:09,842 spr_agent.py:1520] ema entropy: 0.43008284609347924
+[INFO 2023-11-11 07:40:21,071 spr_agent.py:1401] step: 67091, x_ent_coef: 0.001613624976016581
+[INFO 2023-11-11 07:41:30,299 spr_agent.py:1401] step: 68176, x_ent_coef: 0.0014779999619349837
+[INFO 2023-11-11 07:42:29,377 eval_run_experiment.py:617] steps executed:    69101, num episodes:       65, episode length:     2416, return:   3200.0, normalized return:    0.363
+[INFO 2023-11-11 07:42:57,127 spr_agent.py:1520] ema entropy: 0.4247505332919216
+[INFO 2023-11-11 07:43:06,430 spr_agent.py:1401] step: 69678, x_ent_coef: 0.0012902499875053763
+[INFO 2023-11-11 07:43:12,327 spr_agent.py:1520] ema entropy: 0.2605990227641824
+[INFO 2023-11-11 07:43:21,606 eval_run_experiment.py:617] steps executed:    69915, num episodes:       66, episode length:      814, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-11 07:44:23,663 spr_agent.py:1401] step: 70886, x_ent_coef: 0.0011392500018700957
+[INFO 2023-11-11 07:45:37,636 eval_run_experiment.py:617] steps executed:    72039, num episodes:       67, episode length:     2124, return:   5600.0, normalized return:    0.728
+[INFO 2023-11-11 07:46:34,893 spr_agent.py:1520] ema entropy: 0.40648039182060186
+[INFO 2023-11-11 07:46:49,177 spr_agent.py:1520] ema entropy: 0.3861195394224933
+[INFO 2023-11-11 07:47:13,036 spr_agent.py:1520] ema entropy: 0.3425259644145657
+[INFO 2023-11-11 07:47:43,936 eval_run_experiment.py:617] steps executed:    74011, num episodes:       68, episode length:     1972, return:   6200.0, normalized return:    0.819
+[INFO 2023-11-11 07:48:18,163 spr_agent.py:1401] step: 74548, x_ent_coef: 0.0006815000087954104
+[INFO 2023-11-11 07:48:35,566 spr_agent.py:1520] ema entropy: 0.43823016894334255
+[INFO 2023-11-11 07:49:23,603 spr_agent.py:1401] step: 75573, x_ent_coef: 0.0005533749936148524
+[INFO 2023-11-11 07:49:37,315 eval_run_experiment.py:617] steps executed:    75788, num episodes:       69, episode length:     1777, return:   6500.0, normalized return:    0.865
+[INFO 2023-11-11 07:50:09,918 spr_agent.py:1401] step: 76298, x_ent_coef: 0.00046275000204332173
+[INFO 2023-11-11 07:50:26,827 eval_run_experiment.py:617] steps executed:    76562, num episodes:       70, episode length:      774, return:   1100.0, normalized return:    0.044
+[INFO 2023-11-11 07:50:34,740 spr_agent.py:1520] ema entropy: 0.3585360202749445
+[INFO 2023-11-11 07:51:24,709 eval_run_experiment.py:617] steps executed:    77464, num episodes:       71, episode length:      902, return:   2700.0, normalized return:    0.287
+[INFO 2023-11-11 07:52:22,210 spr_agent.py:1520] ema entropy: 0.5466870581531044
+[INFO 2023-11-11 07:53:38,012 spr_agent.py:1401] step: 79549, x_ent_coef: 5.63749999855645e-05
+[INFO 2023-11-11 07:54:07,177 spr_agent.py:1204] 	 Not resetting at step 80005, as need at least 20000 before 100000 to recover.
+[INFO 2023-11-11 07:54:11,518 spr_agent.py:1520] ema entropy: 0.6666616145995605
+[INFO 2023-11-11 07:55:31,352 spr_agent.py:1401] step: 81326, x_ent_coef: 0.0
+[INFO 2023-11-11 07:55:31,798 eval_run_experiment.py:617] steps executed:    81333, num episodes:       72, episode length:     3869, return:   3600.0, normalized return:    0.424
+[INFO 2023-11-11 07:57:21,343 spr_agent.py:1520] ema entropy: 0.29553586115386427
+[INFO 2023-11-11 07:57:22,866 spr_agent.py:1401] step: 83076, x_ent_coef: 0.0
+[INFO 2023-11-11 07:57:43,283 eval_run_experiment.py:617] steps executed:    83396, num episodes:       73, episode length:     2063, return:   9500.0, normalized return:    1.321
+[INFO 2023-11-11 07:57:55,229 spr_agent.py:1401] step: 83583, x_ent_coef: 0.0
+[INFO 2023-11-11 07:58:13,390 spr_agent.py:1401] step: 83868, x_ent_coef: 0.0
+[INFO 2023-11-11 07:58:25,130 spr_agent.py:1520] ema entropy: 0.1890359305913397
+[INFO 2023-11-11 07:58:52,857 eval_run_experiment.py:617] steps executed:    84487, num episodes:       74, episode length:     1091, return:   3800.0, normalized return:    0.454
+[INFO 2023-11-11 08:00:12,926 spr_agent.py:1401] step: 85742, x_ent_coef: 0.0
+[INFO 2023-11-11 08:00:29,200 spr_agent.py:1401] step: 85997, x_ent_coef: 0.0
+[INFO 2023-11-11 08:00:38,010 spr_agent.py:1520] ema entropy: 0.308624802564039
+[INFO 2023-11-11 08:00:55,769 spr_agent.py:1520] ema entropy: 0.3175544913833835
+[INFO 2023-11-11 08:00:57,120 spr_agent.py:1401] step: 86434, x_ent_coef: 0.0
+[INFO 2023-11-11 08:01:01,543 spr_agent.py:1520] ema entropy: 0.2831220300701248
+[INFO 2023-11-11 08:01:09,943 spr_agent.py:1401] step: 86634, x_ent_coef: 0.0
+[INFO 2023-11-11 08:01:51,919 eval_run_experiment.py:617] steps executed:    87286, num episodes:       75, episode length:     2799, return:  11900.0, normalized return:    1.686
+[INFO 2023-11-11 08:02:19,023 spr_agent.py:1520] ema entropy: 0.21642275352845028
+[INFO 2023-11-11 08:02:41,482 eval_run_experiment.py:617] steps executed:    88053, num episodes:       76, episode length:      767, return:   3000.0, normalized return:    0.333
+[INFO 2023-11-11 08:03:24,467 spr_agent.py:1520] ema entropy: 0.414499118699731
+[INFO 2023-11-11 08:04:19,523 spr_agent.py:1520] ema entropy: 0.30405479356867593
+[INFO 2023-11-11 08:04:29,202 spr_agent.py:1401] step: 89726, x_ent_coef: 0.0
+[INFO 2023-11-11 08:04:35,185 spr_agent.py:1520] ema entropy: 0.22926925270786663
+[INFO 2023-11-11 08:04:48,943 eval_run_experiment.py:617] steps executed:    90034, num episodes:       77, episode length:     1981, return:   9200.0, normalized return:    1.276
+[INFO 2023-11-11 08:05:17,937 spr_agent.py:1401] step: 90487, x_ent_coef: 0.0
+[INFO 2023-11-11 08:05:40,637 spr_agent.py:1520] ema entropy: 0.3098782068212276
+[INFO 2023-11-11 08:05:47,030 spr_agent.py:1520] ema entropy: 0.3675756798798852
+[INFO 2023-11-11 08:05:50,176 spr_agent.py:1401] step: 90991, x_ent_coef: 0.0
+[INFO 2023-11-11 08:06:40,462 eval_run_experiment.py:617] steps executed:    91776, num episodes:       78, episode length:     1742, return:  11800.0, normalized return:    1.671
+[INFO 2023-11-11 08:07:35,287 eval_run_experiment.py:617] steps executed:    92633, num episodes:       79, episode length:      857, return:   2700.0, normalized return:    0.287
+[INFO 2023-11-11 08:07:44,044 spr_agent.py:1401] step: 92770, x_ent_coef: 0.0
+[INFO 2023-11-11 08:08:23,338 eval_run_experiment.py:617] steps executed:    93386, num episodes:       80, episode length:      753, return:   3400.0, normalized return:    0.394
+[INFO 2023-11-11 08:08:28,189 spr_agent.py:1401] step: 93462, x_ent_coef: 0.0
+[INFO 2023-11-11 08:08:42,774 spr_agent.py:1401] step: 93691, x_ent_coef: 0.0
+[INFO 2023-11-11 08:08:55,966 spr_agent.py:1520] ema entropy: 0.35968298535515336
+[INFO 2023-11-11 08:09:08,320 spr_agent.py:1520] ema entropy: 0.3939359142094468
+[INFO 2023-11-11 08:09:15,792 spr_agent.py:1520] ema entropy: 0.37999226793130436
+[INFO 2023-11-11 08:09:18,791 spr_agent.py:1401] step: 94256, x_ent_coef: 0.0
+[INFO 2023-11-11 08:09:37,639 spr_agent.py:1520] ema entropy: 0.3974175687900549
+[INFO 2023-11-11 08:10:01,116 spr_agent.py:1401] step: 94920, x_ent_coef: 0.0
+[INFO 2023-11-11 08:10:35,531 spr_agent.py:1401] step: 95458, x_ent_coef: 0.0
+[INFO 2023-11-11 08:10:48,647 spr_agent.py:1401] step: 95663, x_ent_coef: 0.0
+[INFO 2023-11-11 08:11:18,013 spr_agent.py:1520] ema entropy: 0.30228311621369125
+[INFO 2023-11-11 08:11:27,769 spr_agent.py:1401] step: 96274, x_ent_coef: 0.0
+[INFO 2023-11-11 08:11:58,467 eval_run_experiment.py:617] steps executed:    96754, num episodes:       81, episode length:     3368, return:  18200.0, normalized return:    2.644
+[INFO 2023-11-11 08:12:02,640 spr_agent.py:1401] step: 96819, x_ent_coef: 0.0
+[INFO 2023-11-11 08:12:44,990 spr_agent.py:1520] ema entropy: 0.24264966893085593
+[INFO 2023-11-11 08:12:52,000 spr_agent.py:1520] ema entropy: 0.3497423984631629
+[INFO 2023-11-11 08:13:42,488 eval_run_experiment.py:617] steps executed:    98384, num episodes:       82, episode length:     1630, return:   6400.0, normalized return:     0.85
+[INFO 2023-11-11 08:13:43,395 spr_agent.py:1520] ema entropy: 0.344984718031526
+[INFO 2023-11-11 08:14:30,628 spr_agent.py:1520] ema entropy: 0.3324049594974528
+[INFO 2023-11-11 08:14:49,865 spr_agent.py:1520] ema entropy: 0.4183800426075047
+[INFO 2023-11-11 08:15:16,254 eval_run_experiment.py:617] steps executed:    99855, num episodes:       83, episode length:     1471, return:   6500.0, normalized return:    0.865
+Found devices [gpu(id=0)]
+[INFO 2023-11-11 08:15:25,584 eval_run_experiment.py:707] Average undiscounted return per training episode: 2562.65
+[INFO 2023-11-11 08:15:25,584 eval_run_experiment.py:709] Average normalized return per training episode: 0.27
+[INFO 2023-11-11 08:15:25,584 eval_run_experiment.py:711] Average training steps per second: 15.93
+[INFO 2023-11-11 08:15:25,584 checkpointer.py:67] Saving item to single_save/choppercommand-993234896.pth.
+[INFO 2023-11-11 08:15:27,824 utils.py:465] Renaming single_save/choppercommand-993234896.pth.orbax-checkpoint-tmp-1699661725584927 to single_save/choppercommand-993234896.pth
+[INFO 2023-11-11 08:15:27,824 utils.py:509] Finished saving checkpoint to `single_save/choppercommand-993234896.pth`.
++ (( j++ ))
++ (( j<=1 ))
++ strings=("ChopperCommand")
++ seed=1807987954
++ (( j=1 ))
++ (( j<=1 ))
++ for game_name in "${strings[@]}"
++ echo 'iteration 1'
+iteration 1
++ CUDA_VISIBLE_DEVICES=0
++ python -m bbf.train --agent=BBF --gin_files=bbf/configs/BBF-100K.gin '--gin_bindings=DataEfficientAtariRunner.game_name="ChopperCommand"' --run_number=1
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/ubuntu/lezhang.thu/AMD_machine/simple-bbf-10K/bigger_better_faster/bbf/train.py", line 24, in <module>
+    from absl import app
+ModuleNotFoundError: No module named 'absl'
++ strings=("ChopperCommand")
++ seed=1807987954
++ (( j=1 ))
++ (( j<=1 ))
++ for game_name in "${strings[@]}"
++ echo 'iteration 1'
+iteration 1
++ CUDA_VISIBLE_DEVICES=0
++ python -m bbf.train --agent=BBF --gin_files=bbf/configs/BBF-100K.gin '--gin_bindings=DataEfficientAtariRunner.game_name="ChopperCommand"' --run_number=1
+/home/ubuntu/anaconda3/envs/jax/lib/python3.8/site-packages/jax/_src/pjit.py:307: DeprecationWarning: backend and device argument on jit is deprecated. You can use a `jax.sharding.Mesh` context manager or device_put the arguments before passing them to `jit`. Please see https://jax.readthedocs.io/en/latest/notebooks/Distributed_arrays_and_automatic_parallelization.html for more information.
+  warnings.warn(
+[INFO 2023-11-16 19:23:42,169 train.py:94] Setting random seed: 90772724
+[INFO 2023-11-16 19:23:42,171 train.py:134] Using MaxEpisodeEvalRunner for evaluation.
+[INFO 2023-11-16 19:23:42,171 eval_run_experiment.py:423] game_name: ChopperCommand
+A.L.E: Arcade Learning Environment (version 0.7.5+db37282)
+[Powered by Stella]
+/home/ubuntu/anaconda3/envs/jax/lib/python3.8/site-packages/gym/core.py:317: DeprecationWarning: [33mWARN: Initializing wrapper in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.[0m
+  deprecation(
+/home/ubuntu/anaconda3/envs/jax/lib/python3.8/site-packages/gym/wrappers/step_api_compatibility.py:39: DeprecationWarning: [33mWARN: Initializing environment in old step API which returns one bool instead of two. It is recommended to set `new_step_api=True` to use new step API. This will be the default behaviour in future.[0m
+  deprecation(
+[INFO 2023-11-16 19:23:42,252 spr_agent.py:883] Creating BBFAgent agent with the following parameters:
+[INFO 2023-11-16 19:23:42,253 spr_agent.py:887] 	 double_dqn: True
+[INFO 2023-11-16 19:23:42,253 spr_agent.py:888] 	 distributional: True
+[INFO 2023-11-16 19:23:42,253 spr_agent.py:889] 	 data_augmentation: True
+[INFO 2023-11-16 19:23:42,253 spr_agent.py:890] 	 num_updates_per_train_step: 1
+[INFO 2023-11-16 19:23:42,335 xla_bridge.py:603] Unable to initialize backend 'rocm': NOT_FOUND: Could not find registered platform with name: "rocm". Available platform names are: Interpreter CUDA
+[INFO 2023-11-16 19:23:42,336 xla_bridge.py:603] Unable to initialize backend 'tpu': module 'jaxlib.xla_extension' has no attribute 'get_tpu_client'
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:962] 	 Found following local devices: [gpu(id=0)]
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:968] 	 Running with dtype <class 'jax.numpy.float32'>
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:785] Creating BBFAgent agent with the following parameters:
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:787] 	 gamma: 0.997000
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:788] 	 update_horizon: 10.000000
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:789] 	 min_replay_history: 2000
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:790] 	 update_period: 1
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:791] 	 target_update_period: 1
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:792] 	 optimizer: adam
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:793] 	 seed: 90772724
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:794] 	 loss_type: mse
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:795] 	 preprocess_fn: None
+[INFO 2023-11-16 19:23:42,718 spr_agent.py:796] 	 allow_partial_reload: False
+[INFO 2023-11-16 19:23:42,743 subsequence_replay_buffer.py:97] Creating a PrioritizedJaxSubsequenceParallelEnvReplayBuffer replay memory with the following parameters:
+[INFO 2023-11-16 19:23:42,743 subsequence_replay_buffer.py:100] 	 observation_shape: (84, 84)
+[INFO 2023-11-16 19:23:42,743 subsequence_replay_buffer.py:101] 	 observation_dtype: <class 'numpy.uint8'>
+[INFO 2023-11-16 19:23:42,743 subsequence_replay_buffer.py:102] 	 terminal_dtype: <class 'numpy.uint8'>
+[INFO 2023-11-16 19:23:42,743 subsequence_replay_buffer.py:103] 	 stack_size: 4
+[INFO 2023-11-16 19:23:42,743 subsequence_replay_buffer.py:104] 	 use_next_state: 1
+[INFO 2023-11-16 19:23:42,743 subsequence_replay_buffer.py:105] 	 replay_capacity: 200000
+[INFO 2023-11-16 19:23:42,743 subsequence_replay_buffer.py:106] 	 batch_size: 32
+[INFO 2023-11-16 19:23:42,743 subsequence_replay_buffer.py:107] 	 update_horizon: 10
+[INFO 2023-11-16 19:23:42,743 subsequence_replay_buffer.py:108] 	 gamma: 0.997000
+[INFO 2023-11-16 19:23:45,743 spr_agent.py:738] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-11-16 19:23:45,743 spr_agent.py:738] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-11-16 19:23:45,743 spr_agent.py:738] Creating AdamW optimizer with settings lr=0.000100, beta1=0.900000, beta2=0.999000, eps=0.000150, wd=0.100000
+[INFO 2023-11-16 19:23:46,060 spr_agent.py:1117] 	 Operating with 1 environments, batch size 32 and replay ratio 256
+[INFO 2023-11-16 19:23:46,060 spr_agent.py:1124] 	 Calculated 8 updates per update phase
+[INFO 2023-11-16 19:23:46,060 spr_agent.py:1128] 	 Calculated update frequency of 1 step
+[INFO 2023-11-16 19:23:46,060 spr_agent.py:1133] 	 Setting min_replay_history to 2000.0 from 2000
+[INFO 2023-11-16 19:23:46,060 spr_agent.py:1152] 	 Running 4 groups of 2 batches per 1 env step
+Got gin bindings:
+['DataEfficientAtariRunner.game_name="ChopperCommand"']
+Sanitized gin bindings to:
+['DataEfficientAtariRunner.game_name="ChopperCommand"']
+FLAGS.max_episode_eval: True
+self._training_steps: 100000
+********************
+ self.target_eval_mode: False
+ self.target_action_selection: True
+ num_actions: 18
+ self.reset_target: True
+ self._num_updates_per_train_step: 4
+ self._batches_to_group: 2
+explore_end_steps: 90000
+[INFO 2023-11-16 19:23:46,060 eval_run_experiment.py:434] Num evaluation episodes: 100
+/home/ubuntu/anaconda3/envs/jax/lib/python3.8/site-packages/gym/utils/passive_env_checker.py:227: DeprecationWarning: [33mWARN: Core environment is written in old step API which returns one bool instead of two. It is recommended to rewrite the environment with new step API. [0m
+  logger.deprecation(
+/home/ubuntu/anaconda3/envs/jax/lib/python3.8/site-packages/gym/utils/passive_env_checker.py:233: DeprecationWarning: `np.bool8` is a deprecated alias for `np.bool_`.  (Deprecated NumPy 1.24)
+  if not isinstance(done, (bool, np.bool8)):
+[INFO 2023-11-16 19:23:46,224 eval_run_experiment.py:784] Beginning training...
+[INFO 2023-11-16 19:23:46,224 eval_run_experiment.py:760] Starting iteration 0
+[INFO 2023-11-16 19:23:46,987 eval_run_experiment.py:617] steps executed:      603, num episodes:        1, episode length:      603, return:    500.0, normalized return:   -0.047
+[INFO 2023-11-16 19:23:47,456 spr_agent.py:1401] step: 1038, x_ent_coef: 0.009890737012028694
+[INFO 2023-11-16 19:23:47,809 eval_run_experiment.py:617] steps executed:     1375, num episodes:        2, episode length:      772, return:    700.0, normalized return:   -0.017
+[INFO 2023-11-16 19:26:46,440 spr_agent.py:1401] step: 2683, x_ent_coef: 0.009717578999698162
+[INFO 2023-11-16 19:30:19,049 eval_run_experiment.py:617] steps executed:     3523, num episodes:        3, episode length:     2148, return:   2000.0, normalized return:    0.181
+[INFO 2023-11-16 19:30:43,917 spr_agent.py:1401] step: 3621, x_ent_coef: 0.009618842042982578
+[INFO 2023-11-16 19:30:55,314 spr_agent.py:1520] ema entropy: 0.46785410011281325
+[INFO 2023-11-16 19:31:13,045 eval_run_experiment.py:617] steps executed:     3736, num episodes:        4, episode length:      213, return:    400.0, normalized return:   -0.062
+[INFO 2023-11-16 19:33:02,013 eval_run_experiment.py:617] steps executed:     4170, num episodes:        5, episode length:      434, return:    600.0, normalized return:   -0.032
+[INFO 2023-11-16 19:34:49,798 spr_agent.py:1520] ema entropy: 0.6362891914197134
+[INFO 2023-11-16 19:34:59,519 eval_run_experiment.py:617] steps executed:     4640, num episodes:        6, episode length:      470, return:    500.0, normalized return:   -0.047
+[INFO 2023-11-16 19:35:55,631 spr_agent.py:1520] ema entropy: 0.6895625082297122
+[INFO 2023-11-16 19:36:09,669 spr_agent.py:1401] step: 4920, x_ent_coef: 0.009482105262577534
+[INFO 2023-11-16 19:36:24,193 spr_agent.py:1520] ema entropy: 0.8185112067823057
+[INFO 2023-11-16 19:36:30,459 spr_agent.py:1210] 	 Resetting weights at step 5002.
+[INFO 2023-11-16 19:39:02,662 eval_run_experiment.py:617] steps executed:     5605, num episodes:        7, episode length:      965, return:   1000.0, normalized return:    0.029
+[INFO 2023-11-16 19:39:17,714 spr_agent.py:1520] ema entropy: 0.654423159246208
+[INFO 2023-11-16 19:40:15,854 spr_agent.py:1520] ema entropy: 0.6818962875319784
+[INFO 2023-11-16 19:40:23,607 eval_run_experiment.py:617] steps executed:     5928, num episodes:        8, episode length:      323, return:    700.0, normalized return:   -0.017
+[INFO 2023-11-16 19:43:36,488 eval_run_experiment.py:617] steps executed:     6698, num episodes:        9, episode length:      770, return:   1000.0, normalized return:    0.029
+[INFO 2023-11-16 19:45:58,694 spr_agent.py:1401] step: 7265, x_ent_coef: 0.009235262870788574
+[INFO 2023-11-16 19:47:59,381 eval_run_experiment.py:617] steps executed:     7747, num episodes:       10, episode length:     1049, return:   1100.0, normalized return:    0.044
+[INFO 2023-11-16 19:48:13,907 spr_agent.py:1401] step: 7805, x_ent_coef: 0.009178421460092068
+[INFO 2023-11-16 19:48:38,929 spr_agent.py:1401] step: 7905, x_ent_coef: 0.009167894721031189
+[INFO 2023-11-16 19:49:39,972 spr_agent.py:1401] step: 8149, x_ent_coef: 0.009142210707068443
+[INFO 2023-11-16 19:49:40,469 spr_agent.py:1520] ema entropy: 0.6428070835748877
+[INFO 2023-11-16 19:50:28,674 spr_agent.py:1520] ema entropy: 0.7891438674836413
+[INFO 2023-11-16 19:53:04,245 eval_run_experiment.py:617] steps executed:     8967, num episodes:       11, episode length:     1220, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-16 19:54:59,934 eval_run_experiment.py:617] steps executed:     9430, num episodes:       12, episode length:      463, return:   1000.0, normalized return:    0.029
+[INFO 2023-11-16 19:56:43,439 spr_agent.py:1401] step: 9844, x_ent_coef: 0.00896378979086876
+[INFO 2023-11-16 19:57:11,664 eval_run_experiment.py:617] steps executed:     9957, num episodes:       13, episode length:      527, return:    700.0, normalized return:   -0.017
+[INFO 2023-11-16 19:57:17,919 spr_agent.py:1520] ema entropy: 0.9409719217275789
+[INFO 2023-11-16 19:57:18,673 spr_agent.py:1401] step: 9985, x_ent_coef: 0.008948947302997112
+[INFO 2023-11-16 19:57:23,424 spr_agent.py:1210] 	 Resetting weights at step 10003.
+[INFO 2023-11-16 19:58:36,079 eval_run_experiment.py:617] steps executed:    10295, num episodes:       14, episode length:      338, return:    500.0, normalized return:   -0.047
+[INFO 2023-11-16 20:01:00,777 eval_run_experiment.py:617] steps executed:    10875, num episodes:       15, episode length:      580, return:   1100.0, normalized return:    0.044
+[INFO 2023-11-16 20:01:25,012 spr_agent.py:1401] step: 10972, x_ent_coef: 0.008845052681863308
+[INFO 2023-11-16 20:01:59,957 spr_agent.py:1520] ema entropy: 0.7710526856642215
+[INFO 2023-11-16 20:03:22,551 eval_run_experiment.py:617] steps executed:    11443, num episodes:       16, episode length:      568, return:   1200.0, normalized return:    0.059
+[INFO 2023-11-16 20:04:53,540 spr_agent.py:1401] step: 11809, x_ent_coef: 0.008756947703659534
+[INFO 2023-11-16 20:05:01,980 spr_agent.py:1401] step: 11843, x_ent_coef: 0.008753368631005287
+[INFO 2023-11-16 20:05:42,756 spr_agent.py:1401] step: 12007, x_ent_coef: 0.008736105635762215
+[INFO 2023-11-16 20:06:32,975 spr_agent.py:1401] step: 12209, x_ent_coef: 0.008714841678738594
+[INFO 2023-11-16 20:06:47,410 eval_run_experiment.py:617] steps executed:    12267, num episodes:       17, episode length:      824, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-16 20:08:29,777 spr_agent.py:1520] ema entropy: 0.7242551245150282
+[INFO 2023-11-16 20:09:34,712 eval_run_experiment.py:617] steps executed:    12938, num episodes:       18, episode length:      671, return:    900.0, normalized return:    0.014
+[INFO 2023-11-16 20:09:39,476 spr_agent.py:1401] step: 12957, x_ent_coef: 0.008636104874312878
+[INFO 2023-11-16 20:10:14,497 spr_agent.py:1401] step: 13097, x_ent_coef: 0.008621368557214737
+[INFO 2023-11-16 20:11:05,483 spr_agent.py:1520] ema entropy: 0.9874679717559814
+[INFO 2023-11-16 20:11:34,471 spr_agent.py:1520] ema entropy: 0.9790816220145436
+[INFO 2023-11-16 20:11:40,477 eval_run_experiment.py:617] steps executed:    13441, num episodes:       19, episode length:      503, return:    700.0, normalized return:   -0.017
+[INFO 2023-11-16 20:17:05,169 eval_run_experiment.py:617] steps executed:    14741, num episodes:       20, episode length:     1300, return:    700.0, normalized return:   -0.017
+[INFO 2023-11-16 20:18:11,153 spr_agent.py:1210] 	 Resetting weights at step 15004.
+[INFO 2023-11-16 20:18:52,161 eval_run_experiment.py:617] steps executed:    15169, num episodes:       21, episode length:      428, return:    800.0, normalized return:   -0.002
+[INFO 2023-11-16 20:19:46,787 spr_agent.py:1401] step: 15388, x_ent_coef: 0.00838021095842123
+[INFO 2023-11-16 20:23:23,983 spr_agent.py:1401] step: 16261, x_ent_coef: 0.008288315497338772
+[INFO 2023-11-16 20:24:49,440 eval_run_experiment.py:617] steps executed:    16605, num episodes:       22, episode length:     1436, return:   1300.0, normalized return:    0.074
+[INFO 2023-11-16 20:27:02,687 eval_run_experiment.py:617] steps executed:    17141, num episodes:       23, episode length:      536, return:   1100.0, normalized return:    0.044
+[INFO 2023-11-16 20:28:08,323 spr_agent.py:1401] step: 17405, x_ent_coef: 0.008167894557118416
+[INFO 2023-11-16 20:31:03,201 eval_run_experiment.py:617] steps executed:    18104, num episodes:       24, episode length:      963, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-16 20:32:33,689 spr_agent.py:1520] ema entropy: 1.0072771745619327
+[INFO 2023-11-16 20:32:43,245 eval_run_experiment.py:617] steps executed:    18501, num episodes:       25, episode length:      397, return:    800.0, normalized return:   -0.002
+[INFO 2023-11-16 20:35:59,470 eval_run_experiment.py:617] steps executed:    19280, num episodes:       26, episode length:      779, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-16 20:37:53,120 spr_agent.py:1401] step: 19731, x_ent_coef: 0.00792305264621973
+[INFO 2023-11-16 20:39:02,419 spr_agent.py:1210] 	 Resetting weights at step 20005.
+[INFO 2023-11-16 20:39:16,283 eval_run_experiment.py:617] steps executed:    20061, num episodes:       27, episode length:      781, return:   1100.0, normalized return:    0.044
+[INFO 2023-11-16 20:40:09,333 eval_run_experiment.py:617] steps executed:    20271, num episodes:       28, episode length:      210, return:    600.0, normalized return:   -0.032
+[INFO 2023-11-16 20:40:16,408 spr_agent.py:1401] step: 20299, x_ent_coef: 0.007863263599574566
+[INFO 2023-11-16 20:41:37,798 eval_run_experiment.py:617] steps executed:    20622, num episodes:       29, episode length:      351, return:    600.0, normalized return:   -0.032
+[INFO 2023-11-16 20:42:54,588 eval_run_experiment.py:617] steps executed:    20927, num episodes:       30, episode length:      305, return:   1000.0, normalized return:    0.029
+[INFO 2023-11-16 20:43:16,036 spr_agent.py:1520] ema entropy: 0.7327339735464288
+[INFO 2023-11-16 20:44:22,018 eval_run_experiment.py:617] steps executed:    21274, num episodes:       31, episode length:      347, return:   1000.0, normalized return:    0.029
+[INFO 2023-11-16 20:44:37,181 spr_agent.py:1401] step: 21334, x_ent_coef: 0.007754315622150898
+[INFO 2023-11-16 20:45:36,489 spr_agent.py:1520] ema entropy: 1.093591646344646
+[INFO 2023-11-16 20:46:05,451 spr_agent.py:1520] ema entropy: 0.8284461967988245
+[INFO 2023-11-16 20:46:36,751 eval_run_experiment.py:617] steps executed:    21808, num episodes:       32, episode length:      534, return:   1100.0, normalized return:    0.044
+[INFO 2023-11-16 20:48:37,132 eval_run_experiment.py:617] steps executed:    22285, num episodes:       33, episode length:      477, return:   1000.0, normalized return:    0.029
+[INFO 2023-11-16 20:50:54,156 eval_run_experiment.py:617] steps executed:    22828, num episodes:       34, episode length:      543, return:   1000.0, normalized return:    0.029
+[INFO 2023-11-16 20:53:40,485 spr_agent.py:1401] step: 23487, x_ent_coef: 0.007527684327214956
+[INFO 2023-11-16 20:55:11,137 spr_agent.py:1401] step: 23846, x_ent_coef: 0.007489894516766071
+[INFO 2023-11-16 20:57:03,307 eval_run_experiment.py:617] steps executed:    24290, num episodes:       35, episode length:     1462, return:   1800.0, normalized return:     0.15
+[INFO 2023-11-16 21:00:04,923 spr_agent.py:1210] 	 Resetting weights at step 25006.
+[INFO 2023-11-16 21:00:29,533 eval_run_experiment.py:617] steps executed:    25104, num episodes:       36, episode length:      814, return:   1300.0, normalized return:    0.074
+[INFO 2023-11-16 21:01:30,199 spr_agent.py:1401] step: 25343, x_ent_coef: 0.007332315668463707
+[INFO 2023-11-16 21:01:35,278 spr_agent.py:1520] ema entropy: 1.2448033564637748
+[INFO 2023-11-16 21:02:15,655 eval_run_experiment.py:617] steps executed:    25522, num episodes:       37, episode length:      418, return:    700.0, normalized return:   -0.017
+[INFO 2023-11-16 21:04:37,743 eval_run_experiment.py:617] steps executed:    26082, num episodes:       38, episode length:      560, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-16 21:06:26,231 spr_agent.py:1401] step: 26510, x_ent_coef: 0.007209473755210638
+[INFO 2023-11-16 21:07:40,233 spr_agent.py:1401] step: 26802, x_ent_coef: 0.007178736850619316
+[INFO 2023-11-16 21:08:24,312 spr_agent.py:1520] ema entropy: 1.3835656062807447
+[INFO 2023-11-16 21:09:25,462 eval_run_experiment.py:617] steps executed:    27219, num episodes:       39, episode length:     1137, return:   2000.0, normalized return:    0.181
+[INFO 2023-11-16 21:10:51,686 spr_agent.py:1520] ema entropy: 1.0847040254980926
+[INFO 2023-11-16 21:12:16,780 spr_agent.py:1401] step: 27898, x_ent_coef: 0.007063368335366249
+[INFO 2023-11-16 21:13:17,988 spr_agent.py:1401] step: 28140, x_ent_coef: 0.0070378948003053665
+[INFO 2023-11-16 21:15:36,457 spr_agent.py:1520] ema entropy: 1.5010194110833357
+[INFO 2023-11-16 21:15:53,127 spr_agent.py:1401] step: 28754, x_ent_coef: 0.006973263341933489
+[INFO 2023-11-16 21:18:43,426 eval_run_experiment.py:617] steps executed:    29430, num episodes:       40, episode length:     2211, return:   1600.0, normalized return:     0.12
+[INFO 2023-11-16 21:19:42,969 spr_agent.py:1520] ema entropy: 0.8127738921276436
+[INFO 2023-11-16 21:19:46,007 spr_agent.py:1401] step: 29678, x_ent_coef: 0.006876000203192234
+[INFO 2023-11-16 21:20:05,435 spr_agent.py:1401] step: 29755, x_ent_coef: 0.0068678949028253555
+[INFO 2023-11-16 21:21:09,286 spr_agent.py:1210] 	 Resetting weights at step 30007.
+[INFO 2023-11-16 21:21:42,392 eval_run_experiment.py:617] steps executed:    30139, num episodes:       41, episode length:      709, return:   1200.0, normalized return:    0.059
+[INFO 2023-11-16 21:22:29,449 eval_run_experiment.py:617] steps executed:    30325, num episodes:       42, episode length:      186, return:    300.0, normalized return:   -0.078
+[INFO 2023-11-16 21:23:01,332 spr_agent.py:1520] ema entropy: 1.3173954304177802
+[INFO 2023-11-16 21:23:15,510 spr_agent.py:1520] ema entropy: 1.2518091503179272
+[INFO 2023-11-16 21:23:17,281 spr_agent.py:1520] ema entropy: 1.3032424087462207
+[INFO 2023-11-16 21:23:30,670 eval_run_experiment.py:617] steps executed:    30567, num episodes:       43, episode length:      242, return:    500.0, normalized return:   -0.047
+[INFO 2023-11-16 21:24:24,196 spr_agent.py:1401] step: 30779, x_ent_coef: 0.006760105490684509
+[INFO 2023-11-16 21:24:51,217 spr_agent.py:1401] step: 30886, x_ent_coef: 0.00674884207546711
+[INFO 2023-11-16 21:26:36,189 spr_agent.py:1520] ema entropy: 1.3016881050907438
+[INFO 2023-11-16 21:26:37,203 spr_agent.py:1520] ema entropy: 1.3000252544168482
+[INFO 2023-11-16 21:28:10,207 spr_agent.py:1401] step: 31675, x_ent_coef: 0.006665789522230625
+[INFO 2023-11-16 21:29:41,089 eval_run_experiment.py:617] steps executed:    32035, num episodes:       44, episode length:     1468, return:   2900.0, normalized return:    0.318
+[INFO 2023-11-16 21:30:46,713 spr_agent.py:1520] ema entropy: 0.8710779986227107
+[INFO 2023-11-16 21:33:34,839 spr_agent.py:1401] step: 32964, x_ent_coef: 0.006530105136334896
+[INFO 2023-11-16 21:35:46,510 spr_agent.py:1401] step: 33488, x_ent_coef: 0.006474947556853294
+[INFO 2023-11-16 21:36:18,864 spr_agent.py:1520] ema entropy: 1.410089932582111
+[INFO 2023-11-16 21:36:29,976 spr_agent.py:1401] step: 33660, x_ent_coef: 0.006456842180341482
+[INFO 2023-11-16 21:36:41,813 eval_run_experiment.py:617] steps executed:    33707, num episodes:       45, episode length:     1672, return:   1600.0, normalized return:     0.12
+[INFO 2023-11-16 21:39:20,336 spr_agent.py:1401] step: 34336, x_ent_coef: 0.006385684013366699
+[INFO 2023-11-16 21:39:30,152 spr_agent.py:1520] ema entropy: 1.1191488605057984
+[INFO 2023-11-16 21:39:32,170 spr_agent.py:1520] ema entropy: 1.1776493649138113
+[INFO 2023-11-16 21:41:07,175 spr_agent.py:1401] step: 34760, x_ent_coef: 0.006341052707284689
+[INFO 2023-11-16 21:42:09,782 spr_agent.py:1210] 	 Resetting weights at step 35008.
+[INFO 2023-11-16 21:42:50,350 eval_run_experiment.py:617] steps executed:    35170, num episodes:       46, episode length:     1463, return:   1500.0, normalized return:    0.105
+[INFO 2023-11-16 21:44:19,909 spr_agent.py:1401] step: 35526, x_ent_coef: 0.006260421127080917
+[INFO 2023-11-16 21:45:25,770 spr_agent.py:1520] ema entropy: 1.0542802106137499
+[INFO 2023-11-16 21:47:16,382 eval_run_experiment.py:617] steps executed:    36227, num episodes:       47, episode length:     1057, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-16 21:48:49,103 spr_agent.py:1520] ema entropy: 0.9139140153835988
+[INFO 2023-11-16 21:49:31,119 spr_agent.py:1401] step: 36762, x_ent_coef: 0.006130315829068422
+[INFO 2023-11-16 21:49:55,502 eval_run_experiment.py:617] steps executed:    36859, num episodes:       48, episode length:      632, return:   1500.0, normalized return:    0.105
+[INFO 2023-11-16 21:52:48,162 eval_run_experiment.py:617] steps executed:    37546, num episodes:       49, episode length:      687, return:   1300.0, normalized return:    0.074
+[INFO 2023-11-16 21:52:50,177 spr_agent.py:1520] ema entropy: 0.8787357222399288
+[INFO 2023-11-16 21:53:45,481 spr_agent.py:1401] step: 37775, x_ent_coef: 0.006023684050887823
+[INFO 2023-11-16 21:54:18,082 spr_agent.py:1520] ema entropy: 0.7914337531369183
+[INFO 2023-11-16 21:54:33,858 spr_agent.py:1401] step: 37968, x_ent_coef: 0.006003368645906448
+[INFO 2023-11-16 21:54:38,125 spr_agent.py:1401] step: 37985, x_ent_coef: 0.006001579109579325
+[INFO 2023-11-16 21:55:24,398 spr_agent.py:1520] ema entropy: 1.2026540073980279
+[INFO 2023-11-16 21:55:52,383 spr_agent.py:1401] step: 38280, x_ent_coef: 0.005970526486635208
+[INFO 2023-11-16 21:55:55,657 spr_agent.py:1520] ema entropy: 1.3111600853558587
+[INFO 2023-11-16 21:57:25,018 eval_run_experiment.py:617] steps executed:    38648, num episodes:       50, episode length:     1102, return:   1500.0, normalized return:    0.105
+[INFO 2023-11-16 21:58:07,478 spr_agent.py:1520] ema entropy: 0.8065251545964806
+[INFO 2023-11-16 21:59:21,270 spr_agent.py:1401] step: 39111, x_ent_coef: 0.005883052479475737
+[INFO 2023-11-16 22:01:41,141 spr_agent.py:1520] ema entropy: 1.7164186458539707
+[INFO 2023-11-16 22:03:06,746 spr_agent.py:1210] 	 Resetting weights at step 40009.
+[INFO 2023-11-16 22:03:30,277 eval_run_experiment.py:617] steps executed:    40103, num episodes:       51, episode length:     1455, return:   3000.0, normalized return:    0.333
+[INFO 2023-11-16 22:04:28,311 spr_agent.py:1520] ema entropy: 1.0038735096524296
+[INFO 2023-11-16 22:04:56,180 eval_run_experiment.py:617] steps executed:    40443, num episodes:       52, episode length:      340, return:    500.0, normalized return:   -0.047
+[INFO 2023-11-16 22:08:51,906 spr_agent.py:1401] step: 41375, x_ent_coef: 0.005644736811518669
+[INFO 2023-11-16 22:13:03,027 spr_agent.py:1401] step: 42372, x_ent_coef: 0.005539789330214262
+[INFO 2023-11-16 22:14:29,205 spr_agent.py:1520] ema entropy: 1.3467156672885807
+[INFO 2023-11-16 22:15:28,626 spr_agent.py:1520] ema entropy: 1.4744487102939305
+[INFO 2023-11-16 22:16:12,000 eval_run_experiment.py:617] steps executed:    43123, num episodes:       53, episode length:     2680, return:   1500.0, normalized return:    0.105
+[INFO 2023-11-16 22:17:56,044 spr_agent.py:1401] step: 43534, x_ent_coef: 0.005417473614215851
+[INFO 2023-11-16 22:18:12,491 spr_agent.py:1401] step: 43599, x_ent_coef: 0.005410631652921438
+[INFO 2023-11-16 22:19:36,782 spr_agent.py:1520] ema entropy: 0.9967603067108826
+[INFO 2023-11-16 22:19:42,820 spr_agent.py:1520] ema entropy: 0.997332212532403
+[INFO 2023-11-16 22:20:02,188 spr_agent.py:1520] ema entropy: 0.9112116417973634
+[INFO 2023-11-16 22:21:53,138 spr_agent.py:1401] step: 44473, x_ent_coef: 0.0053186314180493355
+[INFO 2023-11-16 22:24:08,621 spr_agent.py:1210] 	 Resetting weights at step 45010.
+[INFO 2023-11-16 22:24:25,009 spr_agent.py:1520] ema entropy: 1.0681940871642175
+[INFO 2023-11-16 22:24:38,845 eval_run_experiment.py:617] steps executed:    45131, num episodes:       54, episode length:     2008, return:   2300.0, normalized return:    0.226
+[INFO 2023-11-16 22:26:27,110 eval_run_experiment.py:617] steps executed:    45563, num episodes:       55, episode length:      432, return:   1100.0, normalized return:    0.044
+[INFO 2023-11-16 22:27:36,617 spr_agent.py:1401] step: 45840, x_ent_coef: 0.005174736957997084
+[INFO 2023-11-16 22:29:24,991 spr_agent.py:1520] ema entropy: 1.0833481399229783
+[INFO 2023-11-16 22:33:07,097 eval_run_experiment.py:617] steps executed:    47163, num episodes:       56, episode length:     1600, return:   3800.0, normalized return:    0.454
+[INFO 2023-11-16 22:34:46,108 spr_agent.py:1401] step: 47558, x_ent_coef: 0.004993894603103399
+[INFO 2023-11-16 22:35:28,643 spr_agent.py:1520] ema entropy: 0.765449377706834
+[INFO 2023-11-16 22:35:54,143 spr_agent.py:1520] ema entropy: 0.6632287827104112
+[INFO 2023-11-16 22:37:43,335 spr_agent.py:1401] step: 48267, x_ent_coef: 0.004919263068586588
+[INFO 2023-11-16 22:37:54,777 spr_agent.py:1401] step: 48313, x_ent_coef: 0.004914421122521162
+[INFO 2023-11-16 22:41:58,672 spr_agent.py:1520] ema entropy: 1.016861038827314
+[INFO 2023-11-16 22:43:42,634 spr_agent.py:1520] ema entropy: 1.0975574661628376
+[INFO 2023-11-16 22:44:58,209 spr_agent.py:1210] 	 Resetting weights at step 50011.
+[INFO 2023-11-16 22:45:41,188 eval_run_experiment.py:617] steps executed:    50185, num episodes:       57, episode length:     3022, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-16 22:48:21,899 eval_run_experiment.py:617] steps executed:    50831, num episodes:       58, episode length:      646, return:    900.0, normalized return:    0.014
+[INFO 2023-11-16 22:50:18,195 spr_agent.py:1520] ema entropy: 0.6845581925615791
+[INFO 2023-11-16 22:51:04,131 spr_agent.py:1520] ema entropy: 0.6497655897842818
+[INFO 2023-11-16 22:53:05,968 spr_agent.py:1520] ema entropy: 1.1043156680532407
+[INFO 2023-11-16 22:53:34,038 spr_agent.py:1520] ema entropy: 0.8557294876817285
+[INFO 2023-11-16 22:55:11,250 spr_agent.py:1520] ema entropy: 1.0374858039652068
+[INFO 2023-11-16 22:57:16,987 spr_agent.py:1520] ema entropy: 0.7629526656134212
+[INFO 2023-11-16 22:57:33,770 eval_run_experiment.py:617] steps executed:    53037, num episodes:       59, episode length:     2206, return:   2300.0, normalized return:    0.226
+[INFO 2023-11-16 22:57:39,563 spr_agent.py:1520] ema entropy: 0.5369616994144519
+[INFO 2023-11-16 22:57:56,124 spr_agent.py:1401] step: 53126, x_ent_coef: 0.004407789558172226
+[INFO 2023-11-16 22:59:23,828 spr_agent.py:1401] step: 53476, x_ent_coef: 0.004370947368443012
+[INFO 2023-11-16 23:00:31,713 spr_agent.py:1401] step: 53747, x_ent_coef: 0.00434242095798254
+[INFO 2023-11-16 23:02:53,277 spr_agent.py:1520] ema entropy: 0.932794728899621
+[INFO 2023-11-16 23:03:35,386 spr_agent.py:1401] step: 54480, x_ent_coef: 0.004265263210982084
+[INFO 2023-11-16 23:04:42,532 spr_agent.py:1520] ema entropy: 0.8189720490041283
+[INFO 2023-11-16 23:05:48,964 spr_agent.py:1210] 	 Resetting weights at step 55012.
+[INFO 2023-11-16 23:06:29,610 eval_run_experiment.py:617] steps executed:    55175, num episodes:       60, episode length:     2138, return:   3300.0, normalized return:    0.378
+[INFO 2023-11-16 23:06:45,408 spr_agent.py:1520] ema entropy: 0.3427137376196725
+[INFO 2023-11-16 23:09:08,855 eval_run_experiment.py:617] steps executed:    55810, num episodes:       61, episode length:      635, return:   1000.0, normalized return:    0.029
+[INFO 2023-11-16 23:11:05,720 spr_agent.py:1520] ema entropy: 0.8884216068937415
+[INFO 2023-11-16 23:11:33,642 spr_agent.py:1520] ema entropy: 0.5660098913108846
+[INFO 2023-11-16 23:13:13,555 eval_run_experiment.py:617] steps executed:    56792, num episodes:       62, episode length:      982, return:   1500.0, normalized return:    0.105
+[INFO 2023-11-16 23:15:04,550 spr_agent.py:1520] ema entropy: 0.7549534406105153
+[INFO 2023-11-16 23:17:20,438 eval_run_experiment.py:617] steps executed:    57784, num episodes:       63, episode length:      992, return:   1600.0, normalized return:     0.12
+[INFO 2023-11-16 23:20:01,593 spr_agent.py:1520] ema entropy: 0.8784598077279081
+[INFO 2023-11-16 23:21:01,008 spr_agent.py:1401] step: 58669, x_ent_coef: 0.003824315732344985
+[INFO 2023-11-16 23:23:54,380 eval_run_experiment.py:617] steps executed:    59362, num episodes:       64, episode length:     1578, return:   4600.0, normalized return:    0.576
+[INFO 2023-11-16 23:25:16,402 spr_agent.py:1520] ema entropy: 0.5729013856534706
+[INFO 2023-11-16 23:25:31,457 spr_agent.py:1520] ema entropy: 0.5913267831136751
+[INFO 2023-11-16 23:26:37,892 spr_agent.py:1210] 	 Resetting weights at step 60013.
+[INFO 2023-11-16 23:26:43,173 spr_agent.py:1520] ema entropy: 1.077770393726517
+[INFO 2023-11-16 23:28:34,728 spr_agent.py:1520] ema entropy: 0.5261937171065071
+[INFO 2023-11-16 23:31:41,913 eval_run_experiment.py:617] steps executed:    61225, num episodes:       65, episode length:     1863, return:   2900.0, normalized return:    0.318
+[INFO 2023-11-16 23:39:16,506 spr_agent.py:1520] ema entropy: 0.4249565694719503
+[INFO 2023-11-16 23:43:51,221 spr_agent.py:1520] ema entropy: 0.7323889035438363
+[INFO 2023-11-16 23:43:52,481 spr_agent.py:1520] ema entropy: 0.7346237865517303
+[INFO 2023-11-16 23:43:53,490 eval_run_experiment.py:617] steps executed:    64141, num episodes:       66, episode length:     2916, return:   3700.0, normalized return:    0.439
+[INFO 2023-11-16 23:46:24,673 spr_agent.py:1401] step: 64743, x_ent_coef: 0.003184947418048978
+[INFO 2023-11-16 23:46:55,621 spr_agent.py:1520] ema entropy: 0.4115350589412176
+[INFO 2023-11-16 23:47:27,065 spr_agent.py:1401] step: 64991, x_ent_coef: 0.0031588422134518623
+[INFO 2023-11-16 23:47:33,093 spr_agent.py:1210] 	 Resetting weights at step 65014.
+[INFO 2023-11-16 23:50:07,848 eval_run_experiment.py:617] steps executed:    65630, num episodes:       67, episode length:     1489, return:   1700.0, normalized return:    0.135
+[INFO 2023-11-16 23:51:30,599 spr_agent.py:1401] step: 65960, x_ent_coef: 0.0030568421352654696
+[INFO 2023-11-16 23:52:22,880 spr_agent.py:1520] ema entropy: 0.612399814903946
+[INFO 2023-11-16 23:52:40,666 eval_run_experiment.py:617] steps executed:    66240, num episodes:       68, episode length:      610, return:   1400.0, normalized return:     0.09
+[INFO 2023-11-16 23:53:46,331 spr_agent.py:1520] ema entropy: 0.5882593448146406
+[INFO 2023-11-16 23:54:02,900 spr_agent.py:1401] step: 66568, x_ent_coef: 0.002992842113599181
+[INFO 2023-11-16 23:59:36,930 spr_agent.py:1520] ema entropy: 0.7376538566848964
+[INFO 2023-11-17 00:02:20,748 eval_run_experiment.py:617] steps executed:    68552, num episodes:       69, episode length:     2312, return:   7300.0, normalized return:    0.987
+[INFO 2023-11-17 00:06:06,708 spr_agent.py:1401] step: 69451, x_ent_coef: 0.002689368324354291
+[INFO 2023-11-17 00:08:17,527 spr_agent.py:1401] step: 69974, x_ent_coef: 0.002634315751492977
+[INFO 2023-11-17 00:08:28,040 spr_agent.py:1210] 	 Resetting weights at step 70015.
+[INFO 2023-11-17 00:09:21,938 spr_agent.py:1520] ema entropy: 0.17569849505137075
+[INFO 2023-11-17 00:10:22,627 spr_agent.py:1520] ema entropy: 0.021660588829916894
+[INFO 2023-11-17 00:15:53,454 spr_agent.py:1401] step: 71803, x_ent_coef: 0.0024417894892394543
+[INFO 2023-11-17 00:15:57,684 spr_agent.py:1520] ema entropy: 0.5279001055710117
+[INFO 2023-11-17 00:16:26,035 eval_run_experiment.py:617] steps executed:    71934, num episodes:       70, episode length:     3382, return:   3300.0, normalized return:    0.378
+[INFO 2023-11-17 00:17:15,204 spr_agent.py:1401] step: 72131, x_ent_coef: 0.0024072632659226656
+[INFO 2023-11-17 00:17:53,789 spr_agent.py:1401] step: 72286, x_ent_coef: 0.002390947425737977
+[INFO 2023-11-17 00:19:18,322 spr_agent.py:1401] step: 72626, x_ent_coef: 0.0023551578633487225
+[INFO 2023-11-17 00:21:45,613 spr_agent.py:1520] ema entropy: 0.44710964866567277
+[INFO 2023-11-17 00:21:53,346 eval_run_experiment.py:617] steps executed:    73248, num episodes:       71, episode length:     1314, return:   5800.0, normalized return:    0.759
+[INFO 2023-11-17 00:22:13,506 spr_agent.py:1401] step: 73329, x_ent_coef: 0.002281157998368144
+[INFO 2023-11-17 00:28:59,004 spr_agent.py:1520] ema entropy: 0.4773372645075149
+[INFO 2023-11-17 00:29:15,712 spr_agent.py:1210] 	 Resetting weights at step 75016.
+[INFO 2023-11-17 00:29:47,522 spr_agent.py:1520] ema entropy: 0.4401386189884051
+[INFO 2023-11-17 00:29:57,494 spr_agent.py:1520] ema entropy: 0.2958417991344725
+[INFO 2023-11-17 00:30:24,226 spr_agent.py:1520] ema entropy: 0.11016803456026776
+[INFO 2023-11-17 00:32:27,441 spr_agent.py:1401] step: 75785, x_ent_coef: 0.0020226314663887024
+[INFO 2023-11-17 00:33:21,294 eval_run_experiment.py:617] steps executed:    76001, num episodes:       72, episode length:     2753, return:   7000.0, normalized return:    0.941
+[INFO 2023-11-17 00:34:20,993 spr_agent.py:1401] step: 76240, x_ent_coef: 0.0019747368060052395
+[INFO 2023-11-17 00:34:36,741 spr_agent.py:1520] ema entropy: 0.609691754462121
+[INFO 2023-11-17 00:37:32,497 spr_agent.py:1520] ema entropy: 0.42722425731067276
+[INFO 2023-11-17 00:38:55,362 spr_agent.py:1520] ema entropy: 0.46790677568309536
+[INFO 2023-11-17 00:40:33,236 spr_agent.py:1520] ema entropy: 0.4866665560000757
+[INFO 2023-11-17 00:41:16,283 spr_agent.py:1401] step: 77901, x_ent_coef: 0.001799894729629159
+[INFO 2023-11-17 00:44:21,988 eval_run_experiment.py:617] steps executed:    78642, num episodes:       73, episode length:     2641, return:   6700.0, normalized return:    0.895
+[INFO 2023-11-17 00:44:44,778 spr_agent.py:1520] ema entropy: 0.3599364431827362
+[INFO 2023-11-17 00:47:15,734 spr_agent.py:1520] ema entropy: 0.39608541084135196
+[INFO 2023-11-17 00:48:01,671 spr_agent.py:1401] step: 79521, x_ent_coef: 0.0016293684020638466
+[INFO 2023-11-17 00:50:05,671 spr_agent.py:1210] 	 Resetting weights at step 80017.
+[INFO 2023-11-17 00:52:17,388 eval_run_experiment.py:617] steps executed:    80545, num episodes:       74, episode length:     1903, return:   3600.0, normalized return:    0.424
+[INFO 2023-11-17 00:54:58,069 spr_agent.py:1520] ema entropy: 0.7378308739494172
+[INFO 2023-11-17 00:57:06,093 spr_agent.py:1520] ema entropy: 0.5770652535197113
+[INFO 2023-11-17 00:57:29,522 eval_run_experiment.py:617] steps executed:    81795, num episodes:       75, episode length:     1250, return:   1600.0, normalized return:     0.12
+[INFO 2023-11-17 00:58:08,450 spr_agent.py:1401] step: 81951, x_ent_coef: 0.001373578910715878
+[INFO 2023-11-17 00:59:52,053 spr_agent.py:1401] step: 82367, x_ent_coef: 0.0013297895202413201
+[INFO 2023-11-17 01:00:08,715 spr_agent.py:1520] ema entropy: 0.27230125017918416
+[INFO 2023-11-17 01:00:20,420 spr_agent.py:1401] step: 82481, x_ent_coef: 0.0013177894288673997
+[INFO 2023-11-17 01:01:43,373 spr_agent.py:1401] step: 82813, x_ent_coef: 0.001282842131331563
+[INFO 2023-11-17 01:02:53,675 spr_agent.py:1401] step: 83094, x_ent_coef: 0.0012532632099464536
+[INFO 2023-11-17 01:05:12,976 spr_agent.py:1520] ema entropy: 0.48718456179630715
+[INFO 2023-11-17 01:06:37,357 eval_run_experiment.py:617] steps executed:    83987, num episodes:       76, episode length:     2192, return:  11900.0, normalized return:    1.686
+[INFO 2023-11-17 01:10:55,726 spr_agent.py:1210] 	 Resetting weights at step 85018.
+[INFO 2023-11-17 01:11:47,411 eval_run_experiment.py:617] steps executed:    85225, num episodes:       77, episode length:     1238, return:   6000.0, normalized return:    0.789
+[INFO 2023-11-17 01:17:42,984 eval_run_experiment.py:617] steps executed:    86636, num episodes:       78, episode length:     1411, return:   1600.0, normalized return:     0.12
+[INFO 2023-11-17 01:17:51,082 spr_agent.py:1520] ema entropy: 0.4547344159943354
+[INFO 2023-11-17 01:19:59,938 spr_agent.py:1401] step: 87178, x_ent_coef: 0.0008233684347942472
+[INFO 2023-11-17 01:22:08,948 eval_run_experiment.py:617] steps executed:    87688, num episodes:       79, episode length:     1052, return:   3800.0, normalized return:    0.454
+[INFO 2023-11-17 01:23:22,762 spr_agent.py:1520] ema entropy: 0.2874286489016284
+[INFO 2023-11-17 01:27:15,307 spr_agent.py:1401] step: 88902, x_ent_coef: 0.0006418947596102953
+[INFO 2023-11-17 01:27:58,848 spr_agent.py:1401] step: 89074, x_ent_coef: 0.0006237894995138049
+[INFO 2023-11-17 01:28:07,958 spr_agent.py:1401] step: 89110, x_ent_coef: 0.0006200000061653554
+[INFO 2023-11-17 01:29:21,109 spr_agent.py:1401] step: 89399, x_ent_coef: 0.00058957893634215
+[INFO 2023-11-17 01:29:27,176 eval_run_experiment.py:617] steps executed:    89423, num episodes:       80, episode length:     1735, return:   6100.0, normalized return:    0.804
+[INFO 2023-11-17 01:31:21,449 spr_agent.py:1520] ema entropy: 0.3678898631631125
+[INFO 2023-11-17 01:31:58,447 spr_agent.py:1210] 	 Resetting weights at step 90019.
+[INFO 2023-11-17 01:32:41,841 spr_agent.py:1401] step: 90191, x_ent_coef: 0.000506210548337549
+[INFO 2023-11-17 01:32:46,919 spr_agent.py:1401] step: 90211, x_ent_coef: 0.0005041052354499698
+[INFO 2023-11-17 01:34:07,805 eval_run_experiment.py:617] steps executed:    90530, num episodes:       81, episode length:     1107, return:   1600.0, normalized return:     0.12
+[INFO 2023-11-17 01:37:14,283 spr_agent.py:1520] ema entropy: 0.41734381204266136
+[INFO 2023-11-17 01:38:44,049 eval_run_experiment.py:617] steps executed:    91621, num episodes:       82, episode length:     1091, return:   1300.0, normalized return:    0.074
+[INFO 2023-11-17 01:43:29,970 spr_agent.py:1520] ema entropy: 0.27931552143538296
+[INFO 2023-11-17 01:45:24,701 spr_agent.py:1520] ema entropy: 0.3051253427714829
+[INFO 2023-11-17 01:48:55,872 eval_run_experiment.py:617] steps executed:    94041, num episodes:       83, episode length:     2420, return:  17200.0, normalized return:    2.492
+[INFO 2023-11-17 01:52:16,776 spr_agent.py:1401] step: 94835, x_ent_coef: 1.736842023092322e-05
+[INFO 2023-11-17 01:53:03,830 spr_agent.py:1204] 	 Not resetting at step 95020, as need at least 5000 before 100000 to recover.
+[INFO 2023-11-17 01:54:19,797 spr_agent.py:1401] step: 95321, x_ent_coef: 0.0
+[INFO 2023-11-17 01:55:50,655 spr_agent.py:1520] ema entropy: 0.33576751038550023
+[INFO 2023-11-17 01:56:26,103 eval_run_experiment.py:617] steps executed:    95820, num episodes:       84, episode length:     1779, return:  10600.0, normalized return:    1.488
+[INFO 2023-11-17 01:58:04,880 spr_agent.py:1401] step: 96210, x_ent_coef: 0.0
+[INFO 2023-11-17 01:59:24,925 eval_run_experiment.py:617] steps executed:    96526, num episodes:       85, episode length:      706, return:   3100.0, normalized return:    0.348
+[INFO 2023-11-17 01:59:33,027 spr_agent.py:1401] step: 96558, x_ent_coef: 0.0
+[INFO 2023-11-17 02:01:41,155 spr_agent.py:1401] step: 97065, x_ent_coef: 0.0
+[INFO 2023-11-17 02:01:43,942 spr_agent.py:1520] ema entropy: 0.2995007448989694
+[INFO 2023-11-17 02:03:05,399 spr_agent.py:1520] ema entropy: 0.24078042416653442
+[INFO 2023-11-17 02:04:25,084 spr_agent.py:1520] ema entropy: 0.2637823999146602
+[INFO 2023-11-17 02:07:54,116 spr_agent.py:1401] step: 98540, x_ent_coef: 0.0
+[INFO 2023-11-17 02:08:09,025 eval_run_experiment.py:617] steps executed:    98599, num episodes:       86, episode length:     2073, return:  18100.0, normalized return:    2.629
+[INFO 2023-11-17 02:11:17,138 spr_agent.py:1401] step: 99343, x_ent_coef: 0.0
+[INFO 2023-11-17 02:11:25,222 spr_agent.py:1520] ema entropy: 0.3555847508675149
+[INFO 2023-11-17 02:12:19,003 spr_agent.py:1520] ema entropy: 0.22438589273659704
+Found devices [gpu(id=0)]
+[INFO 2023-11-17 02:14:03,225 eval_run_experiment.py:707] Average undiscounted return per training episode: 2440.70
+[INFO 2023-11-17 02:14:03,225 eval_run_experiment.py:709] Average normalized return per training episode: 0.25
+[INFO 2023-11-17 02:14:03,225 eval_run_experiment.py:711] Average training steps per second: 4.01
+[INFO 2023-11-17 02:14:03,225 checkpointer.py:67] Saving item to single_save/choppercommand-90772724.pth.
+[INFO 2023-11-17 02:14:05,493 utils.py:465] Renaming single_save/choppercommand-90772724.pth.orbax-checkpoint-tmp-1700158443234283 to single_save/choppercommand-90772724.pth
+[INFO 2023-11-17 02:14:05,493 utils.py:509] Finished saving checkpoint to `single_save/choppercommand-90772724.pth`.
++ (( j++ ))
++ (( j<=1 ))
