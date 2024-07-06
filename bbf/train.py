@@ -34,8 +34,7 @@ from bigger_better_faster.bbf.agents import spr_agent
 
 FLAGS = flags.FLAGS
 flags.DEFINE_multi_string(
-    'gin_files', [], 'List of paths to gin configuration files (e.g.'
-    '"dopamine/agents/dqn/dqn.gin").')
+    'gin_files', [], 'List of paths to gin configuration files.')
 flags.DEFINE_multi_string(
     'gin_bindings', [],
     'Gin bindings to override the values set in the config files '
@@ -43,13 +42,6 @@ flags.DEFINE_multi_string(
     '      "create_environment.game_name="Pong"").')
 CONFIGS_DIR = './configs'
 AGENTS = [
-    'rainbow',
-    'der',
-    'dopamine_der',
-    'DrQ',
-    'OTRainbow',
-    'SPR',
-    'SR-SPR',
     'BBF',
 ]
 
