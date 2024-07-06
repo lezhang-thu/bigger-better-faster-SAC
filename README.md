@@ -1,10 +1,10 @@
 # Generalizing soft actor-critic algorithms to discrete action spaces 
 
-This repository implements the SAC-BBF agent in JAX (to be presented in PRCV 2024), building
+This repository implements the SAC-BBF agent in JAX (to be presented in **PRCV 2024**), building
 on [BBF](https://github.com/google-research/google-research/tree/master/bigger_better_faster).
 
 ## Setup
-To install the repository, simply run `pip install -r requirements.txt`. **Tested only on Python 3.10**
+To install the repository, simply run `pip install -r requirements.txt`. **Tested only on Python 3.10**.
 
 
 ## Training
