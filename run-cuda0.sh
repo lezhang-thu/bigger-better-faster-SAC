@@ -1,4 +1,5 @@
 set -ex
+for a in /sys/bus/pci/devices/*; do echo 0 | sudo tee -a $a/numa_node; done
 #strings=("Qbert" "RoadRunner")
 #strings=("Gopher" "Hero" "Jamesbond" "Kangaroo" "Krull" "KungFuMaster" "MsPacman" "Pong" "PrivateEye" "Qbert" "RoadRunner" "Seaquest" "UpNDown")
 strings=("BankHeist")

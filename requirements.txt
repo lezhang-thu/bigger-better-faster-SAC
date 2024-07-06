@@ -1,8 +1,0 @@
-absl-py
-atari-py
-ale-py
-gym[atari,accept-rom-license]<=0.25.2
-gin-config
-protobuf == 3.19.1
-importlib-metadata == 4.11.3
-importlib-resources == 5.7.1
