@@ -3,8 +3,9 @@
 This repository implements the SAC-BBF agent in JAX (to be presented in **PRCV 2024**), building
 on [BBF](https://github.com/google-research/google-research/tree/master/bigger_better_faster).
 
-SAC-BBF improves the previous state-of-the-art interquartile mean (IQM) from 1.045 to **1.088**.
-SAC-BBF is also the only **model-free** algorithm with a super-human level using only replay ratio 2.
+## Results
+1. SAC-BBF improves the previous state-of-the-art interquartile mean (IQM) from 1.045 to **1.088**.
+1. SAC-BBF is also the only **model-free** algorithm with a super-human level using only replay ratio 2.
 
 ## Setup
 To install the repository, simply run `pip install -r requirements.txt`. **Tested only on Python 3.10**.
