@@ -46,7 +46,7 @@ AGENTS = [
 ]
 
 # flags are defined when importing run_xm_preprocessing
-flags.DEFINE_enum('agent', 'SPR', AGENTS, 'Name of the agent.')
+flags.DEFINE_enum('agent', 'BBF', AGENTS, 'Name of the agent.')
 flags.DEFINE_integer('run_number', 1, 'Run number.')
 flags.DEFINE_integer('agent_seed', None, 'If None, use the run_number.')
 flags.DEFINE_boolean('no_seeding', True, 'If True, choose a seed at random.')
