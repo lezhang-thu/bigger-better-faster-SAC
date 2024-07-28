@@ -5,7 +5,7 @@ on [BBF](https://github.com/google-research/google-research/tree/master/bigger_b
 
 ## Results
 1. SAC-BBF improves the previous state-of-the-art interquartile mean (IQM) from 1.045 to **1.088**.
-1. SAC-BBF is also the only **model-free** algorithm with a super-human level using only replay ratio 2.
+1. For ATARI 100K, SAC-BBF is also the only **model-free** algorithm with a super-human level using only replay ratio 2.
 
 ## Setup
 To install the repository, simply run `pip install -r requirements.txt`. **Tested only on Python 3.10**.
@@ -24,6 +24,9 @@ bash run-cuda0.sh
 
 * [Pierluca D'Oro, Max Schwarzer, Evgenii Nikishin, Pierre-Luc Bacon, Marc Bellemare, Aaron Courville.  Sample-efficient reinforcement learning by breaking the replay ratio barrier. In The Eleventh International Conference on Learning Representations, 2023][sr-spr]
 
+* [Zhang, L., Gu, Y., Zhao, X., Zhang, Y., Zhao, S., Jin, Y., & Wu, X. (2024). Generalizing soft actor-critic algorithms to discrete action spaces. arXiv preprint arXiv:2407.11044.][sac-bbf]
+
 [bbf]: https://proceedings.mlr.press/v202/schwarzer23a.html
 [spr]: https://openreview.net/forum?id=uCQfPZwRaUu
 [sr-spr]: https://openreview.net/forum?id=OpC-9aBBVJe
+[sac-bbf]: https://arxiv.org/abs/2407.11044
