@@ -8,7 +8,7 @@ on [BBF](https://github.com/google-research/google-research/tree/master/bigger_b
 1. For ATARI 100K, SAC-BBF is also the only **model-free** algorithm with a super-human level using only replay ratio 2.
 
 ## Setup
-To install the repository, simply run `pip install -r requirements.txt`. **Tested only on Python 3.10**.
+To install the repository, simply run `pip install -r requirements.txt`. Tested only on Python **3.10**.
 
 
 ## Training
