@@ -16,7 +16,7 @@
 
 import functools
 
-from bigger_better_faster.bbf.replay_memory import sum_tree
+from bbf.replay_memory import sum_tree
 import jax
 from jax import numpy as jnp
 import numpy as np

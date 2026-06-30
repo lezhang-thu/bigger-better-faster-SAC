@@ -1,7 +1,7 @@
 # SPR (Schwarzer et al, 2021)
-import bigger_better_faster.bbf.spr_networks
-import bigger_better_faster.bbf.agents.spr_agent
-import bigger_better_faster.bbf.replay_memory.subsequence_replay_buffer
+import bbf.spr_networks
+import bbf.agents.spr_agent
+import bbf.replay_memory.subsequence_replay_buffer
 
 JaxDQNAgent.gamma = 0.997
 JaxDQNAgent.min_replay_history = 2000

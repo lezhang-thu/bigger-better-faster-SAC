@@ -12,8 +12,8 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 
-from bigger_better_faster.bbf.replay_memory import deterministic_sum_tree as sum_tree
-from bigger_better_faster.bbf.replay_memory.circular_replay_buffer import modulo_range, invalid_range, ReplayElement
+from bbf.replay_memory import deterministic_sum_tree as sum_tree
+from bbf.replay_memory.circular_replay_buffer import modulo_range, invalid_range, ReplayElement
 
 
 @gin.configurable

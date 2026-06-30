@@ -19,8 +19,8 @@ import numpy as np
 import optax
 import flax
 
-from bigger_better_faster.bbf import spr_networks
-from bigger_better_faster.bbf.replay_memory import subsequence_replay_buffer, circular_replay_buffer
+from bbf import spr_networks
+from bbf.replay_memory import subsequence_replay_buffer, circular_replay_buffer
 
 NATURE_DQN_OBSERVATION_SHAPE = (84, 84)  # Size of downscaled Atari 2600 frame.
 NATURE_DQN_DTYPE = np.uint8  # DType of Atari 2600 observations.
@@ -550,21 +550,13 @@ def train(
                 target * jnp.log(target)).sum(-1)
 
             spr_predictions = spr_predictions.transpose(1, 0, 2)
-            spr_predictions = spr_predictions.reshape(
-                *spr_predictions.shape[:2], 2, 2048)
-            # lezhang.thu
-            #logging.info("spr_predictions.shape: {}".format(spr_predictions.shape))
 
             spr_predictions = spr_predictions / jnp.linalg.norm(
                 spr_predictions, 2, -1, keepdims=True)
 
-            spr_targets = spr_targets.reshape(*spr_targets.shape[:2], 2, 2048)
-            # lezhang.thu
-            #logging.info("spr_targets.shape: {}".format(spr_targets.shape))
-
             spr_targets = spr_targets / jnp.linalg.norm(
                 spr_targets, 2, -1, keepdims=True)
-            spr_loss = jnp.power(spr_predictions - spr_targets, 2).sum((-1, -2))
+            spr_loss = jnp.power(spr_predictions - spr_targets, 2).sum(-1)
             #logging.info("spr_loss.shape: {}".format(spr_loss.shape))
             spr_loss = (spr_loss * same_traj_mask.transpose(1, 0)).mean(0) * .5
             #logging.info("spr_loss.shape: {}".format(spr_loss.shape))
@@ -1038,13 +1030,14 @@ class BBFAgent(JaxDQNAgent):
             }
         })
 
-        head_keys = {"projection", "head", "predictor"}
+        head_keys = {
+            "representation_projection", "projection", "head", "predictor"
+        }
         head_mask = FrozenDict({
             "params": {k: k in head_keys for k in self.online_params["params"]}
         })
 
-        #policy_key = {"policy_projection", "policy", "policy_predict"}
-        policy_key = {"policy_projection", "policy", "predict_policy"}
+        policy_key = {"policy_projection", "policy"}
         policy_mask = FrozenDict({
             "params": {
                 k: k in policy_key for k in self.online_params["params"]
@@ -1213,7 +1206,7 @@ class BBFAgent(JaxDQNAgent):
         self._rng, reset_rng = jax.random.split(self._rng, 2)
 
         #keys_to_copy = ("encoder", "transition_model")
-        keys_to_copy = ("encoder", "transition_model", "_log_alpha")
+        keys_to_copy = ("encoder", "transition_model", "representation_projection", "_log_alpha")
         (
             self.online_params,
             self.target_network_params,

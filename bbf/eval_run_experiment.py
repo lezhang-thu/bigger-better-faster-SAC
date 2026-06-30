@@ -764,8 +764,7 @@ class DataEfficientAtariRunner(Runner):
             average_steps_per_second,
             norm_score_train,
         ) = self._run_train_phase()
-        #if True:
-        if False:
+        if True:
             num_episodes_eval, average_reward_eval, human_norm_eval = (
                 self._run_eval_phase())
 
@@ -784,12 +783,12 @@ class DataEfficientAtariRunner(Runner):
             logging.info('Beginning training...')
             self._run_one_iteration()
             # save jax model(s)
-            ckpt = {
-                'online_params': self._agent.online_params,
-                'target_network_params': self._agent.target_network_params
-            }
-            save_args = orbax_utils.save_args_from_target(ckpt)
-            orbax_checkpointer.save(file_name, ckpt, save_args=save_args)
+            #ckpt = {
+            #    'online_params': self._agent.online_params,
+            #    'target_network_params': self._agent.target_network_params
+            #}
+            #save_args = orbax_utils.save_args_from_target(ckpt)
+            #orbax_checkpointer.save(file_name, ckpt, save_args=save_args)
         else:
             raw_restored = orbax_checkpointer.restore(file_name)
             self._agent.online_params = raw_restored['online_params']

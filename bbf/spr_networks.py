@@ -415,6 +415,11 @@ class RainbowDQNNetwork(nn.Module):
             dtype=jnp.float32,
             initializer=initializer,
         )
+        self.representation_projection = FeatureLayer(
+            int(self.hidden_dim),
+            dtype=jnp.float32,
+            initializer=initializer,
+        )
         self.predictor = nn.Dense(int(self.hidden_dim),
                                   dtype=jnp.float32,
                                   kernel_init=initializer)
@@ -431,9 +436,6 @@ class RainbowDQNNetwork(nn.Module):
             dtype=jnp.float32,
             initializer=initializer,
         )
-        self.predict_policy = nn.Dense(int(self.hidden_dim),
-                                       dtype=jnp.float32,
-                                       kernel_init=initializer)
         self.policy = nn.Dense(self.num_actions,
                                dtype=jnp.float32,
                                kernel_init=initializer)
@@ -451,30 +453,17 @@ class RainbowDQNNetwork(nn.Module):
 
     def encode_project(self, x, eval_mode):
         latent = self.encode(x, eval_mode)
-        representation = latent.reshape(-1)
-        return jnp.concatenate([
-            self.project(representation, eval_mode),
-            self.policy_projection(representation, eval_mode)
-        ],
-                               axis=-1)
-        #return self.project(representation, eval_mode)
-        #return self.project(representation, eval_mode) + self.policy_projection(
-        #    representation, eval_mode)
+        return self.represent(latent.reshape(-1), eval_mode)
 
     def project(self, x, eval_mode):
         projected = self.projection(x, eval_mode=eval_mode)
         return projected
 
+    def represent(self, x, eval_mode):
+        return self.representation_projection(x, eval_mode=eval_mode)
+
     def spr_predict(self, x, eval_mode):
-        return jnp.concatenate([
-            self.predictor(self.project(x, eval_mode)),
-            self.predict_policy(self.policy_projection(x, eval_mode))
-        ],
-                               axis=-1)
-        #projected = self.project(x, eval_mode)
-        #projected = self.project(x, eval_mode) + self.policy_projection(
-        #    x, eval_mode)
-        #return self.predictor(projected)
+        return self.predictor(self.represent(x, eval_mode))
 
     def spr_rollout(self, latent, actions):
         _, pred_latents = self.transition_model(latent, actions)
@@ -507,6 +496,7 @@ class RainbowDQNNetwork(nn.Module):
     def get_policy(self, x):
         x = self.encode(x, False)
         x = x.reshape(-1)
+        x = self.represent(x, False)
         #x = jax.lax.stop_gradient(x)
         logits = self.policy(nn.relu(self.policy_projection(x, False)))
         #logits = self.policy(jax.lax.stop_gradient(nn.relu(self.encode_project(x, False))))
@@ -522,7 +512,7 @@ class RainbowDQNNetwork(nn.Module):
         eval_mode=False,
     ):
         spatial_latent = self.encode(x, eval_mode)
-        representation = spatial_latent.reshape(-1)
+        representation = self.represent(spatial_latent.reshape(-1), eval_mode)
         # Single hidden layer
         x = self.project(representation, eval_mode)
         x = nn.relu(x)

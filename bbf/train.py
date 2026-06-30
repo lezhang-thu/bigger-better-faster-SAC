@@ -1,7 +1,5 @@
-import sys
 import random
 
-sys.path.insert(0, "/home/ubuntu/lezhang.thu/weird/")
 import os
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1."
@@ -29,8 +27,8 @@ import numpy as np
 
 import jax
 
-from bigger_better_faster.bbf import eval_run_experiment
-from bigger_better_faster.bbf.agents import spr_agent
+from bbf import eval_run_experiment
+from bbf.agents import spr_agent
 
 FLAGS = flags.FLAGS
 flags.DEFINE_multi_string(
