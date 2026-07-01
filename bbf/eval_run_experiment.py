@@ -654,12 +654,13 @@ class DataEfficientAtariRunner(Runner):
 
                 b += 1
 
+            raw_rewards = rewards.copy()
             if self._clip_rewards:
                 # Perform reward clipping.
                 rewards = np.clip(rewards, -1, 1)
 
             self._agent.log_transition(new_obs, actions, rewards, terminals,
-                                       episode_end)
+                                       episode_end, raw_reward=raw_rewards)
 
             if (not live_envs or
                 (max_steps is not None and total_steps > max_steps) or
