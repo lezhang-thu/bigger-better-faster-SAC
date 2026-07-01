@@ -49,6 +49,7 @@ BBFAgent.r2_world_model_eps = 1e-20
 BBFAgent.r2_world_model_warmup = 1000
 BBFAgent.r2_world_model_agc = 0.3
 BBFAgent.r2_world_model_pmin = 1e-3
+BBFAgent.r2_world_model_update_period = 16
 BBFAgent.r2_world_model_stoch = 32
 BBFAgent.r2_world_model_deter = 6144
 BBFAgent.r2_world_model_hidden = 768

@@ -1037,6 +1037,7 @@ class RainbowDQNNetwork(nn.Module):
             in_axes=0,
             axis_name="r2_world_model_batch",
         )(flat_states)
+        #flat_embed = jax.lax.stop_gradient(flat_embed)
         embed = flat_embed.reshape(batch_size, batch_length, -1)
         return self.r2_world_model.loss(embed, actions, rewards, terminals,
                                         is_first,

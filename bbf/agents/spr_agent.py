@@ -531,6 +531,7 @@ def train(
     r2wm_is_first,
     r2wm_initial_stoch,
     r2wm_initial_deter,
+    r2wm_update_mask,
     r2wm_learning_rate,
     r2wm_beta1,
     r2wm_beta2,
@@ -573,6 +574,7 @@ def train(
             r2wm_is_first,
             r2wm_initial_stoch,
             r2wm_initial_deter,
+            r2wm_do_update,
         ) = inputs
         same_traj_mask = same_traj_mask[:, 1:]
         rewards = rewards[:, 0]
@@ -705,36 +707,69 @@ def train(
             }
             total_loss = mean_loss + jnp.mean(loss_multipliers * x[0])
 
+            zero_post_stoch = jnp.zeros(
+                r2wm_raw_states.shape[:2] + r2wm_initial_stoch.shape[1:],
+                dtype=jnp.float32)
+            zero_post_deter = jnp.zeros(
+                r2wm_raw_states.shape[:2] + r2wm_initial_deter.shape[1:],
+                dtype=jnp.float32)
+
+            def zero_r2wm_metrics():
+                return {
+                    "R2WMLoss": jnp.array(0.0, dtype=jnp.float32),
+                    "R2WMDynLoss": jnp.array(0.0, dtype=jnp.float32),
+                    "R2WMRepLoss": jnp.array(0.0, dtype=jnp.float32),
+                    "R2WMBarlowLoss": jnp.array(0.0, dtype=jnp.float32),
+                    "R2WMRewardLoss": jnp.array(0.0, dtype=jnp.float32),
+                    "R2WMContLoss": jnp.array(0.0, dtype=jnp.float32),
+                    "R2WMDynEntropy": jnp.array(0.0, dtype=jnp.float32),
+                    "R2WMRepEntropy": jnp.array(0.0, dtype=jnp.float32),
+                    "R2WMUpdate": jnp.array(0.0, dtype=jnp.float32),
+                }
+
             if r2wm_enabled:
-                r2wm_states = spr_networks.process_inputs(
-                    r2wm_raw_states,
-                    rng=r2wm_aug_key,
-                    data_augmentation=data_augmentation,
-                    dtype=dtype,
+
+                def run_r2wm_loss(_):
+                    r2wm_states = spr_networks.process_inputs(
+                        r2wm_raw_states,
+                        rng=r2wm_aug_key,
+                        data_augmentation=data_augmentation,
+                        dtype=dtype,
+                    )
+                    r2wm_loss, r2wm_metrics, post_stoch, post_deter = (
+                        network_def.apply(
+                            params,
+                            r2wm_states,
+                            r2wm_actions,
+                            r2wm_rewards,
+                            r2wm_terminals,
+                            r2wm_is_first,
+                            r2wm_initial_stoch,
+                            r2wm_initial_deter,
+                            r2wm_key,
+                            eval_mode=True,
+                            method=network_def.r2_world_model_loss_from_states,
+                        ))
+                    r2wm_metrics["R2WMUpdate"] = jnp.array(1.0,
+                                                           dtype=jnp.float32)
+                    return r2wm_loss, r2wm_metrics, post_stoch, post_deter
+
+                def skip_r2wm_loss(_):
+                    return (jnp.array(0.0, dtype=jnp.float32),
+                            zero_r2wm_metrics(), zero_post_stoch,
+                            zero_post_deter)
+
+                r2wm_loss, r2wm_metrics, post_stoch, post_deter = jax.lax.cond(
+                    r2wm_do_update,
+                    run_r2wm_loss,
+                    skip_r2wm_loss,
+                    operand=None,
                 )
-                r2wm_loss, r2wm_metrics, post_stoch, post_deter = (
-                    network_def.apply(
-                        params,
-                        r2wm_states,
-                        r2wm_actions,
-                        r2wm_rewards,
-                        r2wm_terminals,
-                        r2wm_is_first,
-                        r2wm_initial_stoch,
-                        r2wm_initial_deter,
-                        r2wm_key,
-                        eval_mode=True,
-                        method=network_def.r2_world_model_loss_from_states,
-                    ))
                 total_loss = total_loss + r2wm_loss
                 aux_losses.update(r2wm_metrics)
             else:
-                post_stoch = jnp.zeros(
-                    r2wm_raw_states.shape[:2] + r2wm_initial_stoch.shape[1:],
-                    dtype=jnp.float32)
-                post_deter = jnp.zeros(
-                    r2wm_raw_states.shape[:2] + r2wm_initial_deter.shape[1:],
-                    dtype=jnp.float32)
+                post_stoch = zero_post_stoch
+                post_deter = zero_post_deter
 
             return total_loss, (aux_losses, (post_stoch, post_deter))
 
@@ -782,27 +817,40 @@ def train(
         new_online_params = optax.apply_updates(online_params, updates)
 
         if r2wm_enabled:
-            r2wm_updates, r2wm_optimizer_state = r2_laprop_update(
-                grad["params"]["r2_world_model"],
-                r2wm_optimizer_state,
-                online_params["params"]["r2_world_model"],
-                r2wm_learning_rate,
-                r2wm_beta1,
-                r2wm_beta2,
-                r2wm_eps,
-                r2wm_warmup,
-                r2wm_agc,
-                r2wm_pmin,
+
+            def update_r2wm(args):
+                new_online_params, r2wm_optimizer_state = args
+                r2wm_updates, r2wm_optimizer_state = r2_laprop_update(
+                    grad["params"]["r2_world_model"],
+                    r2wm_optimizer_state,
+                    online_params["params"]["r2_world_model"],
+                    r2wm_learning_rate,
+                    r2wm_beta1,
+                    r2wm_beta2,
+                    r2wm_eps,
+                    r2wm_warmup,
+                    r2wm_agc,
+                    r2wm_pmin,
+                )
+                new_r2wm_params = optax.apply_updates(
+                    online_params["params"]["r2_world_model"], r2wm_updates)
+                new_online_params = replace_mapping(
+                    new_online_params, {
+                        "params": replace_mapping(
+                            new_online_params["params"],
+                            {"r2_world_model": new_r2wm_params})
+                    })
+                return flax.core.freeze(new_online_params), r2wm_optimizer_state
+
+            def skip_r2wm_update(args):
+                return args
+
+            new_online_params, r2wm_optimizer_state = jax.lax.cond(
+                r2wm_do_update,
+                update_r2wm,
+                skip_r2wm_update,
+                operand=(new_online_params, r2wm_optimizer_state),
             )
-            new_r2wm_params = optax.apply_updates(
-                online_params["params"]["r2_world_model"], r2wm_updates)
-            new_online_params = replace_mapping(
-                new_online_params, {
-                    "params": replace_mapping(
-                        new_online_params["params"],
-                        {"r2_world_model": new_r2wm_params})
-                })
-            new_online_params = flax.core.freeze(new_online_params)
 
         optimizer_state = new_optimizer_state
         online_params = new_online_params
@@ -871,6 +919,7 @@ def train(
                                    *r2wm_initial_stoch.shape[1:]),
         r2wm_initial_deter.reshape(num_batches, -1,
                                    *r2wm_initial_deter.shape[1:]),
+        r2wm_update_mask.reshape(num_batches),
     )
 
     (
@@ -1084,6 +1133,7 @@ class BBFAgent(JaxDQNAgent):
         r2_world_model_warmup=1000,
         r2_world_model_agc=0.3,
         r2_world_model_pmin=1e-3,
+        r2_world_model_update_period=1,
         r2_world_model_stoch=32,
         r2_world_model_deter=6144,
         r2_world_model_hidden=768,
@@ -1188,6 +1238,8 @@ class BBFAgent(JaxDQNAgent):
         self.r2_world_model_warmup = int(r2_world_model_warmup)
         self.r2_world_model_agc = float(r2_world_model_agc)
         self.r2_world_model_pmin = float(r2_world_model_pmin)
+        self.r2_world_model_update_period = max(
+            1, int(r2_world_model_update_period))
         self.r2_world_model_stoch = int(r2_world_model_stoch)
         self.r2_world_model_deter = int(r2_world_model_deter)
         self.r2_world_model_hidden = int(r2_world_model_hidden)
@@ -1514,11 +1566,26 @@ class BBFAgent(JaxDQNAgent):
             "index": index,
         }
 
-    def _update_r2_world_model_buffer(self, index, stoch, deter):
+    def _r2_world_model_update_mask(self):
+        if not self.r2_world_model_enabled:
+            return np.zeros((self._batches_to_group,), dtype=np.bool_)
+        update_ids = self.grad_steps + np.arange(self._batches_to_group) + 1
+        return (update_ids % self.r2_world_model_update_period) == 0
+
+    def _update_r2_world_model_buffer(self, index, stoch, deter, update_mask):
         if not self.r2_world_model_enabled or index is None:
+            return
+        update_mask = np.asarray(update_mask, dtype=np.bool_)
+        if not np.any(update_mask):
             return
         stoch = np.asarray(jax.device_get(stoch), dtype=np.float32)
         deter = np.asarray(jax.device_get(deter), dtype=np.float32)
+        per_update_batch = stoch.shape[1]
+        flat_mask = np.repeat(update_mask, per_update_batch)
+        selected_rows = np.nonzero(flat_mask)[0].tolist()
+        index = [ind[selected_rows] for ind in index]
+        stoch = stoch[update_mask]
+        deter = deter[update_mask]
         stoch = stoch.reshape(-1, *stoch.shape[2:])
         deter = deter.reshape(-1, *deter.shape[2:])
         self._r2_replay.update(index, stoch, deter)
@@ -1651,7 +1718,11 @@ class BBFAgent(JaxDQNAgent):
             # debug - end
 
         self._rng, train_rng = jax.random.split(self._rng)
-        r2wm_batch = self._sample_r2_world_model_batch()
+        r2wm_update_mask = self._r2_world_model_update_mask()
+        if np.any(r2wm_update_mask):
+            r2wm_batch = self._sample_r2_world_model_batch()
+        else:
+            r2wm_batch = self._empty_r2_world_model_batch()
         (
             new_online_params,
             new_target_params,
@@ -1699,6 +1770,7 @@ class BBFAgent(JaxDQNAgent):
             r2wm_batch["is_first"],
             r2wm_batch["initial_stoch"],
             r2wm_batch["initial_deter"],
+            r2wm_update_mask,
             self.r2_world_model_learning_rate,
             self.r2_world_model_beta1,
             self.r2_world_model_beta2,
@@ -1709,7 +1781,8 @@ class BBFAgent(JaxDQNAgent):
         )
         self._update_r2_world_model_buffer(r2wm_batch["index"],
                                            r2wm_post_stoch,
-                                           r2wm_post_deter)
+                                           r2wm_post_deter,
+                                           r2wm_update_mask)
         self.grad_steps += self._batches_to_group
         self.cycle_grad_steps += self._batches_to_group
 
