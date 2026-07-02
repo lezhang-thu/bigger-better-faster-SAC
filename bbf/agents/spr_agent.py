@@ -1613,6 +1613,40 @@ class BBFAgent(JaxDQNAgent):
         action = np.asarray(action, dtype=np.int32)
         return np.eye(self.num_actions, dtype=np.float32)[action]
 
+    def add_r2_episode_boundary_transition(self, env_id, observation, reward,
+                                           terminal):
+        if not self.r2_world_model_enabled or self.eval_mode:
+            return
+        obs = np.asarray(observation).squeeze(-1)
+        terminal_state = np.asarray(
+            self.state[env_id], dtype=self.observation_dtype).copy()
+        terminal_state = np.roll(terminal_state, -1, axis=-1)
+        terminal_state[Ellipsis, -1] = np.reshape(obs, self.observation_shape)
+
+        self._rng, rng = jax.random.split(self._rng)
+        stoch, deter = r2_world_model_observe(
+            self.network_def,
+            self.online_params,
+            terminal_state[None],
+            self._r2_prev_action[env_id:env_id + 1],
+            self._r2_stoch[env_id:env_id + 1],
+            self._r2_deter[env_id:env_id + 1],
+            self._r2_is_first[env_id:env_id + 1],
+            rng,
+            self.dtype,
+        )
+        zero_action = np.zeros((1, self.num_actions), dtype=np.float32)
+        self._r2_replay.add_atari_transition(
+            state=terminal_state[None],
+            action=zero_action,
+            reward=np.asarray([reward], dtype=np.float32).reshape(1, 1),
+            is_terminal=np.asarray([terminal],
+                                   dtype=np.float32).reshape(1, 1),
+            is_first=np.zeros((1, 1), dtype=np.float32),
+            stoch=np.asarray(jax.device_get(stoch), dtype=np.float32),
+            deter=np.asarray(jax.device_get(deter), dtype=np.float32),
+        )
+
     def _flush_r2_pending_transition(self, action):
         if (not self.r2_world_model_enabled or self.eval_mode or
                 self._r2_pending_transition is None):
@@ -2004,7 +2038,12 @@ class BBFAgent(JaxDQNAgent):
             if raw_reward is None:
                 raw_reward = reward
             is_first = np.logical_or(terminal, episode_end).astype(np.float32)
-            self._set_r2_pending_transition(raw_reward, terminal, is_first)
+            r2_reward = np.asarray(raw_reward, dtype=np.float32).copy()
+            r2_terminal = np.asarray(terminal, dtype=np.float32).copy()
+            if np.any(is_first):
+                r2_reward = np.where(is_first, 0.0, r2_reward)
+                r2_terminal = np.where(is_first, 0.0, r2_terminal)
+            self._set_r2_pending_transition(r2_reward, r2_terminal, is_first)
 
     def select_action(
         self,
