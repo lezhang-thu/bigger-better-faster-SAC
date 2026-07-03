@@ -377,6 +377,36 @@ def select_action(
     #return rng, samples, jax.nn.softmax(logits)
 
 
+@functools.partial(jax.jit, static_argnames=["network_def", "eval_mode"])
+def select_action_from_r2(
+    network_def,
+    params,
+    stoch,
+    deter,
+    rng,
+    num_actions,
+    eval_mode,
+):
+    del num_actions
+
+    def logits_w_samples(stoch, deter, action_sample_key):
+        return network_def.apply(
+            params,
+            stoch,
+            deter,
+            rngs={"action_sample": action_sample_key},
+            method=network_def.get_policy_from_r2,
+        )
+
+    rng, key = jax.random.split(rng)
+    key = jax.random.split(key, stoch.shape[0])
+    logits, samples = jax.vmap(logits_w_samples,
+                               in_axes=(0, 0, 0),
+                               axis_name="batch")(stoch, deter, key)
+    new_actions = jnp.where(eval_mode, jnp.argmax(logits, axis=-1), samples)
+    return rng, new_actions, jax.nn.softmax(logits)
+
+
 @functools.partial(jax.jit, static_argnames=("network_def", "dtype"))
 def r2_world_model_observe(network_def, params, raw_state, prev_action, stoch,
                            deter, is_first, rng, dtype):
@@ -396,6 +426,26 @@ def r2_world_model_observe(network_def, params, raw_state, prev_action, stoch,
         method=network_def.r2_world_model_observe,
     )
     return stoch, deter
+
+
+@functools.partial(jax.jit, static_argnames=("network_def", "dtype"))
+def r2_world_model_refresh(network_def, params, raw_states, actions, is_first,
+                           initial_stoch, initial_deter, rng, dtype):
+    states = spr_networks.process_inputs(raw_states,
+                                         rng=rng,
+                                         data_augmentation=False,
+                                         dtype=dtype)
+    return network_def.apply(
+        params,
+        states,
+        actions,
+        is_first,
+        initial_stoch,
+        initial_deter,
+        rng,
+        eval_mode=True,
+        method=network_def.r2_world_model_observe_from_states,
+    )
 
 
 train_static_argnames = [
@@ -524,6 +574,10 @@ def train(
     #ent_targ,
     x_ent_coef,
     r2wm_enabled,  # static
+    r2_current_stoch,
+    r2_current_deter,
+    r2_next_stoch,
+    r2_next_deter,
     r2wm_raw_states,
     r2wm_actions,
     r2wm_rewards,
@@ -567,6 +621,10 @@ def train(
             same_traj_mask,
             loss_weights,
             cumulative_gamma,
+            r2_current_stoch,
+            r2_current_deter,
+            r2_next_stoch,
+            r2_next_deter,
             r2wm_raw_states,
             r2wm_actions,
             r2wm_rewards,
@@ -629,6 +687,25 @@ def train(
                 method=network_def.encode_project,
             )
 
+        def policy_target_r2(stoch, deter, action_sample_key):
+            return network_def.apply(
+                target_params,
+                stoch,
+                deter,
+                rngs={"action_sample": action_sample_key},
+                method=network_def.get_policy_from_r2,
+            )
+
+        def q_target_r2(stoch, deter):
+            return network_def.apply(
+                target_params,
+                stoch,
+                deter,
+                support,
+                eval_mode=target_eval_mode,
+                method=network_def.q_from_r2_features,
+            )
+
         def loss_fn(
             params,
             target,
@@ -646,6 +723,25 @@ def train(
                                          actions,
                                          do_rollout,
                                          method=network_def.init_fn)
+
+            def r2_q_results(stoch, deter):
+                return network_def.apply(
+                    params,
+                    stoch,
+                    deter,
+                    support,
+                    eval_mode=False,
+                    method=network_def.q_from_r2_features,
+                )
+
+            def r2_policy(stoch, deter, action_sample_key):
+                return network_def.apply(
+                    params,
+                    stoch,
+                    deter,
+                    rngs={"action_sample": action_sample_key},
+                    method=network_def.get_policy_from_r2,
+                )
 
             def policy_loss(q_values, logits, x_key):
                 samples = jax.random.categorical(x_key, logits)
@@ -670,8 +766,21 @@ def train(
                                  in_axes=(0, 0, None),
                                  axis_name="batch")(current_state,
                                                     actions[:, :-1], use_spr)
+            if r2wm_enabled:
+                r2_x = jax.vmap(r2_q_results,
+                                in_axes=(0, 0),
+                                axis_name="batch")(r2_current_stoch,
+                                                   r2_current_deter)
+                logits, _ = jax.vmap(r2_policy,
+                                     in_axes=(0, 0, 0),
+                                     axis_name="batch")(r2_current_stoch,
+                                                        r2_current_deter, key)
+                q_values_for_policy = r2_x.q_values
+                q_logits = jnp.squeeze(r2_x.logits)
+            else:
+                q_values_for_policy = x.q_values
+                q_logits = jnp.squeeze(x.logits)
             spr_predictions = x.latent
-            q_logits = jnp.squeeze(x.logits)
             chosen_action_logits = q_logits[jnp.arange(q_logits.shape[0]),
                                             actions[:, 0]]
             dqn_loss = jax.vmap(softmax_cross_entropy_loss_with_logits)(
@@ -696,8 +805,8 @@ def train(
 
             mean_loss = jnp.mean(loss)
 
-            x = jax.vmap(policy_loss, in_axes=0, axis_name="batch")(x.q_values,
-                                                                    logits, key)
+            x = jax.vmap(policy_loss, in_axes=0, axis_name="batch")(
+                q_values_for_policy, logits, key)
             aux_losses = {
                 "TotalLoss": jnp.mean(mean_loss),
                 "DQNLoss": jnp.mean(dqn_loss),
@@ -774,18 +883,33 @@ def train(
             return total_loss, (aux_losses, (post_stoch, post_deter))
 
         # Use the weighted mean loss for gradient computation.
-        target = jax.vmap(target_output,
-                          in_axes=(None, None, 0, 0, 0, None, 0, 0),
-                          axis_name="batch")(
-                              policy_online,
-                              q_target,
-                              next_states,
-                              rewards,
-                              terminals,
-                              support,
-                              cumulative_gamma,
-                              target_rng,
-                          )
+        if r2wm_enabled:
+            target = jax.vmap(target_output_r2,
+                              in_axes=(None, None, 0, 0, 0, 0, None, 0, 0),
+                              axis_name="batch")(
+                                  policy_target_r2,
+                                  q_target_r2,
+                                  r2_next_stoch,
+                                  r2_next_deter,
+                                  rewards,
+                                  terminals,
+                                  support,
+                                  cumulative_gamma,
+                                  target_rng,
+                              )
+        else:
+            target = jax.vmap(target_output,
+                              in_axes=(None, None, 0, 0, 0, None, 0, 0),
+                              axis_name="batch")(
+                                  policy_online,
+                                  q_target,
+                                  next_states,
+                                  rewards,
+                                  terminals,
+                                  support,
+                                  cumulative_gamma,
+                                  target_rng,
+                              )
 
         future_states = states[:, 1:]
         spr_targets = jax.vmap(jax.vmap(encode_project,
@@ -910,6 +1034,14 @@ def train(
         loss_weights.reshape(num_batches, batch_size, *loss_weights.shape[1:]),
         cumulative_gamma.reshape(num_batches, batch_size,
                                  *cumulative_gamma.shape[1:]),
+        r2_current_stoch.reshape(num_batches, batch_size,
+                                 *r2_current_stoch.shape[1:]),
+        r2_current_deter.reshape(num_batches, batch_size,
+                                 *r2_current_deter.shape[1:]),
+        r2_next_stoch.reshape(num_batches, batch_size,
+                              *r2_next_stoch.shape[1:]),
+        r2_next_deter.reshape(num_batches, batch_size,
+                              *r2_next_deter.shape[1:]),
         r2wm_raw_states.reshape(num_batches, -1, *r2wm_raw_states.shape[1:]),
         r2wm_actions.reshape(num_batches, -1, *r2wm_actions.shape[1:]),
         r2wm_rewards.reshape(num_batches, -1, *r2wm_rewards.shape[1:]),
@@ -961,6 +1093,30 @@ def target_output(
     _, next_qt_argmax = policy_info(next_states, rng)
 
     # Compute the target Q-value distribution
+    probabilities = jnp.squeeze(target_dist.probabilities)
+    next_probabilities = probabilities[next_qt_argmax]
+    target_support = rewards + gamma_with_terminal * support
+    target = project_distribution(target_support, next_probabilities, support)
+
+    return jax.lax.stop_gradient(target)
+
+
+def target_output_r2(
+    policy_info,
+    target_network,
+    next_stoch,
+    next_deter,
+    rewards,
+    terminals,
+    support,
+    cumulative_gamma,
+    rng,
+):
+    gamma_with_terminal = (cumulative_gamma *
+                           (1.0 - terminals.astype(jnp.float32)))
+    target_dist = target_network(next_stoch, next_deter)
+    _, next_qt_argmax = policy_info(next_stoch, next_deter, rng)
+
     probabilities = jnp.squeeze(target_dist.probabilities)
     next_probabilities = probabilities[next_qt_argmax]
     target_support = rewards + gamma_with_terminal * support
@@ -1140,6 +1296,8 @@ class BBFAgent(JaxDQNAgent):
         r2_world_model_discrete=48,
         r2_world_model_units=768,
         r2_world_model_blocks=8,
+        r2_world_model_refresh_enabled=False,
+        r2_world_model_refresh_period=1,
     ):
         logging.info(
             "Creating %s agent with the following parameters:",
@@ -1246,6 +1404,10 @@ class BBFAgent(JaxDQNAgent):
         self.r2_world_model_discrete = int(r2_world_model_discrete)
         self.r2_world_model_units = int(r2_world_model_units)
         self.r2_world_model_blocks = int(r2_world_model_blocks)
+        self.r2_world_model_refresh_enabled = bool(
+            r2_world_model_refresh_enabled)
+        self.r2_world_model_refresh_period = max(
+            1, int(r2_world_model_refresh_period))
 
         logging.info("\t Running with dtype %s", str(self.dtype))
 
@@ -1329,13 +1491,17 @@ class BBFAgent(JaxDQNAgent):
         })
 
         head_keys = {
-            "representation_projection", "projection", "head", "predictor"
+            "representation_projection", "projection", "head", "predictor",
+            "r2_feature_projection", "r2_head"
         }
         head_mask = FrozenDict({
             "params": {k: k in head_keys for k in self.online_params["params"]}
         })
 
-        policy_key = {"policy_projection", "policy"}
+        policy_key = {
+            "policy_projection", "policy", "r2_policy_projection",
+            "r2_policy"
+        }
         policy_mask = FrozenDict({
             "params": {
                 k: k in policy_key for k in self.online_params["params"]
@@ -1395,6 +1561,12 @@ class BBFAgent(JaxDQNAgent):
         #exit(0)
 
     def _build_replay_buffer(self):
+        extra_storage_types = None
+        if getattr(self, "r2_world_model_enabled", False):
+            extra_storage_types = [
+                circular_replay_buffer.ReplayElement('r2_index', (2,),
+                                                     np.int64)
+            ]
         prioritized_buffer = subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
             observation_shape=self.observation_shape,
             stack_size=self.stack_size,
@@ -1403,6 +1575,7 @@ class BBFAgent(JaxDQNAgent):
             subseq_len=self._jumps + 1,
             batch_size=self._batch_size,
             observation_dtype=self.observation_dtype,
+            extra_storage_types=extra_storage_types,
         )
 
         self.n_envs = prioritized_buffer._n_envs  # pylint: disable=protected-access
@@ -1421,6 +1594,9 @@ class BBFAgent(JaxDQNAgent):
         self._r2_prev_action = np.zeros((self.n_envs, self.num_actions),
                                         dtype=np.float32)
         self._r2_is_first = np.ones((self.n_envs, 1), dtype=np.float32)
+        self._r2_last_added_index = np.full((self.n_envs, 2),
+                                            -1,
+                                            dtype=np.int64)
         if not self.r2_world_model_enabled:
             return
 
@@ -1566,6 +1742,41 @@ class BBFAgent(JaxDQNAgent):
             "index": index,
         }
 
+    def _empty_r2_replay_features(self):
+        total_batch = self._batch_size * self._batches_to_group
+        return {
+            "stoch": np.zeros(
+                (total_batch, self.r2_world_model_stoch,
+                 self.r2_world_model_discrete),
+                dtype=np.float32),
+            "deter": np.zeros((total_batch, self.r2_world_model_deter),
+                              dtype=np.float32),
+            "next_stoch": np.zeros(
+                (total_batch, self.r2_world_model_stoch,
+                 self.r2_world_model_discrete),
+                dtype=np.float32),
+            "next_deter": np.zeros((total_batch, self.r2_world_model_deter),
+                                   dtype=np.float32),
+        }
+
+    def _sample_r2_replay_features_for_bbf(self):
+        if (not self.r2_world_model_enabled or self._r2_replay is None or
+                "r2_index" not in self.replay_elements):
+            return self._empty_r2_replay_features()
+
+        current_index = np.asarray(self.replay_elements["r2_index"][:, 0],
+                                   dtype=np.int64)
+        next_index = np.asarray(self.replay_elements["next_r2_index"][:, 0],
+                                dtype=np.int64)
+        stoch, deter = self._r2_replay.get_latents(current_index)
+        next_stoch, next_deter = self._r2_replay.get_latents(next_index)
+        return {
+            "stoch": self._torch_to_numpy(stoch),
+            "deter": self._torch_to_numpy(deter),
+            "next_stoch": self._torch_to_numpy(next_stoch),
+            "next_deter": self._torch_to_numpy(next_deter),
+        }
+
     def _r2_world_model_update_mask(self):
         if not self.r2_world_model_enabled:
             return np.zeros((self._batches_to_group,), dtype=np.bool_)
@@ -1589,6 +1800,31 @@ class BBFAgent(JaxDQNAgent):
         stoch = stoch.reshape(-1, *stoch.shape[2:])
         deter = deter.reshape(-1, *deter.shape[2:])
         self._r2_replay.update(index, stoch, deter)
+
+    def _refresh_r2_world_model_buffer(self):
+        if (not self.r2_world_model_enabled or
+                not self.r2_world_model_refresh_enabled or
+                self._r2_replay is None or
+                self.training_steps % self.r2_world_model_refresh_period != 0):
+            return
+        batch = self._sample_r2_world_model_batch()
+        if batch["index"] is None:
+            return
+        self._rng, rng = jax.random.split(self._rng)
+        stoch, deter = r2_world_model_refresh(
+            self.network_def,
+            self.online_params,
+            batch["state"],
+            batch["action"],
+            batch["is_first"],
+            batch["initial_stoch"],
+            batch["initial_deter"],
+            rng,
+            self.dtype,
+        )
+        stoch = np.asarray(jax.device_get(stoch), dtype=np.float32)
+        deter = np.asarray(jax.device_get(deter), dtype=np.float32)
+        self._r2_replay.update(batch["index"], stoch, deter)
 
     def _observe_r2_world_model_state(self):
         if not self.r2_world_model_enabled:
@@ -1618,7 +1854,7 @@ class BBFAgent(JaxDQNAgent):
                 self._r2_pending_transition is None):
             return
         action_onehot = self._one_hot_actions(action)
-        self._r2_replay.add_atari_transition(
+        r2_index = self._r2_replay.add_atari_transition(
             state=self._r2_pending_transition["state"],
             action=action_onehot,
             reward=self._r2_pending_transition["reward"],
@@ -1627,6 +1863,8 @@ class BBFAgent(JaxDQNAgent):
             stoch=self._r2_stoch,
             deter=self._r2_deter,
         )
+        self._r2_last_added_index = np.asarray(
+            self._torch_to_numpy(r2_index), dtype=np.int64)
         self._r2_pending_transition = None
 
     def _set_r2_pending_transition(self, reward, terminal, is_first):
@@ -1723,6 +1961,7 @@ class BBFAgent(JaxDQNAgent):
             r2wm_batch = self._sample_r2_world_model_batch()
         else:
             r2wm_batch = self._empty_r2_world_model_batch()
+        r2_replay_features = self._sample_r2_replay_features_for_bbf()
         (
             new_online_params,
             new_target_params,
@@ -1763,6 +2002,10 @@ class BBFAgent(JaxDQNAgent):
             #self.ent_targ,
             self.x_ent_coef,
             self.r2_world_model_enabled,
+            r2_replay_features["stoch"],
+            r2_replay_features["deter"],
+            r2_replay_features["next_stoch"],
+            r2_replay_features["next_deter"],
             r2wm_batch["state"],
             r2wm_batch["action"],
             r2wm_batch["reward"],
@@ -1825,6 +2068,8 @@ class BBFAgent(JaxDQNAgent):
                            self._replay.sum_tree.max_recorded_priority)
 
         if not self.eval_mode:
+            if self.r2_world_model_enabled:
+                args = args + (self._r2_last_added_index.copy(),)
             self._replay.add(
                 last_observation,
                 action,
@@ -1886,6 +2131,7 @@ class BBFAgent(JaxDQNAgent):
                     self._training_step_update(i, offline=False)
         if self.reset_every > 0 and self.training_steps > self.next_reset:
             self.reset_weights()
+        self._refresh_r2_world_model_buffer()
         # debug - start
         #if random.uniform(0, 1) < 1e-3:
         if False:
@@ -1939,6 +2185,9 @@ class BBFAgent(JaxDQNAgent):
             self._r2_prev_action = np.zeros((n_envs, self.num_actions),
                                             dtype=np.float32)
             self._r2_is_first = np.ones((n_envs, 1), dtype=np.float32)
+            self._r2_last_added_index = np.full((n_envs, 2),
+                                                -1,
+                                                dtype=np.int64)
             self._set_r2_pending_transition(
                 np.zeros((n_envs,), dtype=np.float32),
                 np.zeros((n_envs,), dtype=np.float32),
@@ -1969,6 +2218,10 @@ class BBFAgent(JaxDQNAgent):
                 self._r2_is_first[:env_id],
                 self._r2_is_first[env_id + 1:]
             ], 0)
+            self._r2_last_added_index = np.concatenate([
+                self._r2_last_added_index[:env_id],
+                self._r2_last_added_index[env_id + 1:]
+            ], 0)
 
     def cache_train_state(self):
         self.training_state = (
@@ -1980,12 +2233,14 @@ class BBFAgent(JaxDQNAgent):
             copy.deepcopy(self._r2_prev_action),
             copy.deepcopy(self._r2_is_first),
             copy.deepcopy(self._r2_pending_transition),
+            copy.deepcopy(self._r2_last_added_index),
         )
 
     def restore_train_state(self):
         (self.state, self._last_observation, self._observation,
          self._r2_stoch, self._r2_deter, self._r2_prev_action,
-         self._r2_is_first, self._r2_pending_transition) = (
+         self._r2_is_first, self._r2_pending_transition,
+         self._r2_last_added_index) = (
              self.training_state)
 
     def log_transition(self, observation, action, reward, terminal,
@@ -2020,17 +2275,29 @@ class BBFAgent(JaxDQNAgent):
                 0,
                 self.num_actions,
             )
-        self._rng, action, probs = select_action(
-            self.network_def,
-            select_params,
-            state,
-            self._rng,
-            self.num_actions,
-            False,
-            #eval_mode,
-            #eval_mode=self.greedy_action,
-            #eval_mode=True,
-        )
+        if self.r2_world_model_enabled:
+            self._rng, action, probs = select_action_from_r2(
+                self.network_def,
+                select_params,
+                self._r2_stoch,
+                self._r2_deter,
+                self._rng,
+                self.num_actions,
+                False,
+                #eval_mode,
+            )
+        else:
+            self._rng, action, probs = select_action(
+                self.network_def,
+                select_params,
+                state,
+                self._rng,
+                self.num_actions,
+                False,
+                #eval_mode,
+                #eval_mode=self.greedy_action,
+                #eval_mode=True,
+            )
         #print(probs.shape)
         #if not self.eval_mode:
         if not self.eval_mode:
@@ -2046,6 +2313,7 @@ class BBFAgent(JaxDQNAgent):
     """
         if not self.eval_mode:
             self._train_step()
+        if self.r2_world_model_enabled:
             self._observe_r2_world_model_state()
         state = self.state
         select_params = self.target_network_params
@@ -2061,8 +2329,9 @@ class BBFAgent(JaxDQNAgent):
             self.eval_mode,
         )
         self.action = np.asarray(action)
-        if not self.eval_mode and self.r2_world_model_enabled:
-            self._flush_r2_pending_transition(self.action)
+        if self.r2_world_model_enabled:
+            if not self.eval_mode:
+                self._flush_r2_pending_transition(self.action)
             self._r2_prev_action = self._one_hot_actions(self.action)
         #time_delta = time.time() - start_time
         #print('time_delta: {}'.format(time_delta))

@@ -629,6 +629,10 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
                                                            b_indices]
                 output = self.restore_leading_dims(batch_size, subseq_len,
                                                    output)
+            elif name == 'next_r2_index':
+                output = self._store['r2_index'][next_indices, b_indices]
+                output = self.restore_leading_dims(batch_size, subseq_len,
+                                                   output)
             elif element.name == 'terminal':
                 output = is_terminal_transition
                 output = self.restore_leading_dims(batch_size, subseq_len,
@@ -699,6 +703,11 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
                 ReplayElement(element.name,
                               (batch_size, subseq_len) + tuple(element.shape),
                               element.type))
+            if self._use_next_state and element.name == 'r2_index':
+                transition_elements.append(
+                    ReplayElement('next_r2_index',
+                                  (batch_size, subseq_len) +
+                                  tuple(element.shape), element.type))
         return transition_elements
 
     def reset_priorities(self):
@@ -832,7 +841,13 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
             update_horizon=update_horizon,
             gamma=gamma,
         )
-        transition.append(self.get_priority(transition[-1]))
+        transition_elements = super().get_transition_elements(
+            batch_size=batch_size, subseq_len=subseq_len)
+        indices_position = [
+            i for i, element in enumerate(transition_elements)
+            if element.name == 'indices'
+        ][0]
+        transition.append(self.get_priority(transition[indices_position]))
         return transition
 
     def set_priority(self, indices, priorities):

@@ -914,6 +914,26 @@ class RainbowDQNNetwork(nn.Module):
         self.policy = nn.Dense(self.num_actions,
                                dtype=jnp.float32,
                                kernel_init=initializer)
+        if self.r2_world_model_enabled:
+            self.r2_feature_projection = FeatureLayer(
+                int(self.hidden_dim),
+                dtype=jnp.float32,
+                initializer=initializer,
+            )
+            self.r2_head = LinearHead(
+                num_actions=self.num_actions,
+                num_atoms=self.num_atoms,
+                dtype=jnp.float32,
+                initializer=initializer,
+            )
+            self.r2_policy_projection = FeatureLayer(
+                int(self.hidden_dim),
+                dtype=jnp.float32,
+                initializer=initializer,
+            )
+            self.r2_policy = nn.Dense(self.num_actions,
+                                      dtype=jnp.float32,
+                                      kernel_init=initializer)
         self._log_alpha = self.param('_log_alpha', nn.initializers.zeros_init(),
                                      ())
         if self.r2_world_model_enabled:
@@ -989,6 +1009,9 @@ class RainbowDQNNetwork(nn.Module):
                 jax.random.PRNGKey(0),
                 eval_mode=True,
             )
+            self.q_from_r2_features(dummy_stoch[0], dummy_deter[0], support,
+                                    eval_mode)
+            self.r2_policy_logits(dummy_stoch[0], dummy_deter[0])
         return (
             y,
             self.policy(
@@ -1007,6 +1030,35 @@ class RainbowDQNNetwork(nn.Module):
         #x = jax.lax.stop_gradient(x)
         logits = self.policy(nn.relu(self.policy_projection(x, False)))
         #logits = self.policy(jax.lax.stop_gradient(nn.relu(self.encode_project(x, False))))
+        return (logits,
+                jax.random.categorical(self.make_rng('action_sample'), logits))
+
+    def r2_feature(self, stoch, deter):
+        stoch = stoch.reshape(-1)
+        deter = deter.reshape(-1)
+        return jnp.concatenate([stoch, deter], axis=-1)
+
+    def q_from_r2_features(self, stoch, deter, support, eval_mode=False):
+        if not self.r2_world_model_enabled:
+            raise ValueError("R2 world model is disabled.")
+        representation = self.r2_feature(stoch, deter)
+        x = self.r2_feature_projection(representation, eval_mode)
+        x = nn.relu(x)
+        logits = self.r2_head(x, eval_mode)
+        probabilities = jnp.squeeze(nn.softmax(logits))
+        q_values = jnp.squeeze(jnp.sum(support * probabilities, axis=-1))
+        return SPROutputType(q_values, logits, probabilities, representation,
+                             representation)
+
+    def r2_policy_logits(self, stoch, deter):
+        if not self.r2_world_model_enabled:
+            raise ValueError("R2 world model is disabled.")
+        x = self.r2_feature(stoch, deter)
+        x = nn.relu(self.r2_policy_projection(x, False))
+        return self.r2_policy(x)
+
+    def get_policy_from_r2(self, stoch, deter):
+        logits = self.r2_policy_logits(stoch, deter)
         return (logits,
                 jax.random.categorical(self.make_rng('action_sample'), logits))
 
@@ -1059,6 +1111,31 @@ class RainbowDQNNetwork(nn.Module):
                          in_axes=0)(state)
         return self.r2_world_model.observe_single(embed, prev_action, stoch,
                                                   deter, is_first, rng)
+
+    def r2_world_model_observe_from_states(
+        self,
+        states,
+        actions,
+        is_first,
+        initial_stoch,
+        initial_deter,
+        rng,
+        eval_mode=True,
+    ):
+        if not self.r2_world_model_enabled:
+            raise ValueError("R2 world model is disabled.")
+        batch_size, batch_length = states.shape[:2]
+        flat_states = states.reshape(batch_size * batch_length,
+                                     *states.shape[2:])
+        flat_embed = jax.vmap(
+            lambda state: self.encode_project(state, eval_mode),
+            in_axes=0,
+            axis_name="r2_world_model_refresh_batch",
+        )(flat_states)
+        embed = flat_embed.reshape(batch_size, batch_length, -1)
+        post_stoch, post_deter, _ = self.r2_world_model.rssm.observe(
+            embed, actions, (initial_stoch, initial_deter), is_first, rng)
+        return post_stoch, post_deter
 
     def __call__(
         self,

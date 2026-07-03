@@ -56,6 +56,8 @@ BBFAgent.r2_world_model_hidden = 768
 BBFAgent.r2_world_model_discrete = 48
 BBFAgent.r2_world_model_units = 768
 BBFAgent.r2_world_model_blocks = 8
+BBFAgent.r2_world_model_refresh_enabled = True
+BBFAgent.r2_world_model_refresh_period = 1
 
 BBFAgent.target_update_tau = 0.005
 BBFAgent.target_action_selection = True
