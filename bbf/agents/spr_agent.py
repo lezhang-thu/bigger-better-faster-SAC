@@ -1601,7 +1601,7 @@ class BBFAgent(JaxDQNAgent):
             return
 
         from types import SimpleNamespace
-        from r2dreamer.buffer import Buffer
+        from buffer import Buffer
 
         config = SimpleNamespace(
             device="cpu",
@@ -1801,30 +1801,36 @@ class BBFAgent(JaxDQNAgent):
         deter = deter.reshape(-1, *deter.shape[2:])
         self._r2_replay.update(index, stoch, deter)
 
-    def _refresh_r2_world_model_buffer(self):
+    def _refresh_r2_world_model_buffer_for_bbf_sample(self):
         if (not self.r2_world_model_enabled or
                 not self.r2_world_model_refresh_enabled or
                 self._r2_replay is None or
+                "r2_index" not in self.replay_elements or
                 self.training_steps % self.r2_world_model_refresh_period != 0):
             return
-        batch = self._sample_r2_world_model_batch()
-        if batch["index"] is None:
-            return
+        current_index = np.asarray(self.replay_elements["r2_index"][:, 0],
+                                   dtype=np.int64)
+        next_index = np.asarray(self.replay_elements["next_r2_index"][:, 0],
+                                dtype=np.int64)
+        data, index, initial = self._r2_replay.get_refresh_batch(
+            current_index,
+            next_index,
+            batch_length=self.r2_world_model_batch_length)
         self._rng, rng = jax.random.split(self._rng)
         stoch, deter = r2_world_model_refresh(
             self.network_def,
             self.online_params,
-            batch["state"],
-            batch["action"],
-            batch["is_first"],
-            batch["initial_stoch"],
-            batch["initial_deter"],
+            self._torch_to_numpy(data["state"]),
+            self._torch_to_numpy(data["action"]),
+            self._torch_to_numpy(data["is_first"]).astype(np.float32),
+            self._torch_to_numpy(initial[0]),
+            self._torch_to_numpy(initial[1]),
             rng,
             self.dtype,
         )
         stoch = np.asarray(jax.device_get(stoch), dtype=np.float32)
         deter = np.asarray(jax.device_get(deter), dtype=np.float32)
-        self._r2_replay.update(batch["index"], stoch, deter)
+        self._r2_replay.update(index, stoch, deter)
 
     def _observe_r2_world_model_state(self):
         if not self.r2_world_model_enabled:
@@ -1961,6 +1967,7 @@ class BBFAgent(JaxDQNAgent):
             r2wm_batch = self._sample_r2_world_model_batch()
         else:
             r2wm_batch = self._empty_r2_world_model_batch()
+        self._refresh_r2_world_model_buffer_for_bbf_sample()
         r2_replay_features = self._sample_r2_replay_features_for_bbf()
         (
             new_online_params,
@@ -2131,7 +2138,6 @@ class BBFAgent(JaxDQNAgent):
                     self._training_step_update(i, offline=False)
         if self.reset_every > 0 and self.training_steps > self.next_reset:
             self.reset_weights()
-        self._refresh_r2_world_model_buffer()
         # debug - start
         #if random.uniform(0, 1) < 1e-3:
         if False:
