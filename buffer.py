@@ -110,7 +110,7 @@ class Buffer:
         return stoch, deter
 
     def get_refresh_batch(self, current_index, next_index, batch_length=None):
-        """Build a fixed-history no-grad RSSM refresh batch for BBF samples.
+        """Build a fixed-history RSSM batch for BBF-sampled transitions.
 
         current_index and next_index are [time, env] rows for s_t and the
         n-step bootstrap state. The refresh window ends at next_index and has
@@ -159,13 +159,17 @@ class Buffer:
             {
                 "state": context["state"][:, 1:],
                 "action": context["action"][:, :-1],
+                "reward": context["reward"][:, 1:],
+                "is_terminal": context["is_terminal"][:, 1:],
                 "is_first": context["is_first"][:, 1:],
             },
             batch_size=context.batch_size[:-1] + (batch_length,),
             device=self.storage_device,
         )
         index = [times[:, 1:], envs[:, 1:]]
-        return data, index, initial
+        current_position = batch_length - 1 - diff
+        next_position = torch.full_like(current_position, batch_length - 1)
+        return data, index, initial, current_position, next_position
 
     def sample(self):
         sample_td, info = self._buffer.sample(return_info=True)

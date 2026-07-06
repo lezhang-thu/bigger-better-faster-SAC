@@ -852,7 +852,6 @@ class RainbowDQNNetwork(nn.Module):
     hidden_dim: int = 512
     width_scale: float = 1.0
     dtype: Dtype = jnp.float32
-    r2_world_model_enabled: bool = False
     r2_world_model_stoch: int = 32
     r2_world_model_deter: int = 6144
     r2_world_model_hidden: int = 768
@@ -914,41 +913,39 @@ class RainbowDQNNetwork(nn.Module):
         self.policy = nn.Dense(self.num_actions,
                                dtype=jnp.float32,
                                kernel_init=initializer)
-        if self.r2_world_model_enabled:
-            self.r2_feature_projection = FeatureLayer(
-                int(self.hidden_dim),
-                dtype=jnp.float32,
-                initializer=initializer,
-            )
-            self.r2_head = LinearHead(
-                num_actions=self.num_actions,
-                num_atoms=self.num_atoms,
-                dtype=jnp.float32,
-                initializer=initializer,
-            )
-            self.r2_policy_projection = FeatureLayer(
-                int(self.hidden_dim),
-                dtype=jnp.float32,
-                initializer=initializer,
-            )
-            self.r2_policy = nn.Dense(self.num_actions,
-                                      dtype=jnp.float32,
-                                      kernel_init=initializer)
+        self.r2_feature_projection = FeatureLayer(
+            int(self.hidden_dim),
+            dtype=jnp.float32,
+            initializer=initializer,
+        )
+        self.r2_head = LinearHead(
+            num_actions=self.num_actions,
+            num_atoms=self.num_atoms,
+            dtype=jnp.float32,
+            initializer=initializer,
+        )
+        self.r2_policy_projection = FeatureLayer(
+            int(self.hidden_dim),
+            dtype=jnp.float32,
+            initializer=initializer,
+        )
+        self.r2_policy = nn.Dense(self.num_actions,
+                                  dtype=jnp.float32,
+                                  kernel_init=initializer)
         self._log_alpha = self.param('_log_alpha', nn.initializers.zeros_init(),
                                      ())
-        if self.r2_world_model_enabled:
-            self.r2_world_model = R2DreamerWorldModel(
-                embed_size=int(self.hidden_dim),
-                act_dim=self.num_actions,
-                stoch=self.r2_world_model_stoch,
-                deter=self.r2_world_model_deter,
-                hidden=self.r2_world_model_hidden,
-                discrete=self.r2_world_model_discrete,
-                units=self.r2_world_model_units,
-                blocks=self.r2_world_model_blocks,
-                dtype=jnp.float32,
-                name="r2_world_model",
-            )
+        self.r2_world_model = R2DreamerWorldModel(
+            embed_size=int(self.hidden_dim),
+            act_dim=self.num_actions,
+            stoch=self.r2_world_model_stoch,
+            deter=self.r2_world_model_deter,
+            hidden=self.r2_world_model_hidden,
+            discrete=self.r2_world_model_discrete,
+            units=self.r2_world_model_units,
+            blocks=self.r2_world_model_blocks,
+            dtype=jnp.float32,
+            name="r2_world_model",
+        )
 
     def entropy_scale(self):
         return jnp.exp(self._log_alpha)
@@ -990,28 +987,26 @@ class RainbowDQNNetwork(nn.Module):
         eval_mode=False,
     ):
         y = self(x, support, actions, do_rollout, eval_mode)
-        if self.r2_world_model_enabled:
-            dummy_states = jnp.zeros((1, 1) + x.shape, dtype=x.dtype)
-            dummy_actions = jnp.zeros((1, 1, self.num_actions),
-                                      dtype=jnp.float32)
-            dummy_rewards = jnp.zeros((1, 1, 1), dtype=jnp.float32)
-            dummy_terminals = jnp.zeros((1, 1, 1), dtype=jnp.float32)
-            dummy_first = jnp.ones((1, 1, 1), dtype=jnp.float32)
-            dummy_stoch, dummy_deter = self.r2_world_model.initial(1)
-            self.r2_world_model_loss_from_states(
-                dummy_states,
-                dummy_actions,
-                dummy_rewards,
-                dummy_terminals,
-                dummy_first,
-                dummy_stoch,
-                dummy_deter,
-                jax.random.PRNGKey(0),
-                eval_mode=True,
-            )
-            self.q_from_r2_features(dummy_stoch[0], dummy_deter[0], support,
-                                    eval_mode)
-            self.r2_policy_logits(dummy_stoch[0], dummy_deter[0])
+        dummy_states = jnp.zeros((1, 1) + x.shape, dtype=x.dtype)
+        dummy_actions = jnp.zeros((1, 1, self.num_actions), dtype=jnp.float32)
+        dummy_rewards = jnp.zeros((1, 1, 1), dtype=jnp.float32)
+        dummy_terminals = jnp.zeros((1, 1, 1), dtype=jnp.float32)
+        dummy_first = jnp.ones((1, 1, 1), dtype=jnp.float32)
+        dummy_stoch, dummy_deter = self.r2_world_model.initial(1)
+        self.r2_world_model_loss_from_states(
+            dummy_states,
+            dummy_actions,
+            dummy_rewards,
+            dummy_terminals,
+            dummy_first,
+            dummy_stoch,
+            dummy_deter,
+            jax.random.PRNGKey(0),
+            eval_mode=True,
+        )
+        self.q_from_r2_features(dummy_stoch[0], dummy_deter[0], support,
+                                eval_mode)
+        self.r2_policy_logits(dummy_stoch[0], dummy_deter[0])
         return (
             y,
             self.policy(
@@ -1039,8 +1034,6 @@ class RainbowDQNNetwork(nn.Module):
         return jnp.concatenate([stoch, deter], axis=-1)
 
     def q_from_r2_features(self, stoch, deter, support, eval_mode=False):
-        if not self.r2_world_model_enabled:
-            raise ValueError("R2 world model is disabled.")
         representation = self.r2_feature(stoch, deter)
         x = self.r2_feature_projection(representation, eval_mode)
         x = nn.relu(x)
@@ -1051,8 +1044,6 @@ class RainbowDQNNetwork(nn.Module):
                              representation)
 
     def r2_policy_logits(self, stoch, deter):
-        if not self.r2_world_model_enabled:
-            raise ValueError("R2 world model is disabled.")
         x = self.r2_feature(stoch, deter)
         x = nn.relu(self.r2_policy_projection(x, False))
         return self.r2_policy(x)
@@ -1063,8 +1054,6 @@ class RainbowDQNNetwork(nn.Module):
                 jax.random.categorical(self.make_rng('action_sample'), logits))
 
     def r2_initial(self, batch_size):
-        if not self.r2_world_model_enabled:
-            raise ValueError("R2 world model is disabled.")
         return self.r2_world_model.initial(batch_size)
 
     def r2_world_model_loss_from_states(
@@ -1079,8 +1068,6 @@ class RainbowDQNNetwork(nn.Module):
         rng,
         eval_mode=True,
     ):
-        if not self.r2_world_model_enabled:
-            raise ValueError("R2 world model is disabled.")
         batch_size, batch_length = states.shape[:2]
         flat_states = states.reshape(batch_size * batch_length,
                                      *states.shape[2:])
@@ -1105,37 +1092,10 @@ class RainbowDQNNetwork(nn.Module):
         rng,
         eval_mode=True,
     ):
-        if not self.r2_world_model_enabled:
-            raise ValueError("R2 world model is disabled.")
         embed = jax.vmap(lambda x: self.encode_project(x, eval_mode),
                          in_axes=0)(state)
         return self.r2_world_model.observe_single(embed, prev_action, stoch,
                                                   deter, is_first, rng)
-
-    def r2_world_model_observe_from_states(
-        self,
-        states,
-        actions,
-        is_first,
-        initial_stoch,
-        initial_deter,
-        rng,
-        eval_mode=True,
-    ):
-        if not self.r2_world_model_enabled:
-            raise ValueError("R2 world model is disabled.")
-        batch_size, batch_length = states.shape[:2]
-        flat_states = states.reshape(batch_size * batch_length,
-                                     *states.shape[2:])
-        flat_embed = jax.vmap(
-            lambda state: self.encode_project(state, eval_mode),
-            in_axes=0,
-            axis_name="r2_world_model_refresh_batch",
-        )(flat_states)
-        embed = flat_embed.reshape(batch_size, batch_length, -1)
-        post_stoch, post_deter, _ = self.r2_world_model.rssm.observe(
-            embed, actions, (initial_stoch, initial_deter), is_first, rng)
-        return post_stoch, post_deter
 
     def __call__(
         self,
