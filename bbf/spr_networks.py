@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Various networks for Jax Dopamine SPR agents."""
+"""Networks for the BBF/r2 world-model ablation."""
 
 import collections
 import enum
@@ -30,8 +30,8 @@ import jax.numpy as jnp
 import numpy as onp
 import optax
 
-SPROutputType = collections.namedtuple(
-    'RL_network',
+R2QOutputType = collections.namedtuple(
+    'r2_q_network',
     ['q_values', 'logits', 'probabilities', 'latent', 'representation'],
 )
 PRNGKey = Any
@@ -191,49 +191,6 @@ def renormalize(tensor, has_batch=False):
             (max_value - min_value + 1e-5)).reshape(*shape)
 
 
-class ConvTMCell(nn.Module):
-    """MuZero-style transition model for SPR."""
-
-    num_actions: int
-    latent_dim: int
-    renormalize: bool
-    dtype: Dtype = jnp.float32
-    initializer: Any = nn.initializers.xavier_uniform()
-
-    @nn.compact
-    def __call__(self, x, action, eval_mode=False, key=None):
-        sizes = [self.latent_dim, self.latent_dim]
-        kernel_sizes = [3, 3]
-        stride_sizes = [1, 1]
-
-        action_onehot = jax.nn.one_hot(action, self.num_actions)
-        action_onehot = jax.lax.broadcast(action_onehot,
-                                          (x.shape[-3], x.shape[-2]))
-        x = jnp.concatenate([x, action_onehot], -1)
-        for layer in range(1):
-            x = nn.Conv(
-                features=sizes[layer],
-                kernel_size=(kernel_sizes[layer], kernel_sizes[layer]),
-                strides=(stride_sizes[layer], stride_sizes[layer]),
-                kernel_init=self.initializer,
-                dtype=self.dtype,
-            )(x)
-            x = nn.relu(x)
-        x = nn.Conv(
-            features=sizes[-1],
-            kernel_size=(kernel_sizes[-1], kernel_sizes[-1]),
-            strides=(stride_sizes[-1], stride_sizes[-1]),
-            kernel_init=self.initializer,
-            dtype=self.dtype,
-        )(x)
-        x = nn.relu(x)
-
-        if self.renormalize:
-            x = renormalize(x)
-
-        return x, x
-
-
 @gin.configurable
 class ImpalaCNN(nn.Module):
     """ResNet encoder based on Impala.
@@ -330,41 +287,6 @@ class ResidualStage(nn.Module):
             )(conv_out)
             conv_out += block_input
         return conv_out
-
-
-class TransitionModel(nn.Module):
-    """An SPR-style transition model.
-
-  Attributes:
-    num_actions: Size of action conditioning input.
-    latent_dim: Number of channels.
-    renormalize: Whether to renormalize outputs to [0, 1] as in MuZero.
-    dtype: Jax dtype.
-    initializer: Jax initializer.
-  """
-    num_actions: int
-    latent_dim: int
-    renormalize: bool
-    dtype: Dtype = jnp.float32
-    initializer: Any = nn.initializers.xavier_uniform()
-
-    @nn.compact
-    def __call__(self, x, action):
-        scan = nn.scan(
-            ConvTMCell,
-            in_axes=0,
-            out_axes=0,
-            variable_broadcast=['params'],
-            split_rngs={'params': False},
-        )(
-            latent_dim=self.latent_dim,
-            num_actions=self.num_actions,
-            renormalize=self.renormalize,
-            dtype=self.dtype,
-            initializer=self.initializer,
-        )
-        return scan(x, action)
-
 
 def _r2_initializer():
     """R2-Dreamer-style truncated normal initializer."""
@@ -867,52 +789,11 @@ class RainbowDQNNetwork(nn.Module):
             dtype=self.dtype,
             initializer=initializer,
         )
-        latent_dim = self.encoder.dims[-1] * self.width_scale
-
-        # debug - start
-        #print('*' * 20)
-        #print(' latent_dim: {}'.format(latent_dim))
-        #print(' self.num_actions: {}'.format(self.num_actions))
-        #exit(0)
-        # debug - end
-
-        self.transition_model = TransitionModel(
-            num_actions=self.num_actions,
-            latent_dim=int(latent_dim),
-            renormalize=self.renormalize,
-            dtype=self.dtype,
-            initializer=initializer,
-        )
-
-        self.projection = FeatureLayer(
-            int(self.hidden_dim),
-            dtype=jnp.float32,
-            initializer=initializer,
-        )
         self.representation_projection = FeatureLayer(
             int(self.hidden_dim),
             dtype=jnp.float32,
             initializer=initializer,
         )
-        self.predictor = nn.Dense(int(self.hidden_dim),
-                                  dtype=jnp.float32,
-                                  kernel_init=initializer)
-        self.head = LinearHead(
-            num_actions=self.num_actions,
-            num_atoms=self.num_atoms,
-            dtype=jnp.float32,
-            initializer=initializer,
-        )
-
-        # ******** #
-        self.policy_projection = FeatureLayer(
-            int(self.hidden_dim),
-            dtype=jnp.float32,
-            initializer=initializer,
-        )
-        self.policy = nn.Dense(self.num_actions,
-                               dtype=jnp.float32,
-                               kernel_init=initializer)
         self.r2_feature_projection = FeatureLayer(
             int(self.hidden_dim),
             dtype=jnp.float32,
@@ -932,8 +813,6 @@ class RainbowDQNNetwork(nn.Module):
         self.r2_policy = nn.Dense(self.num_actions,
                                   dtype=jnp.float32,
                                   kernel_init=initializer)
-        self._log_alpha = self.param('_log_alpha', nn.initializers.zeros_init(),
-                                     ())
         self.r2_world_model = R2DreamerWorldModel(
             embed_size=int(self.hidden_dim),
             act_dim=self.num_actions,
@@ -947,9 +826,6 @@ class RainbowDQNNetwork(nn.Module):
             name="r2_world_model",
         )
 
-    def entropy_scale(self):
-        return jnp.exp(self._log_alpha)
-
     def encode(self, x, eval_mode=False):
         latent = self.encoder(x, deterministic=not eval_mode)
         if self.renormalize:
@@ -960,33 +836,16 @@ class RainbowDQNNetwork(nn.Module):
         latent = self.encode(x, eval_mode)
         return self.represent(latent.reshape(-1), eval_mode)
 
-    def project(self, x, eval_mode):
-        projected = self.projection(x, eval_mode=eval_mode)
-        return projected
-
     def represent(self, x, eval_mode):
         return self.representation_projection(x, eval_mode=eval_mode)
-
-    def spr_predict(self, x, eval_mode):
-        return self.predictor(self.represent(x, eval_mode))
-
-    def spr_rollout(self, latent, actions):
-        _, pred_latents = self.transition_model(latent, actions)
-
-        representations = pred_latents.reshape(pred_latents.shape[0], -1)
-        predictions = jax.vmap(self.spr_predict,
-                               in_axes=(0, None))(representations, True)
-        return predictions
 
     def init_fn(
         self,
         x,
         support,
-        actions=None,
-        do_rollout=False,
         eval_mode=False,
     ):
-        y = self(x, support, actions, do_rollout, eval_mode)
+        self.encode_project(x, eval_mode)
         dummy_states = jnp.zeros((1, 1) + x.shape, dtype=x.dtype)
         dummy_actions = jnp.zeros((1, 1, self.num_actions), dtype=jnp.float32)
         dummy_rewards = jnp.zeros((1, 1, 1), dtype=jnp.float32)
@@ -1007,26 +866,7 @@ class RainbowDQNNetwork(nn.Module):
         self.q_from_r2_features(dummy_stoch[0], dummy_deter[0], support,
                                 eval_mode)
         self.r2_policy_logits(dummy_stoch[0], dummy_deter[0])
-        return (
-            y,
-            self.policy(
-                nn.relu(
-                    self.policy_projection(
-                        #jax.lax.stop_gradient(y.representation),
-                        y.representation,
-                        eval_mode))))
-        #return (y,
-        #        self.policy(jax.lax.stop_gradient(nn.relu(self.project(y.representation, eval_mode)))))
-
-    def get_policy(self, x):
-        x = self.encode(x, False)
-        x = x.reshape(-1)
-        x = self.represent(x, False)
-        #x = jax.lax.stop_gradient(x)
-        logits = self.policy(nn.relu(self.policy_projection(x, False)))
-        #logits = self.policy(jax.lax.stop_gradient(nn.relu(self.encode_project(x, False))))
-        return (logits,
-                jax.random.categorical(self.make_rng('action_sample'), logits))
+        return dummy_stoch, dummy_deter
 
     def r2_feature(self, stoch, deter):
         stoch = stoch.reshape(-1)
@@ -1040,7 +880,7 @@ class RainbowDQNNetwork(nn.Module):
         logits = self.r2_head(x, eval_mode)
         probabilities = jnp.squeeze(nn.softmax(logits))
         q_values = jnp.squeeze(jnp.sum(support * probabilities, axis=-1))
-        return SPROutputType(q_values, logits, probabilities, representation,
+        return R2QOutputType(q_values, logits, probabilities, representation,
                              representation)
 
     def r2_policy_logits(self, stoch, deter):
@@ -1096,27 +936,3 @@ class RainbowDQNNetwork(nn.Module):
                          in_axes=0)(state)
         return self.r2_world_model.observe_single(embed, prev_action, stoch,
                                                   deter, is_first, rng)
-
-    def __call__(
-        self,
-        x,
-        support,
-        actions=None,
-        do_rollout=False,
-        eval_mode=False,
-    ):
-        spatial_latent = self.encode(x, eval_mode)
-        representation = self.represent(spatial_latent.reshape(-1), eval_mode)
-        # Single hidden layer
-        x = self.project(representation, eval_mode)
-        x = nn.relu(x)
-
-        logits = self.head(x, eval_mode)
-
-        if do_rollout:
-            spatial_latent = self.spr_rollout(spatial_latent, actions)
-
-        probabilities = jnp.squeeze(nn.softmax(logits))
-        q_values = jnp.squeeze(jnp.sum(support * probabilities, axis=-1))
-        return SPROutputType(q_values, logits, probabilities, spatial_latent,
-                             representation)

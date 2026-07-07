@@ -95,7 +95,9 @@ def copy_within_frozen_tree(old, new, prefix):
     return old.copy(add_or_replace={prefix: new_entry})
 
 
-def copy_params(source, target, keys=("encoder", "transition_model")):
+def copy_params(source, target,
+                keys=("encoder", "representation_projection",
+                      "r2_world_model")):
     """Copies a set of keys from one set of params to another.
 
   Args:
@@ -169,7 +171,6 @@ def interpolate_weights(
 @functools.partial(
     jax.jit,
     static_argnames=(
-        "do_rollout",
         "state_shape",
         "keys_to_copy",
         "shrink_perturb_keys",
@@ -186,7 +187,6 @@ def jit_reset(
     optimizer,
     rng,
     state_shape,
-    do_rollout,
     support,
     reset_target,
     shrink_perturb_keys,
@@ -204,8 +204,6 @@ def jit_reset(
     optimizer: Optax optimizer.
     rng: JAX PRNG key.
     state_shape: Shape of the network inputs.
-    do_rollout: Whether to do a dynamics model rollout (e.g., if SPR is being
-      used).
     support: Support of the categorical distribution if using distributional RL.
     reset_target: Whether to also reset the target network.
     shrink_perturb_keys: Parameter keys to apply shrink-and-perturb to.
@@ -214,19 +212,14 @@ def jit_reset(
     keys_to_copy: Keys to copy over without resetting.
 
   Returns:
-  """
+    """
     online_rng, target_rng = jax.random.split(rng, 2)
     state = jnp.zeros(state_shape, dtype=jnp.float32)
-    # Create some dummy actions of arbitrary length to initialize the transition
-    # model, if the network has one.
-    actions = jnp.zeros((5,))
     random_params = flax.core.frozen_dict.FrozenDict(
         network_def.init(
             online_rng,
             method=network_def.init_fn,
             x=state,
-            actions=actions,
-            do_rollout=do_rollout,
             support=support,
         ))
     target_random_params = flax.core.frozen_dict.FrozenDict(
@@ -234,8 +227,6 @@ def jit_reset(
             target_rng,
             method=network_def.init_fn,
             x=state,
-            actions=actions,
-            do_rollout=do_rollout,
             support=support,
         ))
     if shrink_perturb_keys:
@@ -486,7 +477,6 @@ def train(
     step,
     match_online_target_rngs,  # static
     target_eval_mode,  # static
-    #ent_targ,
     x_ent_coef,
     r2wm_raw_states,
     r2wm_actions,
@@ -586,16 +576,9 @@ def train(
                 log_prob = jax.nn.log_softmax(logits)
                 prob = jax.nn.softmax(logits)
                 q_values = q_values[samples] - (q_values * prob).sum()
-                ent_coef = network_def.apply(params,
-                                             method=network_def.entropy_scale)
                 x_ent = -(prob * log_prob).sum()
-                #if True:
-                if False:
-                    return -(jax.lax.stop_gradient(q_values) * log_prob[samples]
-                            ) + ent_coef * (-x_ent + ent_targ), x_ent
-                else:
-                    return -(jax.lax.stop_gradient(q_values) *
-                             log_prob[samples]) + x_ent_coef * (-x_ent), x_ent
+                return (-(jax.lax.stop_gradient(q_values) * log_prob[samples])
+                        + x_ent_coef * (-x_ent), x_ent)
 
             r2wm_states = spr_networks.process_inputs(
                 r2wm_raw_states,
@@ -679,7 +662,6 @@ def train(
                 "TotalLoss": jnp.mean(mean_loss),
                 "DQNLoss": jnp.mean(dqn_loss),
                 "TD Error": jnp.mean(td_error),
-                "SPRLoss": jnp.array(0.0, dtype=jnp.float32),
                 "ent": jnp.mean(policy_aux[1]),
             }
             total_loss = mean_loss + jnp.mean(policy_aux[0])
@@ -963,7 +945,6 @@ class BBFAgent(JaxDQNAgent):
         vmax=10.0,
         vmin=None,
         jumps=0,
-        spr_weight=0,
         batch_size=32,
         replay_ratio=64,
         batches_to_group=1,
@@ -976,9 +957,6 @@ class BBFAgent(JaxDQNAgent):
         learning_rate=0.0001,
         encoder_learning_rate=0.0001,
         reset_target=True,
-        reset_head=True,
-        reset_projection=True,
-        reset_encoder=False,
         reset_interval_scaling=None,
         shrink_perturb_keys="",
         perturb_factor=0.2,  # original was 0.1
@@ -1034,13 +1012,9 @@ class BBFAgent(JaxDQNAgent):
         self._batches_to_group = int(batches_to_group)
         self.update_horizon = int(update_horizon)
         self._jumps = int(jumps)
-        self.spr_weight = spr_weight
 
         self.reset_every = int(reset_every)
         self.reset_target = reset_target
-        self.reset_head = reset_head
-        self.reset_projection = reset_projection
-        self.reset_encoder = reset_encoder
         self.offline_update_frac = float(offline_update_frac)
         self.no_resets_after = int(no_resets_after)
         self.cumulative_resets = 0
@@ -1169,16 +1143,11 @@ class BBFAgent(JaxDQNAgent):
         self._rng, rng = jax.random.split(self._rng)
         self.state_shape = self.state.shape
 
-        # Create some dummy actions of arbitrary length to initialize the transition
-        # model, if the network has one.
-        actions = jnp.zeros((5,))
         self.online_params = flax.core.frozen_dict.FrozenDict(
             self.network_def.init(
                 rng,
                 method=self.network_def.init_fn,
                 x=self.state.astype(self.dtype),
-                actions=actions,
-                do_rollout=self.spr_weight > 0,
                 support=self._support,
             ))
 
@@ -1441,9 +1410,7 @@ class BBFAgent(JaxDQNAgent):
 
         self._rng, reset_rng = jax.random.split(self._rng, 2)
 
-        #keys_to_copy = ("encoder", "transition_model")
-        keys_to_copy = ("encoder", "transition_model",
-                        "representation_projection", "_log_alpha",
+        keys_to_copy = ("encoder", "representation_projection",
                         "r2_world_model")
         (
             self.online_params,
@@ -1458,7 +1425,6 @@ class BBFAgent(JaxDQNAgent):
             self.optimizer,
             reset_rng,
             self.state_shape,
-            self.spr_weight > 0,
             self._support,
             self.reset_target,
             self.shrink_perturb_keys,
@@ -1502,7 +1468,6 @@ class BBFAgent(JaxDQNAgent):
             self.grad_steps,
             self.match_online_target_rngs,
             self.target_eval_mode,
-            #self.ent_targ,
             self.x_ent_coef,
             r2wm_batch["state"],
             r2wm_batch["action"],
@@ -1575,21 +1540,6 @@ class BBFAgent(JaxDQNAgent):
                 bonus = jnp.clip(bonus, 0., 1e-2 - epsilon)
             return epsilon + bonus
 
-        ##frac = linearly_decaying_epsilon(1e5, self.training_steps, 0, 0.01)
-        #frac = linearly_decaying_epsilon(self.explore_end_steps,
-        #                                 self.training_steps, 0, 1e-3)
-        #x = np.full((self.num_actions,),
-        #            fill_value=frac / self.num_actions,
-        #            dtype=np.float32)
-        #x[0] += 1 - frac
-        #self.ent_targ = jnp.asarray(scipy.stats.entropy(x))
-        ##if random.uniform(0, 1) < 1e-3:
-        #if False:
-        #    logging.info("step: {}, frac: {}, ent_targ: {}".format(
-        #        self.training_steps, frac, self.ent_targ))
-        ##exit(0)
-        # linearly decay target entropy - end
-
         self.x_ent_coef = linearly_decaying_epsilon(int(80e3),
                                                     self.training_steps, 0, .0)
         if random.uniform(0, 1) < 1e-3:
@@ -1602,14 +1552,6 @@ class BBFAgent(JaxDQNAgent):
                     self._training_step_update(i, offline=False)
         if self.reset_every > 0 and self.training_steps > self.next_reset:
             self.reset_weights()
-        # debug - start
-        #if random.uniform(0, 1) < 1e-3:
-        if False:
-            ent_coef = self.network_def.apply(
-                self.online_params, method=self.network_def.entropy_scale)
-            logging.info("ent_coef: {}".format(ent_coef))
-            #logging.info("self.ent_targ: {}".format(self.ent_targ))
-        # debug - end
         self.training_steps += 1
 
         # Cool down gpu

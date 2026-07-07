@@ -1,4 +1,4 @@
-# SPR (Schwarzer et al, 2021)
+# BBF/r2 world-model ablation
 import bbf.spr_networks
 import bbf.agents.spr_agent
 import bbf.replay_memory.subsequence_replay_buffer
@@ -21,7 +21,7 @@ BBFAgent.min_gamma = 0.97
 BBFAgent.cycle_steps = 10_000
 BBFAgent.reset_every = -1 # Disable periodic weight resets
 #BBFAgent.reset_every = 5_000 # Change if you change the replay ratio
-BBFAgent.shrink_perturb_keys = "encoder,transition_model"
+BBFAgent.shrink_perturb_keys = "encoder,representation_projection,r2_world_model"
 BBFAgent.shrink_factor = 0.5
 BBFAgent.perturb_factor = 0.5
 BBFAgent.no_resets_after = 100_000 # Need to change if training longer
@@ -33,7 +33,6 @@ BBFAgent.replay_ratio = 2
 #BBFAgent.batches_to_group = 2
 BBFAgent.batches_to_group = 1
 BBFAgent.batch_size = 16
-BBFAgent.spr_weight = 0
 BBFAgent.jumps = 5
 BBFAgent.data_augmentation = True
 BBFAgent.half_precision = False
