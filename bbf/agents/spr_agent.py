@@ -1601,7 +1601,7 @@ class BBFAgent(JaxDQNAgent):
             return
 
         from types import SimpleNamespace
-        from r2dreamer.buffer import Buffer
+        from buffer import Buffer
 
         config = SimpleNamespace(
             device="cpu",
@@ -1802,6 +1802,9 @@ class BBFAgent(JaxDQNAgent):
         self._r2_replay.update(index, stoch, deter)
 
     def _refresh_r2_world_model_buffer(self):
+        # debug - start
+        return
+        # debug - end
         if (not self.r2_world_model_enabled or
                 not self.r2_world_model_refresh_enabled or
                 self._r2_replay is None or
