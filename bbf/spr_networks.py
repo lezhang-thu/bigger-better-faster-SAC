@@ -441,6 +441,15 @@ class RainbowDQNNetwork(nn.Module):
                                kernel_init=initializer)
         self._log_alpha = self.param('_log_alpha', nn.initializers.zeros_init(),
                                      ())
+        self.reward_head = nn.Dense(1,
+                                    dtype=jnp.float32,
+                                    kernel_init=initializer)
+        self.continue_head = nn.Dense(1,
+                                      dtype=jnp.float32,
+                                      kernel_init=initializer)
+        self.value_head = nn.Dense(1,
+                                   dtype=jnp.float32,
+                                   kernel_init=initializer)
 
     def entropy_scale(self):
         return jnp.exp(self._log_alpha)
@@ -465,6 +474,18 @@ class RainbowDQNNetwork(nn.Module):
     def spr_predict(self, x, eval_mode):
         return self.predictor(self.represent(x, eval_mode))
 
+    def policy_logits_from_feature(self, x, eval_mode):
+        return self.policy(nn.relu(self.policy_projection(x, eval_mode)))
+
+    def reward_from_feature(self, x):
+        return jnp.squeeze(self.reward_head(nn.relu(x)), axis=-1)
+
+    def continue_from_feature(self, x):
+        return jnp.squeeze(self.continue_head(nn.relu(x)), axis=-1)
+
+    def value_from_feature(self, x):
+        return jnp.squeeze(self.value_head(nn.relu(x)), axis=-1)
+
     def spr_rollout(self, latent, actions):
         _, pred_latents = self.transition_model(latent, actions)
 
@@ -482,14 +503,15 @@ class RainbowDQNNetwork(nn.Module):
         eval_mode=False,
     ):
         y = self(x, support, actions, do_rollout, eval_mode)
+        _ = self.reward_from_feature(y.representation)
+        _ = self.continue_from_feature(y.representation)
+        _ = self.value_from_feature(y.representation)
         return (
             y,
-            self.policy(
-                nn.relu(
-                    self.policy_projection(
-                        #jax.lax.stop_gradient(y.representation),
-                        y.representation,
-                        eval_mode))))
+            self.policy_logits_from_feature(
+                #jax.lax.stop_gradient(y.representation),
+                y.representation,
+                eval_mode))
         #return (y,
         #        self.policy(jax.lax.stop_gradient(nn.relu(self.project(y.representation, eval_mode)))))
 
@@ -502,6 +524,46 @@ class RainbowDQNNetwork(nn.Module):
         #logits = self.policy(jax.lax.stop_gradient(nn.relu(self.encode_project(x, False))))
         return (logits,
                 jax.random.categorical(self.make_rng('action_sample'), logits))
+
+    def imagine_from_observation(self, x, horizon, eval_mode=False):
+        """Roll out the latent transition model under the shared policy."""
+        latent = self.encode(x, eval_mode)
+        key = self.make_rng('action_sample')
+        keys = jax.random.split(key, horizon + 1)
+        log_probs = []
+        entropies = []
+        rewards = []
+        continues = []
+        values = []
+        actions = []
+
+        for i in range(horizon + 1):
+            feature = self.represent(latent.reshape(-1), eval_mode)
+            # Imagined actor/value losses should train their heads without
+            # pushing model gradients through synthetic rollouts.
+            feature = jax.lax.stop_gradient(feature)
+            logits = self.policy_logits_from_feature(feature, eval_mode)
+            log_prob = jax.nn.log_softmax(logits)
+            prob = jax.nn.softmax(logits)
+            action = jax.random.categorical(keys[i], logits)
+
+            actions.append(action)
+            log_probs.append(log_prob[action])
+            entropies.append(-jnp.sum(prob * log_prob))
+            rewards.append(self.reward_from_feature(feature))
+            continues.append(jax.nn.sigmoid(self.continue_from_feature(feature)))
+            values.append(self.value_from_feature(feature))
+
+            latent, _ = self.transition_model(latent, jnp.expand_dims(action, 0))
+
+        return {
+            'actions': jnp.stack(actions),
+            'log_probs': jnp.stack(log_probs),
+            'entropies': jnp.stack(entropies),
+            'rewards': jnp.stack(rewards),
+            'continues': jnp.stack(continues),
+            'values': jnp.stack(values),
+        }
 
     def __call__(
         self,
