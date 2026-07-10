@@ -1,0 +1,7 @@
+# Stage 3 overlay: scaled-up imagination with normalized advantages.
+# Usage: --gin_files=bbf/configs/BBF-100K.gin --gin_files=bbf/configs/stage3.gin
+BBFAgent.r2_imag_horizon = 15
+BBFAgent.r2_imag_start_count = 512
+BBFAgent.r2_imag_actor_weight = 0.3
+BBFAgent.r2_imag_value_weight = 0.3
+BBFAgent.r2_imag_return_norm = True

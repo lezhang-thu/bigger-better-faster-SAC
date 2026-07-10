@@ -1,5 +1,61 @@
 # BBF + R2-Dreamer Integration Design
 
+> **Update (branch `stage0123`).** This branch merges the RSSM world model
+> (commits `d0196c7`/`284d8e7`/`581e345`) into the pilot and implements the
+> staged integration below. All stages are code-complete and selected purely
+> via gin. The original pilot design (conv-TM imagination on the CNN
+> representation) remains available and unchanged underneath.
+>
+> ## Architecture: two representations, one policy, bridged
+>
+> - **Anchor (unchanged):** BBF-SAC on the CNN representation — C51 n-step
+>   PER Q-learning, SAC policy head, SPR, resets, replay ratio 64. Acting
+>   stays stateless from the CNN policy.
+> - **World model (from `284d8e7`, proven):** the ported block-GRU RSSM
+>   consumes `encode_project(s)` as its embedding, trains with KL + Barlow +
+>   two-hot reward + continue losses on its own LaProp/AGC optimizer
+>   (update period 16 gradient steps), with act-time posterior maintenance
+>   used only to store sequence initials and the WM-batch refresh keeping
+>   them fresh. Latents are never inputs to any RL head.
+> - **Bridge (new):** `g: feat -> representation` (in
+>   `R2DreamerWorldModel.bridge`), trained by MSE against
+>   `sg(representation)` on real posterior states. It is the decoder-free
+>   analog of a decoder: it decodes latents into the RL feature space so the
+>   shared policy can run in imagination.
+> - **Feat value head (new):** 255-bin symexp-twohot critic on RSSM
+>   features, trained on real-sequence lambda-returns bootstrapped per-step
+>   from the BBF critic (`boot = E_pi[Q]`), plus a slow-value regularizer
+>   from the target network — r2dreamer's `repval` grounded in BBF's value
+>   scale.
+> - **Imagination (Stage 2/3):** RSSM prior rollouts from the WM batch's
+>   posterior states under the shared policy via the bridge; REINFORCE with
+>   (optionally ReturnEMA-normalized) advantages + entropy on the shared
+>   policy head; two-hot value loss on imagined lambda-returns. Rollouts are
+>   fully stop-gradient; only the policy head and value head learn from
+>   imagination. Imagination is frozen for `r2_imag_reset_freeze_steps` env
+>   steps after each shrink-and-perturb reset.
+> - Rewards entering the WM buffer are clipped to [-1, 1]
+>   (`r2_world_model_clip_reward = True`) so reward/value/imagined-return
+>   semantics match BBF's C51 critic.
+>
+> ## Stages and gates (all via gin)
+>
+> - **Stage 0** — `BBF-100K.gin` with `r2_imag_horizon = 0` and
+>   `r2_bridge_weight = r2_value_weight = 0`: pilot + WM side-training only.
+>   Gate: Pong matches the pilot baseline.
+> - **Stage 1** — `BBF-100K.gin` as checked in (bridge + feat value on).
+>   Gates (from `R2WM` log lines): `R2WMBridgeCos` high (>0.9),
+>   `R2PolicyBridgeKL` small (the shared policy agrees through the bridge),
+>   `R2WMRewardMAENonzero` low, `R2WMContAccTerminal` high,
+>   `R2ValueBootMAE` small.
+> - **Stage 2** — add `--gin_files=bbf/configs/stage2.gin` (H=5, actor/value
+>   weight 0.02). Gate: no regression vs Stage 1 on 3 seeds.
+> - **Stage 3** — add `--gin_files=bbf/configs/stage3.gin` (H=15, weight 0.3,
+>   ReturnEMA advantage normalization). Watch `R2ImagReturn` calibration vs
+>   real returns, `R2ImagEntropy`, `R2ReturnScale`.
+>
+> Original pilot design notes follow.
+
 ## Goal
 
 Combine BBF's strong off-policy Atari100k replay learning with R2-Dreamer's decoder-free world-model imagination. BBF remains the anchor learner; imagination is added as an auxiliary policy-improvement path rather than as synthetic replay.

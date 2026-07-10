@@ -66,6 +66,23 @@ BBFAgent.r2_world_model_hidden = 768
 BBFAgent.r2_world_model_discrete = 48
 BBFAgent.r2_world_model_units = 768
 BBFAgent.r2_world_model_blocks = 8
+BBFAgent.r2_world_model_clip_reward = True
+
+# --- Stage 1: bridge + feat-value learning on real data (always on with WM) ---
+BBFAgent.r2_bridge_weight = 1.0
+BBFAgent.r2_value_weight = 0.3
+BBFAgent.r2_value_lambda = 0.95
+
+# --- Stage 2/3: RSSM imagination (off by default; see stage2.gin / stage3.gin) ---
+BBFAgent.r2_imag_horizon = 0
+BBFAgent.r2_imag_start_count = 256
+BBFAgent.r2_imag_actor_weight = 0.0
+BBFAgent.r2_imag_value_weight = 0.0
+BBFAgent.r2_imag_entropy_weight = 3e-4
+BBFAgent.r2_imag_lambda = 0.95
+BBFAgent.r2_imag_unimix = 0.01
+BBFAgent.r2_imag_return_norm = False
+BBFAgent.r2_imag_reset_freeze_steps = 2000
 
 BBFAgent.target_update_tau = 0.005
 BBFAgent.target_action_selection = True

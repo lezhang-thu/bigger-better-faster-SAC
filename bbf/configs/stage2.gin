@@ -1,0 +1,6 @@
+# Stage 2 overlay: conservative RSSM imagination through the shared policy.
+# Usage: --gin_files=bbf/configs/BBF-100K.gin --gin_files=bbf/configs/stage2.gin
+BBFAgent.r2_imag_horizon = 5
+BBFAgent.r2_imag_actor_weight = 0.02
+BBFAgent.r2_imag_value_weight = 0.02
+BBFAgent.r2_imag_return_norm = False
