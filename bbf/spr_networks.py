@@ -776,6 +776,7 @@ class R2DreamerWorldModel(nn.Module):
     loss_scale_rew: float = 1.0
     loss_scale_con: float = 1.0
     loss_scale_bridge: float = 1.0
+    value_through_wm: bool = False
     dtype: Dtype = jnp.float32
     initializer: Any = _r2_initializer()
 
@@ -882,20 +883,24 @@ class R2DreamerWorldModel(nn.Module):
         con_loss = jnp.mean(
             optax.sigmoid_binary_cross_entropy(cont_logits, cont_target))
 
-        # Bridge regression: g(feat) -> sg(representation). MSE summed over
-        # feature dims (r2dreamer MSEDist "sum" style); gradients shape both
-        # the bridge head and the RSSM (like the Barlow loss).
-        bridge_pred = self.bridge(feat)
+        # Bridge regression: g(sg(feat)) -> sg(representation). Strictly a
+        # readout: the summed-MSE scale is ~1000x the other WM losses early
+        # in training, so it must not push gradients through the recurrent
+        # posterior into the encoder (that stalls the BBF anchor). Bridge
+        # params train via the WM's AGC-clipped LaProp optimizer only.
+        bridge_pred = self.bridge(jax.lax.stop_gradient(feat))
         bridge_loss = jnp.mean(
             jnp.sum(jnp.square(bridge_pred - jax.lax.stop_gradient(embed)),
                     axis=-1))
 
         # Value head logits on posterior features. The loss itself (lambda
         # returns bootstrapped from the BBF critic) is assembled by the
-        # caller, which has access to target params; keeping the logits
-        # attached here lets gradients flow through the world model, as in
-        # r2dreamer's replay value learning.
-        value_logits = self.value(feat)
+        # caller, which has access to target params. By default the value
+        # head is also a pure readout (sg(feat)); value_through_wm restores
+        # r2dreamer's repval behavior of shaping the RSSM/encoder.
+        value_in = feat if self.value_through_wm else jax.lax.stop_gradient(
+            feat)
+        value_logits = self.value(value_in)
 
         total = (
             self.loss_scale_dyn * dyn_loss +
@@ -983,6 +988,7 @@ class RainbowDQNNetwork(nn.Module):
     r2_world_model_units: int = 768
     r2_world_model_blocks: int = 8
     r2_world_model_bridge_weight: float = 1.0
+    r2_world_model_value_through_wm: bool = False
 
     def setup(self):
         initializer = nn.initializers.xavier_uniform()
@@ -1060,6 +1066,7 @@ class RainbowDQNNetwork(nn.Module):
                 units=self.r2_world_model_units,
                 blocks=self.r2_world_model_blocks,
                 loss_scale_bridge=self.r2_world_model_bridge_weight,
+                value_through_wm=self.r2_world_model_value_through_wm,
                 dtype=jnp.float32,
                 name="r2_world_model",
             )

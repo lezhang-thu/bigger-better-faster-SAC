@@ -1620,6 +1620,7 @@ class BBFAgent(JaxDQNAgent):
         r2_world_model_blocks=8,
         r2_world_model_clip_reward=True,
         r2_bridge_weight=1.0,
+        r2_value_through_wm=False,
         r2_value_weight=0.3,
         r2_value_lambda=0.95,
         r2_imag_horizon=0,
@@ -1754,6 +1755,7 @@ class BBFAgent(JaxDQNAgent):
         self.r2_world_model_blocks = int(r2_world_model_blocks)
         self.r2_world_model_clip_reward = bool(r2_world_model_clip_reward)
         self.r2_bridge_weight = float(r2_bridge_weight)
+        self.r2_value_through_wm = bool(r2_value_through_wm)
         self.r2_value_weight = float(r2_value_weight)
         self.r2_value_lambda = float(r2_value_lambda)
         self.r2_imag_horizon = int(r2_imag_horizon)
@@ -1788,6 +1790,7 @@ class BBFAgent(JaxDQNAgent):
                 r2_world_model_units=self.r2_world_model_units,
                 r2_world_model_blocks=self.r2_world_model_blocks,
                 r2_world_model_bridge_weight=self.r2_bridge_weight,
+                r2_world_model_value_through_wm=self.r2_value_through_wm,
             ),
             target_update_period=self.target_update_period,
             update_horizon=self.max_update_horizon,
@@ -2136,6 +2139,13 @@ class BBFAgent(JaxDQNAgent):
             return
         if self.grad_steps % 200 >= self._batches_to_group:
             return
+        anchor_parts = []
+        for key in ("TotalLoss", "DQNLoss", "SPRLoss", "ent"):
+            if key in aux_losses:
+                anchor_parts.append("{}={:.4f}".format(
+                    key, float(np.asarray(aux_losses[key]).mean())))
+        logging.info("BBF step %s: %s", self.training_steps,
+                     ", ".join(anchor_parts))
         update_mask = np.asarray(aux_losses.get("R2WMUpdate"))
         n_updates = float(update_mask.sum())
         if n_updates == 0:

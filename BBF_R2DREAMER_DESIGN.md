@@ -17,11 +17,17 @@
 >   (update period 16 gradient steps), with act-time posterior maintenance
 >   used only to store sequence initials and the WM-batch refresh keeping
 >   them fresh. Latents are never inputs to any RL head.
-> - **Bridge (new):** `g: feat -> representation` (in
->   `R2DreamerWorldModel.bridge`), trained by MSE against
->   `sg(representation)` on real posterior states. It is the decoder-free
->   analog of a decoder: it decodes latents into the RL feature space so the
->   shared policy can run in imagination.
+> - **Bridge (new):** `g: sg(feat) -> sg(representation)` (in
+>   `R2DreamerWorldModel.bridge`), trained by MSE on real posterior states.
+>   It is the decoder-free analog of a decoder: it decodes latents into the
+>   RL feature space so the shared policy can run in imagination.
+>   **Readout rule:** the bridge and value heads are strict readouts — their
+>   losses never backprop through the RSSM into the encoder. Only the
+>   `284d8e7`-validated WM losses (KL/Barlow/reward/continue) shape the
+>   encoder. (The bridge's summed MSE is ~1000x the other losses early on;
+>   letting it reach the encoder stalls the BBF anchor at -21 on Pong.)
+>   `r2_value_through_wm=True` restores r2dreamer's repval-through-WM
+>   behavior for ablation.
 > - **Feat value head (new):** 255-bin symexp-twohot critic on RSSM
 >   features, trained on real-sequence lambda-returns bootstrapped per-step
 >   from the BBF critic (`boot = E_pi[Q]`), plus a slow-value regularizer
