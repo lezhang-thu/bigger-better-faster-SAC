@@ -484,6 +484,9 @@ train_static_argnames = [
     'world_model_weight',
     'imag_horizon',
     'r2wm_enabled',
+    'r2_imag_horizon',
+    'r2_imag_start_count',
+    'r2_imag_return_norm',
 ]
 
 
@@ -546,6 +549,66 @@ def r2_laprop_update(grads, state, params, learning_rate, beta1, beta2, eps,
         exp_avg_lr_2=exp_avg_lr_2,
     )
     return updates, new_state
+
+
+def r2_lambda_return(last, term, reward, boot, disc, lamb):
+    """Port of r2dreamer Dreamer._lambda_return (its `value` arg is unused).
+
+    All inputs (B, T); returns (B, T-1). ret[t] targets step t, uses
+    reward[t+1], cuts the lambda recursion at `last` boundaries and stops
+    bootstrapping through `term`, bootstrapping per-step from `boot`.
+    """
+    live = (1.0 - term)[:, 1:] * disc
+    cont = (1.0 - last)[:, 1:] * lamb
+    interm = reward[:, 1:] + (1.0 - cont) * live * boot[:, 1:]
+
+    def scan_fn(carry, elems):
+        interm_t, live_t, cont_t = elems
+        ret = interm_t + live_t * cont_t * carry
+        return ret, ret
+
+    _, rets = jax.lax.scan(
+        scan_fn,
+        boot[:, -1],
+        (
+            jnp.moveaxis(interm, 1, 0),
+            jnp.moveaxis(live, 1, 0),
+            jnp.moveaxis(cont, 1, 0),
+        ),
+        reverse=True,
+    )
+    return jnp.moveaxis(rets, 0, 1)
+
+
+R2WM_METRIC_KEYS = (
+    "R2WMLoss",
+    "R2WMDynLoss",
+    "R2WMRepLoss",
+    "R2WMBarlowLoss",
+    "R2WMRewardLoss",
+    "R2WMContLoss",
+    "R2WMBridgeLoss",
+    "R2WMBridgeCos",
+    "R2WMRewardMAE",
+    "R2WMRewardMAENonzero",
+    "R2WMContAcc",
+    "R2WMContAccTerminal",
+    "R2WMDynEntropy",
+    "R2WMRepEntropy",
+    "R2WMUpdate",
+    "R2ValueLoss",
+    "R2ValueMean",
+    "R2BootMean",
+    "R2ValueBootMAE",
+    "R2PolicyBridgeKL",
+    "R2ImagActorLoss",
+    "R2ImagValueLoss",
+    "R2ImagReturn",
+    "R2ImagEntropy",
+    "R2ImagCont",
+    "R2ImagValue",
+    "R2ReturnScale",
+)
 
 
 def zero_param_subtree(grads, key):
@@ -623,6 +686,20 @@ def train(
     r2wm_warmup,
     r2wm_agc,
     r2wm_pmin,
+    r2_value_weight,
+    r2_value_lambda,
+    r2_value_discount,
+    r2_imag_horizon,  # static
+    r2_imag_start_count,  # static
+    r2_imag_return_norm,  # static
+    r2_imag_actor_weight,
+    r2_imag_value_weight,
+    r2_imag_entropy_weight,
+    r2_imag_lambda,
+    r2_imag_discount,
+    r2_imag_unimix,
+    r2_imag_scale,
+    return_ema_vals,
 ):
     online_params = flax.core.freeze(online_params)
     target_params = flax.core.freeze(target_params)
@@ -639,6 +716,7 @@ def train(
             target_params,
             optimizer_state,
             r2wm_optimizer_state,
+            return_ema_vals,
             rng,
             step,
         ) = state
@@ -898,15 +976,8 @@ def train(
 
             def zero_r2wm_metrics():
                 return {
-                    "R2WMLoss": jnp.array(0.0, dtype=jnp.float32),
-                    "R2WMDynLoss": jnp.array(0.0, dtype=jnp.float32),
-                    "R2WMRepLoss": jnp.array(0.0, dtype=jnp.float32),
-                    "R2WMBarlowLoss": jnp.array(0.0, dtype=jnp.float32),
-                    "R2WMRewardLoss": jnp.array(0.0, dtype=jnp.float32),
-                    "R2WMContLoss": jnp.array(0.0, dtype=jnp.float32),
-                    "R2WMDynEntropy": jnp.array(0.0, dtype=jnp.float32),
-                    "R2WMRepEntropy": jnp.array(0.0, dtype=jnp.float32),
-                    "R2WMUpdate": jnp.array(0.0, dtype=jnp.float32),
+                    k: jnp.array(0.0, dtype=jnp.float32)
+                    for k in R2WM_METRIC_KEYS
                 }
 
             if r2wm_enabled:
@@ -918,42 +989,252 @@ def train(
                         data_augmentation=data_augmentation,
                         dtype=dtype,
                     )
-                    r2wm_loss, r2wm_metrics, post_stoch, post_deter = (
-                        network_def.apply(
-                            params,
-                            r2wm_states,
-                            r2wm_actions,
-                            r2wm_rewards,
-                            r2wm_terminals,
-                            r2wm_is_first,
-                            r2wm_initial_stoch,
-                            r2wm_initial_deter,
-                            r2wm_key,
-                            eval_mode=True,
-                            method=network_def.r2_world_model_loss_from_states,
-                        ))
+                    (r2wm_loss, r2wm_metrics, post_stoch, post_deter,
+                     extras) = network_def.apply(
+                         params,
+                         r2wm_states,
+                         r2wm_actions,
+                         r2wm_rewards,
+                         r2wm_terminals,
+                         r2wm_is_first,
+                         r2wm_initial_stoch,
+                         r2wm_initial_deter,
+                         r2wm_key,
+                         eval_mode=True,
+                         method=network_def.r2_world_model_loss_from_states,
+                     )
                     r2wm_metrics["R2WMUpdate"] = jnp.array(1.0,
                                                            dtype=jnp.float32)
-                    return r2wm_loss, r2wm_metrics, post_stoch, post_deter
+                    seq_b, seq_t = r2wm_raw_states.shape[:2]
+
+                    # === Stage 1: replay value learning on RSSM features,
+                    # bootstrapped from the BBF critic, plus bridge/policy
+                    # agreement diagnostics. ===
+                    embed_sg = jax.lax.stop_gradient(extras["embed"])
+                    flat_embed = embed_sg.reshape(seq_b * seq_t, -1)
+
+                    def q_from_repr(representation):
+                        return network_def.apply(
+                            params,
+                            representation,
+                            support,
+                            method=network_def.q_from_representation,
+                        )
+
+                    q_values = jax.vmap(q_from_repr)(flat_embed)
+                    repr_policy_logits = network_def.apply(
+                        params,
+                        flat_embed,
+                        False,
+                        method=network_def.policy_logits_from_feature,
+                    )
+                    pi_probs = jax.nn.softmax(repr_policy_logits)
+                    boot = jax.lax.stop_gradient(
+                        jnp.sum(pi_probs * q_values,
+                                axis=-1)).reshape(seq_b, seq_t)
+
+                    reward_seq = jnp.squeeze(r2wm_rewards,
+                                             axis=-1).astype(jnp.float32)
+                    term_seq = jnp.squeeze(r2wm_terminals,
+                                           axis=-1).astype(jnp.float32)
+                    first_seq = jnp.squeeze(r2wm_is_first,
+                                            axis=-1).astype(jnp.float32)
+                    last_seq = jnp.concatenate(
+                        [first_seq[:, 1:],
+                         jnp.zeros_like(first_seq[:, :1])],
+                        axis=1)
+                    replay_ret = r2_lambda_return(last_seq, term_seq,
+                                                  reward_seq, boot,
+                                                  r2_value_discount,
+                                                  r2_value_lambda)
+                    value_logits = extras["value_logits"]
+                    slow_value_logits = network_def.apply(
+                        target_params,
+                        jax.lax.stop_gradient(extras["feat"]),
+                        method=network_def.r2_value_logits_from_feat,
+                    )
+                    slow_value = jax.lax.stop_gradient(
+                        spr_networks._r2_twohot_mode(slow_value_logits, 255))
+                    value_nll_target = spr_networks._r2_twohot_neg_log_prob(
+                        value_logits[:, :-1],
+                        jax.lax.stop_gradient(replay_ret)[..., None], 255)
+                    value_nll_slow = spr_networks._r2_twohot_neg_log_prob(
+                        value_logits[:, :-1], slow_value[:, :-1][..., None],
+                        255)
+                    value_weight_mask = (1.0 - last_seq)[:, :-1]
+                    value_replay_loss = jnp.mean(
+                        value_weight_mask * (value_nll_target + value_nll_slow))
+                    value_mode = jax.lax.stop_gradient(
+                        spr_networks._r2_twohot_mode(value_logits, 255))
+
+                    bridge_sg = jax.lax.stop_gradient(
+                        extras["bridge_pred"]).reshape(seq_b * seq_t, -1)
+                    bridge_policy_logits = network_def.apply(
+                        params,
+                        bridge_sg,
+                        False,
+                        method=network_def.policy_logits_from_feature,
+                    )
+                    policy_kl = jnp.mean(
+                        jnp.sum(
+                            pi_probs *
+                            (jax.nn.log_softmax(repr_policy_logits) -
+                             jax.nn.log_softmax(bridge_policy_logits)),
+                            axis=-1))
+
+                    r2wm_metrics["R2ValueLoss"] = value_replay_loss
+                    r2wm_metrics["R2ValueMean"] = jnp.mean(value_mode)
+                    r2wm_metrics["R2BootMean"] = jnp.mean(boot)
+                    r2wm_metrics["R2ValueBootMAE"] = jnp.mean(
+                        jnp.abs(value_mode - boot))
+                    r2wm_metrics["R2PolicyBridgeKL"] = jax.lax.stop_gradient(
+                        policy_kl)
+
+                    r2wm_total = r2wm_loss + r2_value_weight * value_replay_loss
+                    new_ema_vals = return_ema_vals
+
+                    # === Stage 2/3: imagination on the RSSM prior under the
+                    # shared policy (via the bridge), r2dreamer-style. ===
+                    imag_actor_loss = jnp.array(0.0, dtype=jnp.float32)
+                    imag_value_loss = jnp.array(0.0, dtype=jnp.float32)
+                    imag_ret_mean = jnp.array(0.0, dtype=jnp.float32)
+                    imag_entropy_mean = jnp.array(0.0, dtype=jnp.float32)
+                    imag_cont_mean = jnp.array(0.0, dtype=jnp.float32)
+                    imag_value_mean = jnp.array(0.0, dtype=jnp.float32)
+                    ret_scale = jnp.array(1.0, dtype=jnp.float32)
+                    if r2_imag_horizon > 0:
+                        sel_key, roll_key = jax.random.split(r2wm_key)
+                        flat_stoch = jax.lax.stop_gradient(
+                            post_stoch.reshape(seq_b * seq_t,
+                                               *post_stoch.shape[2:]))
+                        flat_deter = jax.lax.stop_gradient(
+                            post_deter.reshape(seq_b * seq_t,
+                                               *post_deter.shape[2:]))
+                        total_starts = seq_b * seq_t
+                        if 0 < r2_imag_start_count < total_starts:
+                            sel = jax.random.choice(sel_key,
+                                                    total_starts,
+                                                    (r2_imag_start_count,),
+                                                    replace=False)
+                            flat_stoch = flat_stoch[sel]
+                            flat_deter = flat_deter[sel]
+                        imag_feat, imag_action = network_def.apply(
+                            params,
+                            flat_stoch,
+                            flat_deter,
+                            r2_imag_horizon,
+                            r2_imag_unimix,
+                            roll_key,
+                            method=network_def.r2_imagine,
+                        )
+                        bridge_imag = jax.lax.stop_gradient(
+                            network_def.apply(
+                                params,
+                                imag_feat,
+                                method=network_def.r2_bridge_from_feat,
+                            ))
+                        imag_policy_logits = network_def.apply(
+                            params,
+                            bridge_imag,
+                            False,
+                            method=network_def.policy_logits_from_feature,
+                        )
+                        imag_probs = jax.nn.softmax(
+                            imag_policy_logits.astype(jnp.float32))
+                        imag_probs = (
+                            imag_probs * (1.0 - r2_imag_unimix) +
+                            r2_imag_unimix / imag_probs.shape[-1])
+                        imag_logp_all = jnp.log(imag_probs)
+                        logpi = jnp.sum(imag_logp_all * imag_action, axis=-1)
+                        imag_entropy = -jnp.sum(imag_probs * imag_logp_all,
+                                                axis=-1)
+                        imag_reward, imag_cont, imag_value_logits = (
+                            network_def.apply(
+                                params,
+                                imag_feat,
+                                method=network_def.r2_imag_heads,
+                            ))
+                        imag_value = jax.lax.stop_gradient(
+                            spr_networks._r2_twohot_mode(
+                                imag_value_logits, 255))
+                        imag_slow_value = jax.lax.stop_gradient(
+                            spr_networks._r2_twohot_mode(
+                                network_def.apply(
+                                    target_params,
+                                    imag_feat,
+                                    method=network_def.r2_value_logits_from_feat,
+                                ), 255))
+                        imag_ret = r2_lambda_return(
+                            jnp.zeros_like(imag_cont), 1.0 - imag_cont,
+                            imag_reward, imag_value, r2_imag_discount,
+                            r2_imag_lambda)
+                        ret_quantiles = jnp.quantile(
+                            jax.lax.stop_gradient(imag_ret).reshape(-1),
+                            jnp.array([0.05, 0.95], dtype=jnp.float32))
+                        new_ema_vals = (0.01 * ret_quantiles +
+                                        0.99 * return_ema_vals)
+                        if r2_imag_return_norm:
+                            ret_scale = jnp.maximum(
+                                new_ema_vals[1] - new_ema_vals[0], 1.0)
+                        adv = jax.lax.stop_gradient(
+                            (imag_ret - imag_value[:, :-1]) / ret_scale)
+                        imag_weight = jax.lax.stop_gradient(
+                            jnp.cumprod(imag_cont * r2_imag_discount, axis=1))
+                        imag_actor_loss = jnp.mean(
+                            imag_weight[:, :-1] *
+                            -(logpi[:, :-1] * adv +
+                              r2_imag_entropy_weight * imag_entropy[:, :-1]))
+                        imag_nll_target = spr_networks._r2_twohot_neg_log_prob(
+                            imag_value_logits[:, :-1],
+                            jax.lax.stop_gradient(imag_ret)[..., None], 255)
+                        imag_nll_slow = spr_networks._r2_twohot_neg_log_prob(
+                            imag_value_logits[:, :-1],
+                            imag_slow_value[:, :-1][..., None], 255)
+                        imag_value_loss = jnp.mean(
+                            imag_weight[:, :-1] *
+                            (imag_nll_target + imag_nll_slow))
+                        r2wm_total = r2wm_total + r2_imag_scale * (
+                            r2_imag_actor_weight * imag_actor_loss +
+                            r2_imag_value_weight * imag_value_loss)
+                        imag_ret_mean = jnp.mean(imag_ret)
+                        imag_entropy_mean = jnp.mean(imag_entropy)
+                        imag_cont_mean = jnp.mean(imag_cont)
+                        imag_value_mean = jnp.mean(imag_value)
+
+                    r2wm_metrics["R2ImagActorLoss"] = imag_actor_loss
+                    r2wm_metrics["R2ImagValueLoss"] = imag_value_loss
+                    r2wm_metrics["R2ImagReturn"] = imag_ret_mean
+                    r2wm_metrics["R2ImagEntropy"] = imag_entropy_mean
+                    r2wm_metrics["R2ImagCont"] = imag_cont_mean
+                    r2wm_metrics["R2ImagValue"] = imag_value_mean
+                    r2wm_metrics["R2ReturnScale"] = ret_scale
+                    r2wm_metrics = {
+                        k: r2wm_metrics[k] for k in R2WM_METRIC_KEYS
+                    }
+                    return (r2wm_total, r2wm_metrics, post_stoch, post_deter,
+                            new_ema_vals)
 
                 def skip_r2wm_loss(_):
                     return (jnp.array(0.0, dtype=jnp.float32),
                             zero_r2wm_metrics(), zero_post_stoch,
-                            zero_post_deter)
+                            zero_post_deter, return_ema_vals)
 
-                r2wm_loss, r2wm_metrics, post_stoch, post_deter = jax.lax.cond(
-                    r2wm_do_update,
-                    run_r2wm_loss,
-                    skip_r2wm_loss,
-                    operand=None,
-                )
+                (r2wm_loss, r2wm_metrics, post_stoch, post_deter,
+                 new_return_ema_vals) = jax.lax.cond(
+                     r2wm_do_update,
+                     run_r2wm_loss,
+                     skip_r2wm_loss,
+                     operand=None,
+                 )
                 total_loss = total_loss + r2wm_loss
                 aux_losses.update(r2wm_metrics)
             else:
                 post_stoch = zero_post_stoch
                 post_deter = zero_post_deter
+                new_return_ema_vals = return_ema_vals
 
-            return total_loss, (aux_losses, (post_stoch, post_deter))
+            return total_loss, (aux_losses, (post_stoch, post_deter),
+                                new_return_ema_vals)
 
         # Use the weighted mean loss for gradient computation.
         target = jax.vmap(target_output,
@@ -983,7 +1264,7 @@ def train(
         x = jax.random.split(policy_key, current_state.shape[0] + 1)
         rng2 = x[0]
         key = x[1:]
-        (_, (aux_losses, r2wm_posts)), grad = grad_fn(
+        (_, (aux_losses, r2wm_posts, new_return_ema_vals)), grad = grad_fn(
             online_params,
             target,
             spr_targets,
@@ -1057,6 +1338,7 @@ def train(
                 target_params,
                 optimizer_state,
                 r2wm_optimizer_state,
+                new_return_ema_vals,
                 rng2,
                 step + 1,
             ),
@@ -1068,6 +1350,7 @@ def train(
         target_params,
         optimizer_state,
         r2wm_optimizer_state,
+        return_ema_vals,
         rng,
         step,
     )
@@ -1110,6 +1393,7 @@ def train(
             target_params,
             optimizer_state,
             r2wm_optimizer_state,
+            return_ema_vals,
             rng,
             step,
         ),
@@ -1121,6 +1405,7 @@ def train(
         target_params,
         optimizer_state,
         r2wm_optimizer_state,
+        return_ema_vals,
         {k: jnp.reshape(v, (-1,)) for k, v in aux_losses.items()},
         r2wm_posts[0],
         r2wm_posts[1],
@@ -1836,6 +2121,35 @@ class BBFAgent(JaxDQNAgent):
         deter = deter.reshape(-1, *deter.shape[2:])
         self._r2_replay.update(index, stoch, deter)
 
+    def _r2_imag_scale(self):
+        """Imagination loss multiplier; zero for a window after each reset.
+
+        After shrink-and-perturb the embedding shifts and the world model
+        needs some steps to re-adapt before its rollouts are trustworthy.
+        """
+        if self.training_steps < self._r2_imag_unfreeze_step:
+            return 0.0
+        return 1.0
+
+    def _log_r2_metrics(self, aux_losses):
+        if not self.r2_world_model_enabled:
+            return
+        if self.grad_steps % 200 >= self._batches_to_group:
+            return
+        update_mask = np.asarray(aux_losses.get("R2WMUpdate"))
+        n_updates = float(update_mask.sum())
+        if n_updates == 0:
+            return
+        parts = []
+        for key in R2WM_METRIC_KEYS:
+            if key == "R2WMUpdate":
+                continue
+            value = float(
+                (np.asarray(aux_losses[key]) * update_mask).sum() / n_updates)
+            parts.append("{}={:.4f}".format(key, value))
+        logging.info("R2WM step %s: %s", self.training_steps,
+                     ", ".join(parts))
+
     def _observe_r2_world_model_state(self):
         if not self.r2_world_model_enabled:
             return
@@ -1970,6 +2284,8 @@ class BBFAgent(JaxDQNAgent):
             keys_to_copy,
         )
 
+        self._r2_imag_unfreeze_step = (self.training_steps +
+                                       self.r2_imag_reset_freeze_steps)
         self.cycle_grad_steps = 0
 
     def _training_step_update(self, step_index, offline=False):
@@ -2016,6 +2332,7 @@ class BBFAgent(JaxDQNAgent):
             new_target_params,
             new_optimizer_state,
             new_r2wm_optimizer_state,
+            new_return_ema_vals,
             aux_losses,
             r2wm_post_stoch,
             r2wm_post_deter,
@@ -2077,7 +2394,23 @@ class BBFAgent(JaxDQNAgent):
             self.r2_world_model_warmup,
             self.r2_world_model_agc,
             self.r2_world_model_pmin,
+            self.r2_value_weight,
+            self.r2_value_lambda,
+            self.gamma,
+            self.r2_imag_horizon,
+            self.r2_imag_start_count,
+            self.r2_imag_return_norm,
+            self.r2_imag_actor_weight,
+            self.r2_imag_value_weight,
+            self.r2_imag_entropy_weight,
+            self.r2_imag_lambda,
+            self.r2_imag_discount,
+            self.r2_imag_unimix,
+            self._r2_imag_scale(),
+            jnp.asarray(self._r2_return_ema_vals, dtype=jnp.float32),
         )
+        self._r2_return_ema_vals = np.asarray(
+            jax.device_get(new_return_ema_vals), dtype=np.float32)
         self._update_r2_world_model_buffer(r2wm_batch["index"],
                                            r2wm_post_stoch,
                                            r2wm_post_deter,
@@ -2105,6 +2438,7 @@ class BBFAgent(JaxDQNAgent):
 
         priorities = np.sqrt(dqn_loss + 1e-10)
         self._replay.set_priority(indices, priorities)
+        self._log_r2_metrics(aux_losses)
 
         self.target_network_params = new_target_params
         self.online_params = new_online_params

@@ -654,6 +654,24 @@ class R2DreamerRSSM(nn.Module):
         stoch = self._sample_stoch(logits, rng)
         return stoch, deter, logits
 
+    @nn.compact
+    def img_step(self, stoch, deter, prev_action, rng):
+        """Single prior step (no observation), as r2dreamer rssm.img_step."""
+        deter = R2DreamerDeter(
+            deter=self.deter,
+            flat_stoch=self.flat_stoch,
+            act_dim=self.act_dim,
+            hidden=self.hidden,
+            blocks=self.blocks,
+            dyn_layers=self.dyn_layers,
+            dtype=self.dtype,
+            initializer=self.initializer,
+            name="deter_net",
+        )(stoch, deter, prev_action)
+        logits = self._prior_logits(deter)
+        stoch = self._sample_stoch(logits, rng)
+        return stoch, deter
+
     def observe(self, embed, action, initial, reset, rng):
         stoch, deter = initial
         keys = jax.random.split(rng, embed.shape[1])
@@ -751,11 +769,13 @@ class R2DreamerWorldModel(nn.Module):
     unimix_ratio: float = 0.01
     barlow_lambd: float = 5e-4
     reward_bins: int = 255
+    value_bins: int = 255
     loss_scale_dyn: float = 1.0
     loss_scale_rep: float = 0.1
     loss_scale_barlow: float = 0.05
     loss_scale_rew: float = 1.0
     loss_scale_con: float = 1.0
+    loss_scale_bridge: float = 1.0
     dtype: Dtype = jnp.float32
     initializer: Any = _r2_initializer()
 
@@ -790,6 +810,21 @@ class R2DreamerWorldModel(nn.Module):
                                      outscale=1.0,
                                      dtype=jnp.float32,
                                      initializer=self.initializer)
+        # Bridge: decodes the RSSM feature back into the BBF representation
+        # space, so shared policy/Q heads can consume imagined latents.
+        self.bridge = R2DreamerMLPHead(self.embed_size,
+                                       layers=1,
+                                       units=self.units,
+                                       outscale=1.0,
+                                       dtype=jnp.float32,
+                                       initializer=self.initializer)
+        # Value head on RSSM features (r2dreamer critic style: twohot bins).
+        self.value = R2DreamerMLPHead(self.value_bins,
+                                      layers=3,
+                                      units=self.units,
+                                      outscale=0.0,
+                                      dtype=jnp.float32,
+                                      initializer=self.initializer)
 
     @property
     def feat_size(self):
@@ -801,6 +836,18 @@ class R2DreamerWorldModel(nn.Module):
     def observe_single(self, embed, prev_action, stoch, deter, is_first, rng):
         return self.rssm.obs_step(stoch, deter, prev_action, embed, is_first,
                                   rng)
+
+    def bridge_predict(self, feat):
+        return self.bridge(feat)
+
+    def value_logits(self, feat):
+        return self.value(feat)
+
+    def reward_mode(self, feat):
+        return _r2_twohot_mode(self.reward(feat), self.reward_bins)
+
+    def cont_prob(self, feat):
+        return jax.nn.sigmoid(jnp.squeeze(self.cont(feat), axis=-1))
 
     def loss(self, embed, action, reward, terminal, is_first, initial, rng):
         batch_size, batch_length = embed.shape[:2]
@@ -830,16 +877,57 @@ class R2DreamerWorldModel(nn.Module):
         reward_logits = self.reward(feat)
         rew_loss = jnp.mean(
             _r2_twohot_neg_log_prob(reward_logits, reward, self.reward_bins))
+        cont_logits = self.cont(feat)
         cont_target = 1.0 - terminal.astype(jnp.float32)
         con_loss = jnp.mean(
-            optax.sigmoid_binary_cross_entropy(self.cont(feat), cont_target))
+            optax.sigmoid_binary_cross_entropy(cont_logits, cont_target))
+
+        # Bridge regression: g(feat) -> sg(representation). MSE summed over
+        # feature dims (r2dreamer MSEDist "sum" style); gradients shape both
+        # the bridge head and the RSSM (like the Barlow loss).
+        bridge_pred = self.bridge(feat)
+        bridge_loss = jnp.mean(
+            jnp.sum(jnp.square(bridge_pred - jax.lax.stop_gradient(embed)),
+                    axis=-1))
+
+        # Value head logits on posterior features. The loss itself (lambda
+        # returns bootstrapped from the BBF critic) is assembled by the
+        # caller, which has access to target params; keeping the logits
+        # attached here lets gradients flow through the world model, as in
+        # r2dreamer's replay value learning.
+        value_logits = self.value(feat)
 
         total = (
             self.loss_scale_dyn * dyn_loss +
             self.loss_scale_rep * rep_loss +
             self.loss_scale_barlow * barlow_loss +
             self.loss_scale_rew * rew_loss +
-            self.loss_scale_con * con_loss)
+            self.loss_scale_con * con_loss +
+            self.loss_scale_bridge * bridge_loss)
+
+        # Diagnostics (Stage 1 gates).
+        reward_target = jnp.squeeze(reward.astype(jnp.float32), axis=-1)
+        reward_pred = _r2_twohot_mode(reward_logits, self.reward_bins)
+        reward_err = jnp.abs(reward_pred - reward_target)
+        nonzero = (jnp.abs(reward_target) > 1e-6).astype(jnp.float32)
+        reward_mae_nonzero = jnp.sum(reward_err * nonzero) / jnp.maximum(
+            jnp.sum(nonzero), 1.0)
+        cont_prob = jax.nn.sigmoid(jnp.squeeze(cont_logits, axis=-1))
+        cont_label = jnp.squeeze(cont_target, axis=-1)
+        cont_correct = ((cont_prob > 0.5) == (cont_label > 0.5)).astype(
+            jnp.float32)
+        terminal_mask = 1.0 - cont_label
+        cont_acc_terminal = jnp.sum(cont_correct * terminal_mask) / jnp.maximum(
+            jnp.sum(terminal_mask), 1.0)
+        embed_flat = jax.lax.stop_gradient(embed).reshape(
+            batch_size * batch_length, -1)
+        bridge_flat = jax.lax.stop_gradient(bridge_pred).reshape(
+            batch_size * batch_length, -1)
+        bridge_cos = jnp.mean(
+            jnp.sum(bridge_flat * embed_flat, axis=-1) /
+            (jnp.linalg.norm(bridge_flat, axis=-1) *
+             jnp.linalg.norm(embed_flat, axis=-1) + 1e-8))
+
         metrics = {
             "R2WMLoss": total,
             "R2WMDynLoss": dyn_loss,
@@ -847,12 +935,24 @@ class R2DreamerWorldModel(nn.Module):
             "R2WMBarlowLoss": barlow_loss,
             "R2WMRewardLoss": rew_loss,
             "R2WMContLoss": con_loss,
+            "R2WMBridgeLoss": bridge_loss,
+            "R2WMBridgeCos": bridge_cos,
+            "R2WMRewardMAE": jnp.mean(reward_err),
+            "R2WMRewardMAENonzero": reward_mae_nonzero,
+            "R2WMContAcc": jnp.mean(cont_correct),
+            "R2WMContAccTerminal": cont_acc_terminal,
             "R2WMDynEntropy": jnp.mean(
                 _r2_onehot_entropy(prior_logit, self.unimix_ratio)),
             "R2WMRepEntropy": jnp.mean(
                 _r2_onehot_entropy(post_logit, self.unimix_ratio)),
         }
-        return total, metrics, post_stoch, post_deter
+        extras = {
+            "embed": embed,
+            "feat": feat,
+            "bridge_pred": bridge_pred,
+            "value_logits": value_logits,
+        }
+        return total, metrics, post_stoch, post_deter, extras
 
 
 @gin.configurable
@@ -882,6 +982,7 @@ class RainbowDQNNetwork(nn.Module):
     r2_world_model_discrete: int = 48
     r2_world_model_units: int = 768
     r2_world_model_blocks: int = 8
+    r2_world_model_bridge_weight: float = 1.0
 
     def setup(self):
         initializer = nn.initializers.xavier_uniform()
@@ -958,6 +1059,7 @@ class RainbowDQNNetwork(nn.Module):
                 discrete=self.r2_world_model_discrete,
                 units=self.r2_world_model_units,
                 blocks=self.r2_world_model_blocks,
+                loss_scale_bridge=self.r2_world_model_bridge_weight,
                 dtype=jnp.float32,
                 name="r2_world_model",
             )
@@ -1144,6 +1246,69 @@ class RainbowDQNNetwork(nn.Module):
                          in_axes=0)(state)
         return self.r2_world_model.observe_single(embed, prev_action, stoch,
                                                   deter, is_first, rng)
+
+    def q_from_representation(self, representation, support, eval_mode=True):
+        """Expected-value Q readout from a single 2048-d representation."""
+        x = nn.relu(self.project(representation, eval_mode))
+        logits = self.head(x, eval_mode)
+        probabilities = nn.softmax(logits)
+        return jnp.sum(support * probabilities, axis=-1)
+
+    def r2_bridge_from_feat(self, feat):
+        if not self.r2_world_model_enabled:
+            raise ValueError("R2 world model is disabled.")
+        return self.r2_world_model.bridge_predict(feat)
+
+    def r2_value_logits_from_feat(self, feat):
+        if not self.r2_world_model_enabled:
+            raise ValueError("R2 world model is disabled.")
+        return self.r2_world_model.value_logits(feat)
+
+    def r2_imagine(self, start_stoch, start_deter, horizon, unimix, rng):
+        """Roll out the RSSM prior under the shared BBF policy via the bridge.
+
+        Mirrors r2dreamer Dreamer._imagine: the rollout itself carries no
+        gradients; the caller recomputes policy/value quantities on the
+        returned features. Actions are sampled with unimix smoothing, like
+        r2dreamer's OneHotDist actor.
+        """
+        if not self.r2_world_model_enabled:
+            raise ValueError("R2 world model is disabled.")
+        stoch = jax.lax.stop_gradient(start_stoch)
+        deter = jax.lax.stop_gradient(start_deter)
+        action_keys = jax.random.split(rng, 2 * horizon + 2)
+        feats = []
+        actions = []
+        for i in range(horizon + 1):
+            feat = self.r2_world_model.rssm.get_feat(stoch, deter)
+            feat = jax.lax.stop_gradient(feat)
+            bridge_repr = jax.lax.stop_gradient(
+                self.r2_world_model.bridge_predict(feat))
+            logits = self.policy(
+                nn.relu(self.policy_projection(bridge_repr, True)))
+            probs = jax.nn.softmax(logits.astype(jnp.float32))
+            probs = probs * (1.0 - unimix) + unimix / probs.shape[-1]
+            action_idx = jax.random.categorical(action_keys[2 * i],
+                                                jnp.log(probs))
+            action_onehot = jax.nn.one_hot(action_idx, self.num_actions)
+            feats.append(feat)
+            actions.append(jax.lax.stop_gradient(action_onehot))
+            if i < horizon:
+                stoch, deter = self.r2_world_model.rssm.img_step(
+                    stoch, deter, action_onehot, action_keys[2 * i + 1])
+                stoch = jax.lax.stop_gradient(stoch)
+                deter = jax.lax.stop_gradient(deter)
+        return jnp.stack(feats, axis=1), jnp.stack(actions, axis=1)
+
+    def r2_imag_heads(self, imag_feat):
+        """Reward mode, continue prob, value logits on imagined features."""
+        if not self.r2_world_model_enabled:
+            raise ValueError("R2 world model is disabled.")
+        feat = jax.lax.stop_gradient(imag_feat)
+        reward = self.r2_world_model.reward_mode(feat)
+        cont = self.r2_world_model.cont_prob(feat)
+        value_logits = self.r2_world_model.value_logits(feat)
+        return reward, cont, value_logits
 
     def __call__(
         self,
