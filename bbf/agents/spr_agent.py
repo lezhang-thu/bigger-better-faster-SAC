@@ -1333,6 +1333,20 @@ class BBFAgent(JaxDQNAgent):
         r2_world_model_discrete=48,
         r2_world_model_units=768,
         r2_world_model_blocks=8,
+        r2_world_model_clip_reward=True,
+        r2_bridge_weight=1.0,
+        r2_value_weight=0.3,
+        r2_value_lambda=0.95,
+        r2_imag_horizon=0,
+        r2_imag_start_count=256,
+        r2_imag_actor_weight=0.0,
+        r2_imag_value_weight=0.0,
+        r2_imag_entropy_weight=3e-4,
+        r2_imag_lambda=0.95,
+        r2_imag_discount=None,
+        r2_imag_unimix=0.01,
+        r2_imag_return_norm=False,
+        r2_imag_reset_freeze_steps=2000,
     ):
         logging.info(
             "Creating %s agent with the following parameters:",
@@ -1453,6 +1467,23 @@ class BBFAgent(JaxDQNAgent):
         self.r2_world_model_discrete = int(r2_world_model_discrete)
         self.r2_world_model_units = int(r2_world_model_units)
         self.r2_world_model_blocks = int(r2_world_model_blocks)
+        self.r2_world_model_clip_reward = bool(r2_world_model_clip_reward)
+        self.r2_bridge_weight = float(r2_bridge_weight)
+        self.r2_value_weight = float(r2_value_weight)
+        self.r2_value_lambda = float(r2_value_lambda)
+        self.r2_imag_horizon = int(r2_imag_horizon)
+        self.r2_imag_start_count = int(r2_imag_start_count)
+        self.r2_imag_actor_weight = float(r2_imag_actor_weight)
+        self.r2_imag_value_weight = float(r2_imag_value_weight)
+        self.r2_imag_entropy_weight = float(r2_imag_entropy_weight)
+        self.r2_imag_lambda = float(r2_imag_lambda)
+        self.r2_imag_discount = None if r2_imag_discount is None else float(
+            r2_imag_discount)
+        self.r2_imag_unimix = float(r2_imag_unimix)
+        self.r2_imag_return_norm = bool(r2_imag_return_norm)
+        self.r2_imag_reset_freeze_steps = int(r2_imag_reset_freeze_steps)
+        self._r2_imag_unfreeze_step = 0
+        self._r2_return_ema_vals = np.zeros((2,), dtype=np.float32)
 
         logging.info("\t Running with dtype %s", str(self.dtype))
 
@@ -1471,6 +1502,7 @@ class BBFAgent(JaxDQNAgent):
                 r2_world_model_discrete=self.r2_world_model_discrete,
                 r2_world_model_units=self.r2_world_model_units,
                 r2_world_model_blocks=self.r2_world_model_blocks,
+                r2_world_model_bridge_weight=self.r2_bridge_weight,
             ),
             target_update_period=self.target_update_period,
             update_horizon=self.max_update_horizon,
@@ -1478,6 +1510,8 @@ class BBFAgent(JaxDQNAgent):
         )
         if self.imag_discount is None:
             self.imag_discount = self.gamma
+        if self.r2_imag_discount is None:
+            self.r2_imag_discount = self.gamma
 
         self._build_r2_world_model_replay()
         self.set_replay_settings()
@@ -1637,7 +1671,7 @@ class BBFAgent(JaxDQNAgent):
             return
 
         from types import SimpleNamespace
-        from r2dreamer.buffer import Buffer
+        from buffer import Buffer
 
         config = SimpleNamespace(
             device="cpu",
@@ -1848,10 +1882,13 @@ class BBFAgent(JaxDQNAgent):
             self.dtype,
         )
         zero_action = np.zeros((1, self.num_actions), dtype=np.float32)
+        boundary_reward = np.asarray([reward], dtype=np.float32)
+        if self.r2_world_model_clip_reward:
+            boundary_reward = np.clip(boundary_reward, -1.0, 1.0)
         self._r2_replay.add_atari_transition(
             state=terminal_state[None],
             action=zero_action,
-            reward=np.asarray([reward], dtype=np.float32).reshape(1, 1),
+            reward=boundary_reward.reshape(1, 1),
             is_terminal=np.asarray([terminal],
                                    dtype=np.float32).reshape(1, 1),
             is_first=np.zeros((1, 1), dtype=np.float32),
@@ -1878,9 +1915,12 @@ class BBFAgent(JaxDQNAgent):
     def _set_r2_pending_transition(self, reward, terminal, is_first):
         if not self.r2_world_model_enabled or self.eval_mode:
             return
+        reward = np.asarray(reward, dtype=np.float32)
+        if self.r2_world_model_clip_reward:
+            reward = np.clip(reward, -1.0, 1.0)
         self._r2_pending_transition = {
             "state": np.asarray(self.state, dtype=self.observation_dtype).copy(),
-            "reward": np.asarray(reward, dtype=np.float32).reshape(-1, 1),
+            "reward": reward.reshape(-1, 1),
             "is_terminal": np.asarray(terminal, dtype=np.float32).reshape(-1, 1),
             "is_first": np.asarray(is_first, dtype=np.float32).reshape(-1, 1),
         }

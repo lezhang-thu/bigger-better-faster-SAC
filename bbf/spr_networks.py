@@ -419,9 +419,12 @@ def _r2_onehot_entropy(logits, unimix_ratio):
 
 
 def _r2_twohot_neg_log_prob(logits, target, bin_num):
+    # Faithful port of r2dreamer distributions.TwoHot.log_prob with the
+    # symexp_twohot factory: bins are symexp-spaced, the target stays raw
+    # (squash is identity there, so no symlog on the target).
     target = jnp.squeeze(target.astype(jnp.float32), axis=-1)
     bins = _r2_twohot_bins(bin_num)
-    target_squashed = jax.lax.stop_gradient(_r2_symlog(target))
+    target_squashed = jax.lax.stop_gradient(target)
     below = jnp.sum((bins <= target_squashed[..., None]).astype(jnp.int32),
                     axis=-1) - 1
     above = bin_num - jnp.sum(
@@ -441,6 +444,26 @@ def _r2_twohot_neg_log_prob(logits, target, bin_num):
         jax.nn.one_hot(above, bin_num) * weight_above[..., None])
     log_pred = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
     return -jnp.sum(mixed_target * log_pred, axis=-1)
+
+
+def _r2_twohot_mode(logits, bin_num):
+    """Faithful port of r2dreamer distributions.TwoHot.mode (odd bin_num).
+
+    Expectation of the bin values under the softmax, summing the negative
+    half in flipped order for numerical symmetry, as in the original.
+    """
+    probs = jax.nn.softmax(logits.astype(jnp.float32), axis=-1)
+    bins = _r2_twohot_bins(bin_num)
+    if bin_num % 2 == 1:
+        m = (bin_num - 1) // 2
+        p1, p2, p3 = probs[..., :m], probs[..., m:m + 1], probs[..., m + 1:]
+        b1, b2, b3 = bins[..., :m], bins[..., m:m + 1], bins[..., m + 1:]
+        wavg = jnp.sum(p2 * b2, axis=-1) + jnp.sum(
+            jnp.flip(p1 * b1, axis=-1) + p3 * b3, axis=-1)
+        return wavg
+    p1, p2 = probs[..., :bin_num // 2], probs[..., bin_num // 2:]
+    b1, b2 = bins[..., :bin_num // 2], bins[..., bin_num // 2:]
+    return jnp.sum(jnp.flip(p1 * b1, axis=-1) + p2 * b2, axis=-1)
 
 
 class R2BlockLinear(nn.Module):
