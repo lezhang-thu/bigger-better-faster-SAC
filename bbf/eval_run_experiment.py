@@ -605,6 +605,8 @@ class DataEfficientAtariRunner(Runner):
 
                 if (envs[env_id].game_over or
                         envs[env_id].cum_length == self._max_steps_per_episode):
+                    self._agent.add_r2_episode_boundary_transition(
+                        b, obs, reward, d)
                     total_episodes += 1
                     cum_rewards.append(envs[env_id].cum_reward)
                     cum_lengths.append(envs[env_id].cum_length)
@@ -643,6 +645,8 @@ class DataEfficientAtariRunner(Runner):
                         #    self._agent.greedy_action))
                     # debug - end
                 elif d:
+                    self._agent.add_r2_episode_boundary_transition(
+                        b, obs, reward, d)
                     self._agent.reset_one(env_id=b)
                     # debug - start
                     if not self._agent.eval_mode:
@@ -654,12 +658,13 @@ class DataEfficientAtariRunner(Runner):
 
                 b += 1
 
+            raw_rewards = rewards.copy()
             if self._clip_rewards:
                 # Perform reward clipping.
                 rewards = np.clip(rewards, -1, 1)
 
             self._agent.log_transition(new_obs, actions, rewards, terminals,
-                                       episode_end)
+                                       episode_end, raw_reward=raw_rewards)
 
             if (not live_envs or
                 (max_steps is not None and total_steps > max_steps) or
