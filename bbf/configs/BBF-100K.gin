@@ -32,14 +32,19 @@ BBFAgent.batches_to_group = 2
 BBFAgent.batch_size = 32
 BBFAgent.spr_weight = 5
 BBFAgent.jumps = 5
-BBFAgent.world_model_weight = 1.0
+# --- Pilot (conv-TM) world model & imagination: OFF by default. ---
+# Per-game evals showed the pilot's own additions regress Hero/Jamesbond
+# and collapse Kangaroo (0.0 vs 5288.6 baseline); the anchor is the
+# original BBF-SAC (abf7870), and the RSSM (below) is the imagination
+# engine. Re-enable these only for conv-TM ablations.
+BBFAgent.world_model_weight = 0.0
 BBFAgent.reward_weight = 1.0
 BBFAgent.continue_weight = 1.0
 BBFAgent.barlow_weight = 0.01
 BBFAgent.barlow_lambd = 0.0005
-BBFAgent.imag_horizon = 3
-BBFAgent.imag_actor_weight = 0.02
-BBFAgent.imag_value_weight = 0.02
+BBFAgent.imag_horizon = 0
+BBFAgent.imag_actor_weight = 0.0
+BBFAgent.imag_value_weight = 0.0
 BBFAgent.imag_lambda = 0.95
 BBFAgent.imag_entropy_weight = 0.0003
 BBFAgent.data_augmentation = True

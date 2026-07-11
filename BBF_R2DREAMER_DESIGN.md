@@ -11,6 +11,11 @@
 > - **Anchor (unchanged):** BBF-SAC on the CNN representation — C51 n-step
 >   PER Q-learning, SAC policy head, SPR, resets, replay ratio 64. Acting
 >   stays stateless from the CNN policy.
+>   **The anchor is `abf7870`, not the pilot.** Per-game evals (2026-07-11)
+>   showed the pilot's conv-TM additions are game-dependent: ~tie on
+>   Gopher/Krull/Frostbite but Hero −60%, Jamesbond −72%, Kangaroo 0.0 vs
+>   5288.6. The pilot's `world_model_weight`/`imag_horizon` are therefore 0
+>   by default; the RSSM below is the sole world-model/imagination path.
 > - **World model (from `284d8e7`, proven):** the ported block-GRU RSSM
 >   consumes `encode_project(s)` as its embedding, trains with KL + Barlow +
 >   two-hot reward + continue losses on its own LaProp/AGC optimizer
