@@ -20,7 +20,9 @@ import optax
 import flax
 
 from bbf import spr_networks
-from bbf.replay_memory import subsequence_replay_buffer, circular_replay_buffer
+from bbf.replay_memory import circular_replay_buffer
+from bbf.replay_memory import subsequence_replay_buffer
+from bbf.replay_memory import world_model_sequence_replay
 
 NATURE_DQN_OBSERVATION_SHAPE = (84, 84)  # Size of downscaled Atari 2600 frame.
 NATURE_DQN_DTYPE = np.uint8  # DType of Atari 2600 observations.
@@ -377,6 +379,475 @@ def select_action(
     #return rng, samples, jax.nn.softmax(logits)
 
 
+@functools.partial(jax.jit, static_argnames=("network_def", "dtype"))
+def r2_world_model_observe(network_def, params, raw_state, prev_action, stoch,
+                           deter, is_first, rng, dtype):
+    """Updates the online RSSM posterior used only as replay context."""
+    state = spr_networks.process_inputs(raw_state,
+                                        rng=rng,
+                                        data_augmentation=False,
+                                        dtype=dtype)
+    return network_def.apply(
+        params,
+        state,
+        prev_action,
+        stoch,
+        deter,
+        is_first,
+        rng,
+        eval_mode=True,
+        method=network_def.r2_world_model_observe,
+    )[:2]
+
+
+R2LaPropState = collections.namedtuple(
+    "R2LaPropState",
+    ["count", "exp_avg", "exp_avg_sq", "exp_avg_lr_1", "exp_avg_lr_2"],
+)
+
+
+def r2_laprop_init(params):
+    return R2LaPropState(
+        count=jnp.array(0, dtype=jnp.int32),
+        exp_avg=jax.tree_util.tree_map(jnp.zeros_like, params),
+        exp_avg_sq=jax.tree_util.tree_map(jnp.zeros_like, params),
+        exp_avg_lr_1=jnp.array(0.0, dtype=jnp.float32),
+        exp_avg_lr_2=jnp.array(0.0, dtype=jnp.float32),
+    )
+
+
+def r2_laprop_update(grads, state, params, learning_rate, beta1, beta2, eps,
+                     warmup, agc, pmin):
+    """Small JAX port of the LaProp + warmup + AGC used by R2-Dreamer."""
+    step = state.count + 1
+    step_f = step.astype(jnp.float32)
+    warmup = jnp.asarray(warmup, dtype=jnp.float32)
+    base_lr = jnp.asarray(learning_rate, dtype=jnp.float32)
+    lr_scale = jnp.where(warmup > 0, jnp.minimum(1.0, step_f / warmup), 1.0)
+    lr = base_lr * lr_scale
+
+    def agc_clip(grad, param):
+        param_norm = jnp.linalg.norm(param)
+        grad_norm = jnp.linalg.norm(grad)
+        upper = agc * jnp.maximum(param_norm, pmin)
+        return grad / jnp.maximum(grad_norm / (upper + 1e-16), 1.0)
+
+    grads = jax.tree_util.tree_map(agc_clip, grads, params)
+    exp_avg_sq = jax.tree_util.tree_map(
+        lambda sq, grad: beta2 * sq + (1.0 - beta2) * grad * grad,
+        state.exp_avg_sq,
+        grads,
+    )
+    exp_avg_lr_1 = state.exp_avg_lr_1 * beta1 + (1.0 - beta1) * lr
+    exp_avg_lr_2 = state.exp_avg_lr_2 * beta2 + (1.0 - beta2)
+    bias_correction1 = jnp.where(lr != 0.0, exp_avg_lr_1 / lr, 1.0)
+    step_size = 1.0 / bias_correction1
+
+    def update_avg(avg, sq, grad):
+        denom = jnp.sqrt(sq / exp_avg_lr_2) + eps
+        return beta1 * avg + (1.0 - beta1) * lr * grad / denom
+
+    exp_avg = jax.tree_util.tree_map(update_avg, state.exp_avg, exp_avg_sq,
+                                     grads)
+    updates = jax.tree_util.tree_map(lambda avg: -step_size * avg, exp_avg)
+    return updates, R2LaPropState(
+        count=step,
+        exp_avg=exp_avg,
+        exp_avg_sq=exp_avg_sq,
+        exp_avg_lr_1=exp_avg_lr_1,
+        exp_avg_lr_2=exp_avg_lr_2,
+    )
+
+
+def _param_subset(params, keys):
+    """Selects top-level Flax parameter subtrees without an outer params key."""
+    return FrozenDict({key: params["params"][key] for key in keys})
+
+
+def _replace_param_subsets(params, replacements):
+    inner = params["params"].copy(add_or_replace=dict(replacements))
+    return params.copy(add_or_replace={"params": inner})
+
+
+def _stop_param_subsets(params, keys):
+    replacements = {
+        key: jax.tree_util.tree_map(jax.lax.stop_gradient,
+                                    params["params"][key])
+        for key in keys
+    }
+    return _replace_param_subsets(params, replacements)
+
+
+def _tree_l2_norm(tree):
+    leaves = jax.tree_util.tree_leaves(tree)
+    return jnp.sqrt(sum(jnp.sum(jnp.square(x.astype(jnp.float32)))
+                        for x in leaves))
+
+
+def _r2_control_optimizer_step(optimizer, optimizer_state, params, grads,
+                               actor_step_scale):
+    """Applies full value updates and explicitly scaled shared-actor updates."""
+    updates, optimizer_state = optimizer.update(
+        grads, optimizer_state, params=params)
+    updates = updates.copy(add_or_replace={
+        key: jax.tree_util.tree_map(
+            lambda update: actor_step_scale * update,
+            updates[key])
+        for key in ("policy_projection", "policy")
+    })
+    return optax.apply_updates(params, updates), optimizer_state
+
+
+def r2_lambda_return(rewards, continues, values, discount, lambd):
+    """Lambda returns for reward-on-arrival imagined transitions."""
+    inputs = rewards + discount * continues * (1.0 - lambd) * values[:, 1:]
+    discounts = discount * continues * lambd
+
+    def scan_fn(carry, elems):
+        inp, disc = elems
+        result = inp + disc * carry
+        return result, result
+
+    _, returns = jax.lax.scan(
+        scan_fn,
+        values[:, -1],
+        (jnp.swapaxes(inputs, 0, 1), jnp.swapaxes(discounts, 0, 1)),
+        reverse=True,
+    )
+    return jnp.swapaxes(returns, 0, 1)
+
+
+r2_aux_static_argnames = (
+    "network_def",
+    "encoder_optimizer",
+    "control_optimizer",
+    "dtype",
+    "data_augmentation",
+    "train_shared_encoder",
+    "bridge_enabled",
+    "latent_value_enabled",
+    "imag_horizon",
+)
+
+
+def r2_aux_train(
+    network_def,
+    online_params,
+    target_params,
+    wm_optimizer_state,
+    encoder_optimizer,
+    encoder_optimizer_state,
+    control_optimizer,
+    control_optimizer_state,
+    slow_value_params,
+    raw_states,
+    actions,
+    rewards,
+    terminals,
+    is_first,
+    initial_stoch,
+    initial_deter,
+    support,
+    rng,
+    dtype,
+    data_augmentation,
+    train_shared_encoder,
+    bridge_enabled,
+    latent_value_enabled,
+    imag_horizon,
+    wm_learning_rate,
+    wm_beta1,
+    wm_beta2,
+    wm_eps,
+    wm_warmup,
+    wm_agc,
+    wm_pmin,
+    bridge_weight,
+    value_anchor_weight,
+    imag_value_weight,
+    imag_actor_weight,
+    imag_actor_grad_scale,
+    discount,
+    imag_lambda,
+    imag_entropy_weight,
+    slow_value_fraction,
+    return_ema_low,
+    return_ema_high,
+):
+    """One isolated world-model/control update.
+
+    The real BBF update is deliberately not part of this function. Gradient
+    selection below gives each auxiliary loss an explicit owner.
+    """
+    rng, augment_key, model_key, imagine_key = jax.random.split(rng, 4)
+    states = spr_networks.process_inputs(raw_states,
+                                         rng=augment_key,
+                                         data_augmentation=data_augmentation,
+                                         dtype=dtype)
+    batch_size, batch_length = states.shape[:2]
+    actor_step_scale = (imag_actor_weight * imag_actor_grad_scale
+                        if imag_horizon > 0 else 0.0)
+
+    def loss_fn(params):
+        result = network_def.apply(
+            params,
+            states,
+            actions,
+            rewards,
+            terminals,
+            is_first,
+            initial_stoch,
+            initial_deter,
+            model_key,
+            eval_mode=True,
+            method=network_def.r2_world_model_loss_from_states,
+        )
+        wm_loss, wm_metrics, post_stoch, post_deter, embed = result
+
+        flat_count = batch_size * batch_length
+        flat_stoch = post_stoch.reshape(flat_count, *post_stoch.shape[2:])
+        flat_deter = post_deter.reshape(flat_count, *post_deter.shape[2:])
+        flat_embed = embed.reshape(flat_count, -1)
+        stopped_stoch = jax.lax.stop_gradient(flat_stoch)
+        stopped_deter = jax.lax.stop_gradient(flat_deter)
+        zero = jnp.asarray(0.0, dtype=jnp.float32)
+        bridge_kl = zero
+        value_anchor_loss = zero
+
+        # The static gates keep stage 1 genuinely world-model-only; in
+        # particular it does not pay for B*T extra BBF Q-network evaluations.
+        if bridge_enabled or latent_value_enabled:
+            real_logits = network_def.apply(
+                params,
+                jax.lax.stop_gradient(flat_embed),
+                eval_mode=True,
+                method=network_def.policy_logits_from_feature,
+            )
+
+        if bridge_enabled:
+            # Freeze the actor parameters while retaining the derivative of
+            # its logits with respect to the R2 projector output.
+            bridge_params = _stop_param_subsets(
+                params, ("policy_projection", "policy"))
+            latent_logits = network_def.apply(
+                bridge_params,
+                flat_stoch,
+                flat_deter,
+                method=network_def.r2_shared_policy_logits,
+            )
+            real_prob = jax.lax.stop_gradient(
+                jax.nn.softmax(real_logits, axis=-1))
+            bridge_kl = jnp.mean(jnp.sum(
+                real_prob * (jnp.log(real_prob + 1e-8) -
+                             jax.nn.log_softmax(latent_logits, axis=-1)),
+                axis=-1))
+
+        if latent_value_enabled:
+            latent_values = network_def.apply(
+                params,
+                stopped_stoch,
+                stopped_deter,
+                method=network_def.r2_value,
+            )
+            flat_processed_states = states.reshape(
+                flat_count, *states.shape[2:])
+
+            def target_q(state):
+                return network_def.apply(target_params,
+                                         state,
+                                         support=support,
+                                         eval_mode=True)
+
+            target_q_values = jax.vmap(target_q)(
+                flat_processed_states).q_values
+            real_policy_prob = jax.nn.softmax(real_logits, axis=-1)
+            value_target = jax.lax.stop_gradient(
+                jnp.sum(real_policy_prob * target_q_values, axis=-1))
+            value_anchor_loss = jnp.mean(
+                jnp.square(latent_values - value_target))
+
+        imag_actor_loss = zero
+        imag_value_loss = zero
+        imag_return_low = return_ema_low
+        imag_return_high = return_ema_high
+        imag_return_mean = zero
+        imag_reward_mean = zero
+        imag_continue_mean = zero
+        imag_weight_mean = zero
+        imag_return_scale = jnp.asarray(1.0, dtype=jnp.float32)
+        if imag_horizon > 0:
+            imagined = network_def.apply(
+                params,
+                stopped_stoch,
+                stopped_deter,
+                imag_horizon,
+                imagine_key,
+                eval_mode=True,
+                method=network_def.r2_imagine,
+            )
+            imagined_stoch = jax.lax.stop_gradient(imagined["stoch"])
+            imagined_deter = jax.lax.stop_gradient(imagined["deter"])
+            flat_imag_stoch = imagined_stoch.reshape(
+                -1, *imagined_stoch.shape[2:])
+            flat_imag_deter = imagined_deter.reshape(
+                -1, *imagined_deter.shape[2:])
+            online_values = network_def.apply(
+                params,
+                flat_imag_stoch,
+                flat_imag_deter,
+                method=network_def.r2_value,
+            ).reshape(flat_count, imag_horizon + 1)
+            # Flax executes the root module setup even for a bound method, so
+            # retain a complete stopped parameter tree and replace only the
+            # slow value subtree.
+            stopped_params = jax.tree_util.tree_map(jax.lax.stop_gradient,
+                                                     params)
+            slow_params = _replace_param_subsets(
+                stopped_params, {"r2_value": slow_value_params})
+            slow_values = network_def.apply(
+                slow_params,
+                flat_imag_stoch,
+                flat_imag_deter,
+                method=network_def.r2_value,
+            ).reshape(flat_count, imag_horizon + 1)
+            imagined_rewards = jax.lax.stop_gradient(imagined["rewards"])
+            imagined_continues = jax.lax.stop_gradient(imagined["continues"])
+            returns = jax.lax.stop_gradient(r2_lambda_return(
+                imagined_rewards,
+                imagined_continues,
+                slow_values,
+                discount,
+                imag_lambda,
+            ))
+            batch_low = jnp.percentile(returns, 5.0)
+            batch_high = jnp.percentile(returns, 95.0)
+            imag_return_low = 0.99 * return_ema_low + 0.01 * batch_low
+            imag_return_high = 0.99 * return_ema_high + 0.01 * batch_high
+            return_scale = jnp.maximum(1.0,
+                                       imag_return_high - imag_return_low)
+            imag_return_scale = return_scale
+            advantage = jax.lax.stop_gradient(
+                (returns - online_values[:, :-1]) / return_scale)
+            prefix = jnp.cumprod(discount * imagined_continues, axis=1)
+            weights = jnp.concatenate(
+                [jnp.ones_like(prefix[:, :1]), prefix[:, :-1]], axis=1)
+            start_mask = 1.0 - terminals.reshape(flat_count, 1).astype(
+                jnp.float32)
+            weights = jax.lax.stop_gradient(weights * start_mask)
+            denom = jnp.maximum(1.0, jnp.sum(weights))
+            imag_actor_loss = -jnp.sum(
+                weights * (imagined["log_probs"] * advantage +
+                           imag_entropy_weight * imagined["entropies"])) / denom
+            value_error = jnp.square(online_values[:, :-1] - returns)
+            slow_regularizer = jnp.square(
+                online_values[:, :-1] - jax.lax.stop_gradient(
+                    slow_values[:, :-1]))
+            imag_value_loss = jnp.sum(
+                weights * 0.5 * (value_error + slow_regularizer)) / denom
+            imag_return_mean = jnp.mean(returns)
+            imag_reward_mean = jnp.mean(imagined_rewards)
+            imag_continue_mean = jnp.mean(imagined_continues)
+            imag_weight_mean = jnp.mean(weights)
+
+        total_loss = (
+            wm_loss + bridge_weight * bridge_kl +
+            value_anchor_weight * value_anchor_loss +
+            imag_value_weight * imag_value_loss +
+            imag_actor_weight * imag_actor_grad_scale * imag_actor_loss)
+        metrics = dict(wm_metrics)
+        metrics.update({
+            "R2BridgeKL": bridge_kl,
+            "R2ValueAnchorLoss": value_anchor_loss,
+            "R2ImagActorLoss": imag_actor_loss,
+            "R2ImagValueLoss": imag_value_loss,
+            "R2ImagReturnMean": imag_return_mean,
+            "R2ImagRewardMean": imag_reward_mean,
+            "R2ImagContinueMean": imag_continue_mean,
+            "R2ImagWeightMean": imag_weight_mean,
+            "R2ImagReturnScale": imag_return_scale,
+            "R2AuxLoss": total_loss,
+        })
+        aux = (metrics, post_stoch, post_deter, imag_return_low,
+               imag_return_high)
+        return total_loss, aux
+
+    (_, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(online_params)
+    metrics, post_stoch, post_deter, return_ema_low, return_ema_high = aux
+    metrics = dict(metrics)
+    metrics.update({
+        "R2WMGradNorm": _tree_l2_norm(
+            grads["params"]["r2_world_model"]),
+        "R2EncoderGradNorm": _tree_l2_norm({
+            key: grads["params"][key]
+            for key in ("encoder", "representation_projection")
+        }),
+        "R2ImagActorGradNorm": _tree_l2_norm({
+            key: grads["params"][key]
+            for key in ("policy_projection", "policy")
+        }),
+        "R2ValueGradNorm": _tree_l2_norm(
+            grads["params"]["r2_value"]),
+        "R2ImagActorStepScale": jnp.asarray(actor_step_scale,
+                                             dtype=jnp.float32),
+    })
+
+    wm_params = online_params["params"]["r2_world_model"]
+    wm_grads = grads["params"]["r2_world_model"]
+    wm_updates, wm_optimizer_state = r2_laprop_update(
+        wm_grads,
+        wm_optimizer_state,
+        wm_params,
+        wm_learning_rate,
+        wm_beta1,
+        wm_beta2,
+        wm_eps,
+        wm_warmup,
+        wm_agc,
+        wm_pmin,
+    )
+    replacements = {
+        "r2_world_model": optax.apply_updates(wm_params, wm_updates)
+    }
+
+    encoder_keys = ("encoder", "representation_projection")
+    encoder_params = _param_subset(online_params, encoder_keys)
+    encoder_grads = FrozenDict(
+        {key: grads["params"][key] for key in encoder_keys})
+    encoder_updates, encoder_optimizer_state = encoder_optimizer.update(
+        encoder_grads, encoder_optimizer_state, params=encoder_params)
+    updated_encoder = optax.apply_updates(encoder_params, encoder_updates)
+    if train_shared_encoder:
+        replacements.update(dict(updated_encoder))
+
+    control_keys = ("policy_projection", "policy", "r2_value")
+    control_params = _param_subset(online_params, control_keys)
+    control_grads = FrozenDict(
+        {key: grads["params"][key] for key in control_keys})
+    # Adam is nearly invariant to multiplying a loss by a positive scalar.
+    # Scale the *parameter step* as well so 0.01/0.02 are genuinely weak and
+    # distinct actor interventions. The latent value keeps its full update.
+    updated_control, control_optimizer_state = _r2_control_optimizer_step(
+        control_optimizer,
+        control_optimizer_state,
+        control_params,
+        control_grads,
+        actor_step_scale,
+    )
+    replacements.update(dict(updated_control))
+
+    online_params = _replace_param_subsets(online_params, replacements)
+    new_value_params = online_params["params"]["r2_value"]
+    slow_value_params = jax.tree_util.tree_map(
+        lambda slow, new: ((1.0 - slow_value_fraction) * slow +
+                           slow_value_fraction * new),
+        slow_value_params,
+        new_value_params,
+    )
+    return (online_params, wm_optimizer_state, encoder_optimizer_state,
+            control_optimizer_state, slow_value_params, rng, metrics,
+            post_stoch, post_deter, return_ema_low, return_ema_high)
+
+
 train_static_argnames = [
     'network_def',
     'optimizer',
@@ -620,9 +1091,15 @@ def train(
         optimizer_state = new_optimizer_state
         online_params = new_online_params
 
+        # The BBF target owns Q/encoder/policy state only. R2 has its own slow
+        # value target and does not need a second 100M-model Polyak update on
+        # every real-data gradient step.
+        target_keys = tuple(
+            key for key in online_params["params"]
+            if key not in ("r2_world_model", "r2_value"))
         target_update_step = functools.partial(
             interpolate_weights,
-            keys=None,
+            keys=target_keys,
             old_weight=1 - target_update_tau,
             new_weight=target_update_tau,
         )
@@ -871,6 +1348,39 @@ class BBFAgent(JaxDQNAgent):
         seed=None,
         log_every=None,
         explore_end_steps=None,
+        r2_world_model_enabled=False,
+        r2_control_bridge_enabled=False,
+        r2_latent_value_enabled=False,
+        r2_world_model_batch_size=16,
+        r2_world_model_batch_length=64,
+        r2_world_model_replay_capacity=125000,
+        r2_world_model_learning_rate=4e-5,
+        r2_world_model_beta1=0.9,
+        r2_world_model_beta2=0.999,
+        r2_world_model_eps=1e-20,
+        r2_world_model_warmup=1000,
+        r2_world_model_agc=0.3,
+        r2_world_model_pmin=1e-3,
+        r2_world_model_update_period=16,
+        r2_world_model_stoch=32,
+        r2_world_model_deter=6144,
+        r2_world_model_hidden=768,
+        r2_world_model_discrete=48,
+        r2_world_model_units=768,
+        r2_world_model_blocks=8,
+        r2_world_model_train_encoder=True,
+        r2_control_learning_rate=4e-5,
+        r2_value_q_anchor_weight=0.0,
+        r2_bridge_policy_consistency_weight=0.0,
+        r2_imag_horizon=0,
+        r2_imag_value_weight=0.0,
+        r2_imag_actor_weight=0.0,
+        r2_imag_actor_grad_scale=0.0,
+        r2_imag_start_step=10000,
+        r2_imag_pause_after_reset=1000,
+        r2_imag_lambda=0.95,
+        r2_imag_entropy_weight=3e-4,
+        r2_slow_value_fraction=0.02,
     ):
         logging.info(
             "Creating %s agent with the following parameters:",
@@ -923,6 +1433,56 @@ class BBFAgent(JaxDQNAgent):
         self.match_online_target_rngs = match_online_target_rngs
         self.target_eval_mode = target_eval_mode
 
+        self.r2_world_model_enabled = bool(r2_world_model_enabled)
+        self.r2_control_bridge_enabled = bool(r2_control_bridge_enabled)
+        self.r2_latent_value_enabled = bool(r2_latent_value_enabled)
+        self.r2_world_model_batch_size = int(r2_world_model_batch_size)
+        self.r2_world_model_batch_length = int(r2_world_model_batch_length)
+        self.r2_world_model_replay_capacity = int(
+            r2_world_model_replay_capacity)
+        self.r2_world_model_learning_rate = float(
+            r2_world_model_learning_rate)
+        self.r2_world_model_beta1 = float(r2_world_model_beta1)
+        self.r2_world_model_beta2 = float(r2_world_model_beta2)
+        self.r2_world_model_eps = float(r2_world_model_eps)
+        self.r2_world_model_warmup = int(r2_world_model_warmup)
+        self.r2_world_model_agc = float(r2_world_model_agc)
+        self.r2_world_model_pmin = float(r2_world_model_pmin)
+        self.r2_world_model_update_period = max(
+            1, int(r2_world_model_update_period))
+        self.r2_world_model_stoch = int(r2_world_model_stoch)
+        self.r2_world_model_deter = int(r2_world_model_deter)
+        self.r2_world_model_hidden = int(r2_world_model_hidden)
+        self.r2_world_model_discrete = int(r2_world_model_discrete)
+        self.r2_world_model_units = int(r2_world_model_units)
+        self.r2_world_model_blocks = int(r2_world_model_blocks)
+        self.r2_world_model_train_encoder = bool(
+            r2_world_model_train_encoder)
+        self.r2_control_learning_rate = float(r2_control_learning_rate)
+        self.r2_value_q_anchor_weight = float(r2_value_q_anchor_weight)
+        self.r2_bridge_policy_consistency_weight = float(
+            r2_bridge_policy_consistency_weight)
+        self.r2_imag_horizon = int(r2_imag_horizon)
+        self.r2_imag_value_weight = float(r2_imag_value_weight)
+        self.r2_imag_actor_weight = float(r2_imag_actor_weight)
+        self.r2_imag_actor_grad_scale = float(r2_imag_actor_grad_scale)
+        self.r2_imag_start_step = int(r2_imag_start_step)
+        self.r2_imag_pause_after_reset = int(r2_imag_pause_after_reset)
+        self.r2_imag_lambda = float(r2_imag_lambda)
+        self.r2_imag_entropy_weight = float(r2_imag_entropy_weight)
+        self.r2_slow_value_fraction = float(r2_slow_value_fraction)
+        r2_seed = (int(time.time() * 1e6) if seed is None else int(seed))
+        r2_seed = (r2_seed ^ 0x5232D2EA) & 0x7FFFFFFF
+        self._r2_replay_seed = r2_seed
+        self._r2_rng = jax.random.PRNGKey(r2_seed)
+        self._r2_imag_resume_step = self.r2_imag_start_step
+        self._r2_return_ema_low = jnp.asarray(0.0, dtype=jnp.float32)
+        self._r2_return_ema_high = jnp.asarray(0.0, dtype=jnp.float32)
+        self.log_every = 100 if log_every is None else max(1, int(log_every))
+        self.r2_scheduled_update_count = 0
+        self.r2_update_count = 0
+        self.r2_metrics = {}
+
         # debug - start
         print('*' * 20)
         print(' self.target_eval_mode: {}'.format(self.target_eval_mode))
@@ -967,11 +1527,20 @@ class BBFAgent(JaxDQNAgent):
                 noisy=False,
                 distributional=self._distributional,
                 dtype=self.dtype,
+                r2_world_model_enabled=self.r2_world_model_enabled,
+                r2_world_model_stoch=self.r2_world_model_stoch,
+                r2_world_model_deter=self.r2_world_model_deter,
+                r2_world_model_hidden=self.r2_world_model_hidden,
+                r2_world_model_discrete=self.r2_world_model_discrete,
+                r2_world_model_units=self.r2_world_model_units,
+                r2_world_model_blocks=self.r2_world_model_blocks,
             ),
             target_update_period=self.target_update_period,
             update_horizon=self.max_update_horizon,
             seed=seed,
         )
+
+        self._build_r2_world_model_replay()
 
         self.set_replay_settings()
 
@@ -992,6 +1561,11 @@ class BBFAgent(JaxDQNAgent):
         self.train_fn = jax.jit(train,
                                 static_argnames=train_static_argnames,
                                 device=jax.local_devices()[0])
+        self.r2_aux_train_fn = jax.jit(
+            r2_aux_train,
+            static_argnames=r2_aux_static_argnames,
+            device=jax.local_devices()[0],
+        )
 
         # debug - start
         self.greedy_action = False
@@ -999,6 +1573,9 @@ class BBFAgent(JaxDQNAgent):
         self.stats_ent = 0
         self.explore_end_steps = explore_end_steps
         print('explore_end_steps: {}'.format(explore_end_steps))
+        print('r2_world_model_enabled: {}'.format(
+            self.r2_world_model_enabled))
+        print('r2_imag_horizon: {}'.format(self.r2_imag_horizon))
         sys.stdout.flush()
 
     def _build_networks_and_optimizer(self):
@@ -1088,6 +1665,30 @@ class BBFAgent(JaxDQNAgent):
         self.target_network_params = copy.deepcopy(self.online_params)
         self.random_params = copy.deepcopy(self.online_params)
 
+        self.r2wm_optimizer_state = None
+        self.r2_encoder_optimizer = None
+        self.r2_encoder_optimizer_state = None
+        self.r2_control_optimizer = None
+        self.r2_control_optimizer_state = None
+        self.r2_slow_value_params = None
+        if self.r2_world_model_enabled:
+            self.r2wm_optimizer_state = r2_laprop_init(
+                self.online_params["params"]["r2_world_model"])
+            encoder_keys = ("encoder", "representation_projection")
+            encoder_params = _param_subset(self.online_params, encoder_keys)
+            self.r2_encoder_optimizer = create_scaling_optimizer(
+                learning_rate=self.encoder_learning_rate)
+            self.r2_encoder_optimizer_state = self.r2_encoder_optimizer.init(
+                encoder_params)
+            control_keys = ("policy_projection", "policy", "r2_value")
+            control_params = _param_subset(self.online_params, control_keys)
+            self.r2_control_optimizer = optax.adam(
+                self.r2_control_learning_rate)
+            self.r2_control_optimizer_state = self.r2_control_optimizer.init(
+                control_params)
+            self.r2_slow_value_params = copy.deepcopy(
+                self.online_params["params"]["r2_value"])
+
         #print(' so far so good')
         #exit(0)
 
@@ -1105,6 +1706,45 @@ class BBFAgent(JaxDQNAgent):
         self.n_envs = prioritized_buffer._n_envs  # pylint: disable=protected-access
         self.start = time.time()
         return prioritized_buffer
+
+    def _reset_r2_online_state(self, n_envs):
+        """Creates a fresh recurrent context for environment resets only."""
+        self._r2_stoch = np.zeros(
+            (n_envs, self.r2_world_model_stoch,
+             self.r2_world_model_discrete),
+            dtype=np.float32)
+        self._r2_deter = np.zeros((n_envs, self.r2_world_model_deter),
+                                  dtype=np.float32)
+        self._r2_prev_action = np.zeros((n_envs, self.num_actions),
+                                        dtype=np.float32)
+        self._r2_is_first = np.ones((n_envs, 1), dtype=np.float32)
+        self._r2_boundary_recorded = np.zeros((n_envs,), dtype=np.bool_)
+
+    def _build_r2_world_model_replay(self):
+        """Builds an isolated chronological replay for recurrent training."""
+        self._r2_replay = None
+        self._r2_pending_transition = None
+        self._reset_r2_online_state(self.n_envs)
+        if not self.r2_world_model_enabled:
+            return
+        if self.n_envs != 1:
+            raise ValueError(
+                "The R2 sequence replay currently supports one training "
+                "environment; got {}.".format(self.n_envs))
+        self._r2_replay = (
+            world_model_sequence_replay.WorldModelSequenceReplayBuffer(
+                capacity=self.r2_world_model_replay_capacity,
+                state_shape=self.state_shape,
+                num_actions=self.num_actions,
+                stoch_shape=(self.r2_world_model_stoch,
+                             self.r2_world_model_discrete),
+                deter_shape=(self.r2_world_model_deter,),
+                batch_size=self.r2_world_model_batch_size,
+                batch_length=self.r2_world_model_batch_length,
+                state_dtype=self.observation_dtype,
+                latent_dtype=np.float32,
+                seed=self._r2_replay_seed,
+            ))
 
     def set_replay_settings(self):
         logging.info(
@@ -1188,6 +1828,193 @@ class BBFAgent(JaxDQNAgent):
     def _sample_from_replay_buffer(self):
         self.replay_elements = next(self.prefetcher)
 
+    def _sample_r2_world_model_batch(self):
+        if (not self.r2_world_model_enabled or self._r2_replay is None or
+                not self._r2_replay.can_sample()):
+            return None
+        return self._r2_replay.sample()
+
+    def _r2_aux_update(self):
+        """Runs one world-model/imagination update outside the BBF optimizer."""
+        self.r2_scheduled_update_count += 1
+        batch = self._sample_r2_world_model_batch()
+        if batch is None:
+            self.r2_metrics = {
+                "R2UpdateRan": 0.0,
+                "R2UpdateFraction": (
+                    self.r2_update_count / self.r2_scheduled_update_count),
+            }
+            return
+
+        imagination_active = (
+            self.r2_imag_horizon > 0 and
+            self.training_steps >= self._r2_imag_resume_step)
+        effective_horizon = self.r2_imag_horizon if imagination_active else 0
+        (
+            self.online_params,
+            self.r2wm_optimizer_state,
+            self.r2_encoder_optimizer_state,
+            self.r2_control_optimizer_state,
+            self.r2_slow_value_params,
+            self._r2_rng,
+            metrics,
+            post_stoch,
+            post_deter,
+            self._r2_return_ema_low,
+            self._r2_return_ema_high,
+        ) = self.r2_aux_train_fn(
+            self.network_def,
+            self.online_params,
+            self.target_network_params,
+            self.r2wm_optimizer_state,
+            self.r2_encoder_optimizer,
+            self.r2_encoder_optimizer_state,
+            self.r2_control_optimizer,
+            self.r2_control_optimizer_state,
+            self.r2_slow_value_params,
+            batch["state"],
+            batch["action"],
+            batch["reward"],
+            batch["is_terminal"],
+            batch["is_first"],
+            batch["initial_stoch"],
+            batch["initial_deter"],
+            self._support,
+            self._r2_rng,
+            self.dtype,
+            self._data_augmentation,
+            self.r2_world_model_train_encoder,
+            self.r2_control_bridge_enabled,
+            self.r2_latent_value_enabled,
+            effective_horizon,
+            self.r2_world_model_learning_rate,
+            self.r2_world_model_beta1,
+            self.r2_world_model_beta2,
+            self.r2_world_model_eps,
+            self.r2_world_model_warmup,
+            self.r2_world_model_agc,
+            self.r2_world_model_pmin,
+            self.r2_bridge_policy_consistency_weight,
+            self.r2_value_q_anchor_weight,
+            self.r2_imag_value_weight,
+            self.r2_imag_actor_weight,
+            self.r2_imag_actor_grad_scale,
+            self.gamma,
+            self.r2_imag_lambda,
+            self.r2_imag_entropy_weight,
+            self.r2_slow_value_fraction,
+            self._r2_return_ema_low,
+            self._r2_return_ema_high,
+        )
+        self._r2_replay.write_back(
+            batch["row_ids"],
+            np.asarray(jax.device_get(post_stoch), dtype=np.float32),
+            np.asarray(jax.device_get(post_deter), dtype=np.float32),
+            ignore_stale=True,
+            generation=batch["generation"],
+        )
+        self.r2_update_count += 1
+        host_metrics = {
+            key: float(np.asarray(jax.device_get(value)))
+            for key, value in metrics.items()
+        }
+        host_metrics.update({
+            "R2UpdateRan": 1.0,
+            "R2UpdateFraction": (
+                self.r2_update_count / self.r2_scheduled_update_count),
+            "R2ImagHorizon": float(effective_horizon),
+        })
+        self.r2_metrics = host_metrics
+        if self.r2_update_count % self.log_every == 0:
+            logging.info("R2 auxiliary metrics at step %d: %s",
+                         self.training_steps, host_metrics)
+
+    def _observe_r2_world_model_state(self):
+        """Advances the online posterior used only as replay context."""
+        if not self.r2_world_model_enabled or self.eval_mode:
+            return
+        self._r2_rng, observe_rng = jax.random.split(self._r2_rng)
+        stoch, deter = r2_world_model_observe(
+            self.network_def,
+            self.online_params,
+            self.state,
+            self._r2_prev_action,
+            self._r2_stoch,
+            self._r2_deter,
+            self._r2_is_first,
+            observe_rng,
+            self.dtype,
+        )
+        self._r2_stoch = np.asarray(jax.device_get(stoch), dtype=np.float32)
+        self._r2_deter = np.asarray(jax.device_get(deter), dtype=np.float32)
+        self._r2_is_first.fill(0.0)
+
+    def _one_hot_actions(self, action):
+        action = np.asarray(action, dtype=np.int32).reshape(-1)
+        return np.eye(self.num_actions, dtype=np.float32)[action]
+
+    def add_r2_episode_boundary_transition(self, env_id, observation, reward,
+                                           terminal):
+        """Stores the final observation/reward before the runner resets it."""
+        if (not self.r2_world_model_enabled or self.eval_mode or
+                self._r2_boundary_recorded[env_id]):
+            return
+        obs = np.asarray(observation).squeeze(-1)
+        boundary_state = np.asarray(
+            self.state[env_id], dtype=self.observation_dtype).copy()
+        boundary_state = np.roll(boundary_state, -1, axis=-1)
+        boundary_state[Ellipsis, -1] = np.reshape(obs,
+                                                  self.observation_shape)
+
+        self._r2_rng, observe_rng = jax.random.split(self._r2_rng)
+        stoch, deter = r2_world_model_observe(
+            self.network_def,
+            self.online_params,
+            boundary_state[None],
+            self._r2_prev_action[env_id:env_id + 1],
+            self._r2_stoch[env_id:env_id + 1],
+            self._r2_deter[env_id:env_id + 1],
+            self._r2_is_first[env_id:env_id + 1],
+            observe_rng,
+            self.dtype,
+        )
+        self._r2_replay.add_boundary_transition(
+            state=boundary_state,
+            reward=np.clip(np.asarray(reward, dtype=np.float32), -1.0, 1.0),
+            is_terminal=bool(terminal),
+            stoch=np.asarray(jax.device_get(stoch), dtype=np.float32)[0],
+            deter=np.asarray(jax.device_get(deter), dtype=np.float32)[0],
+        )
+        self._r2_boundary_recorded[env_id] = True
+
+    def _flush_r2_pending_transition(self, action):
+        if (not self.r2_world_model_enabled or self.eval_mode or
+                self._r2_pending_transition is None):
+            return
+        self._r2_replay.add_atari_transition(
+            state=self._r2_pending_transition["state"],
+            action=self._one_hot_actions(action),
+            reward=self._r2_pending_transition["reward"],
+            is_terminal=self._r2_pending_transition["is_terminal"],
+            is_first=self._r2_pending_transition["is_first"],
+            stoch=self._r2_stoch,
+            deter=self._r2_deter,
+        )
+        self._r2_pending_transition = None
+
+    def _set_r2_pending_transition(self, reward, terminal, is_first):
+        if not self.r2_world_model_enabled or self.eval_mode:
+            return
+        self._r2_pending_transition = {
+            "state": np.asarray(
+                self.state, dtype=self.observation_dtype).copy(),
+            "reward": np.asarray(reward, dtype=np.float32).reshape(-1, 1),
+            "is_terminal": np.asarray(
+                terminal, dtype=np.bool_).reshape(-1, 1),
+            "is_first": np.asarray(
+                is_first, dtype=np.bool_).reshape(-1, 1),
+        }
+
     def reset_weights(self):
         self.cumulative_resets += 1
         interval = self.reset_every
@@ -1206,7 +2033,12 @@ class BBFAgent(JaxDQNAgent):
         self._rng, reset_rng = jax.random.split(self._rng, 2)
 
         #keys_to_copy = ("encoder", "transition_model")
-        keys_to_copy = ("encoder", "transition_model", "representation_projection", "_log_alpha")
+        keys_to_copy = ("encoder", "transition_model",
+                        "representation_projection", "_log_alpha")
+        if self.r2_world_model_enabled:
+            # Preserve learned dynamics across BBF plasticity resets. The
+            # policy-dependent latent value is intentionally recalibrated.
+            keys_to_copy = keys_to_copy + ("r2_world_model",)
         (
             self.online_params,
             self.target_network_params,
@@ -1228,6 +2060,17 @@ class BBFAgent(JaxDQNAgent):
             self.perturb_factor,
             keys_to_copy,
         )
+
+        if self.r2_world_model_enabled:
+            control_keys = ("policy_projection", "policy", "r2_value")
+            self.r2_control_optimizer_state = self.r2_control_optimizer.init(
+                _param_subset(self.online_params, control_keys))
+            self.r2_slow_value_params = copy.deepcopy(
+                self.online_params["params"]["r2_value"])
+            self._r2_imag_resume_step = max(
+                self.r2_imag_start_step,
+                self.training_steps + self.r2_imag_pause_after_reset,
+            )
 
         self.cycle_grad_steps = 0
 
@@ -1328,6 +2171,9 @@ class BBFAgent(JaxDQNAgent):
         self.target_network_params = new_target_params
         self.online_params = new_online_params
         self.optimizer_state = new_optimizer_state
+        if (self.r2_world_model_enabled and
+                self.grad_steps % self.r2_world_model_update_period == 0):
+            self._r2_aux_update()
 
     def _store_transition(
         self,
@@ -1446,27 +2292,66 @@ class BBFAgent(JaxDQNAgent):
         n_envs = new_obs.shape[0]
         self.state = np.zeros((n_envs, *self.state_shape))
         self._record_observation(new_obs)
+        if self.r2_world_model_enabled and not self.eval_mode:
+            self._reset_r2_online_state(n_envs)
+            self._set_r2_pending_transition(
+                np.zeros((n_envs,), dtype=np.float32),
+                np.zeros((n_envs,), dtype=np.bool_),
+                np.ones((n_envs,), dtype=np.bool_),
+            )
 
     def reset_one(self, env_id):
         self.state[env_id].fill(0)
+        if self.r2_world_model_enabled and not self.eval_mode:
+            self._r2_stoch[env_id].fill(0.0)
+            self._r2_deter[env_id].fill(0.0)
+            self._r2_prev_action[env_id].fill(0.0)
+            self._r2_is_first[env_id] = 1.0
 
     def delete_one(self, env_id):
         self.state = np.concatenate(
             [self.state[:env_id], self.state[env_id + 1:]], 0)
+        if self.r2_world_model_enabled and not self.eval_mode:
+            self._r2_stoch = np.delete(self._r2_stoch, env_id, axis=0)
+            self._r2_deter = np.delete(self._r2_deter, env_id, axis=0)
+            self._r2_prev_action = np.delete(
+                self._r2_prev_action, env_id, axis=0)
+            self._r2_is_first = np.delete(
+                self._r2_is_first, env_id, axis=0)
+            self._r2_boundary_recorded = np.delete(
+                self._r2_boundary_recorded, env_id, axis=0)
 
     def cache_train_state(self):
         self.training_state = (
             copy.deepcopy(self.state),
             copy.deepcopy(self._last_observation),
             copy.deepcopy(self._observation),
+            copy.deepcopy(self._r2_stoch),
+            copy.deepcopy(self._r2_deter),
+            copy.deepcopy(self._r2_prev_action),
+            copy.deepcopy(self._r2_is_first),
+            copy.deepcopy(self._r2_boundary_recorded),
+            copy.deepcopy(self._r2_pending_transition),
         )
 
     def restore_train_state(self):
-        (self.state, self._last_observation,
-         self._observation) = (self.training_state)
+        (self.state, self._last_observation, self._observation,
+         self._r2_stoch, self._r2_deter, self._r2_prev_action,
+         self._r2_is_first, self._r2_boundary_recorded,
+         self._r2_pending_transition) = self.training_state
 
     def log_transition(self, observation, action, reward, terminal,
                        episode_end):
+        if self.r2_world_model_enabled and not self.eval_mode:
+            boundary = np.logical_or(terminal, episode_end).reshape(-1)
+            for env_id in np.flatnonzero(boundary):
+                if not self._r2_boundary_recorded[env_id]:
+                    self.add_r2_episode_boundary_transition(
+                        env_id,
+                        np.asarray(observation)[env_id],
+                        np.asarray(reward)[env_id],
+                        np.asarray(terminal)[env_id],
+                    )
         self._last_observation = self._observation
         self._record_observation(observation)
 
@@ -1478,6 +2363,13 @@ class BBFAgent(JaxDQNAgent):
                 terminal,
                 episode_end=episode_end,
             )
+            if self.r2_world_model_enabled:
+                is_first = np.logical_or(terminal, episode_end)
+                r2_reward = np.where(is_first, 0.0, reward)
+                r2_terminal = np.where(is_first, False, terminal)
+                self._set_r2_pending_transition(
+                    r2_reward, r2_terminal, is_first)
+                self._r2_boundary_recorded.fill(False)
 
     def select_action(
         self,
@@ -1516,9 +2408,10 @@ class BBFAgent(JaxDQNAgent):
 
     def step(self):
         """Records the most recent transition, returns the agent's next action, and trains if appropriate.
-    """
+        """
         if not self.eval_mode:
             self._train_step()
+            self._observe_r2_world_model_state()
         state = self.state
         select_params = self.target_network_params
         #select_params = self.online_params
@@ -1533,6 +2426,9 @@ class BBFAgent(JaxDQNAgent):
             self.eval_mode,
         )
         self.action = np.asarray(action)
+        if not self.eval_mode and self.r2_world_model_enabled:
+            self._flush_r2_pending_transition(self.action)
+            self._r2_prev_action = self._one_hot_actions(self.action)
         #time_delta = time.time() - start_time
         #print('time_delta: {}'.format(time_delta))
         #exit(0)

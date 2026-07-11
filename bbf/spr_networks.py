@@ -17,6 +17,7 @@
 import collections
 import enum
 import functools
+import math
 import time
 from typing import Any, Sequence, Tuple
 
@@ -27,6 +28,7 @@ import jax
 from jax import random
 import jax.numpy as jnp
 import numpy as onp
+import optax
 
 SPROutputType = collections.namedtuple(
     'RL_network',
@@ -364,6 +366,508 @@ class TransitionModel(nn.Module):
         return scan(x, action)
 
 
+def _r2_initializer():
+    """R2-Dreamer-style truncated-normal initializer."""
+
+    def init(key, shape, dtype=jnp.float32):
+        if len(shape) < 2:
+            fan_in = shape[0] if shape else 1
+        elif len(shape) == 2:
+            fan_in = shape[0]
+        else:
+            fan_in = shape[1] * math.prod(shape[2:])
+        std = 1.1368 * math.sqrt(1.0 / max(1, fan_in))
+        return nn.initializers.truncated_normal(stddev=std)(key, shape, dtype)
+
+    return init
+
+
+def _r2_symexp(x):
+    return jnp.sign(x) * jnp.expm1(jnp.abs(x))
+
+
+def _r2_twohot_bins(bin_num):
+    if bin_num % 2 == 1:
+        half = jnp.linspace(-20.0, 0.0, (bin_num - 1) // 2 + 1,
+                            dtype=jnp.float32)
+        half = _r2_symexp(half)
+        return jnp.concatenate([half, -jnp.flip(half[:-1])], axis=0)
+    half = jnp.linspace(-20.0, 0.0, bin_num // 2, dtype=jnp.float32)
+    half = _r2_symexp(half)
+    return jnp.concatenate([half, -jnp.flip(half)], axis=0)
+
+
+def _r2_twohot_neg_log_prob(logits, target, bin_num):
+    """Negative log probability for exponentially spaced two-hot bins."""
+    target = jnp.squeeze(target.astype(jnp.float32), axis=-1)
+    bins = _r2_twohot_bins(bin_num)
+    target = jax.lax.stop_gradient(target)
+    below = jnp.sum((bins <= target[..., None]).astype(jnp.int32), axis=-1) - 1
+    above = bin_num - jnp.sum((bins > target[..., None]).astype(jnp.int32),
+                              axis=-1)
+    below = jnp.clip(below, 0, bin_num - 1)
+    above = jnp.clip(above, 0, bin_num - 1)
+    equal = below == above
+    below_value = jnp.take(bins, below)
+    above_value = jnp.take(bins, above)
+    dist_to_below = jnp.where(equal, 1.0, jnp.abs(below_value - target))
+    dist_to_above = jnp.where(equal, 1.0, jnp.abs(above_value - target))
+    total = dist_to_below + dist_to_above
+    weight_below = dist_to_above / total
+    weight_above = dist_to_below / total
+    mixed_target = (
+        jax.nn.one_hot(below, bin_num) * weight_below[..., None] +
+        jax.nn.one_hot(above, bin_num) * weight_above[..., None])
+    log_pred = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
+    return -jnp.sum(mixed_target * log_pred, axis=-1)
+
+
+def _r2_twohot_mode(logits, bin_num):
+    bins = _r2_twohot_bins(bin_num)
+    probabilities = jax.nn.softmax(logits.astype(jnp.float32), axis=-1)
+    return jnp.sum(probabilities * bins, axis=-1)
+
+
+def _r2_kl_divergence(left_logits, right_logits):
+    left_logprob = jax.nn.log_softmax(left_logits, axis=-1)
+    right_logprob = jax.nn.log_softmax(right_logits, axis=-1)
+    left_prob = jax.nn.softmax(left_logits, axis=-1)
+    return jnp.sum(left_prob * (left_logprob - right_logprob), axis=-1)
+
+
+def _r2_onehot_entropy(logits, unimix_ratio):
+    probs = jax.nn.softmax(logits.astype(jnp.float32), axis=-1)
+    uniform = unimix_ratio / probs.shape[-1]
+    probs = probs * (1.0 - unimix_ratio) + uniform
+    entropy = -jnp.sum(probs * jnp.log(probs + 1e-8), axis=-1)
+    return jnp.sum(entropy, axis=-1)
+
+
+class R2BlockLinear(nn.Module):
+    """Block-wise linear layer matching r2dreamer.networks.BlockLinear."""
+
+    out_ch: int
+    blocks: int
+    initializer: Any = _r2_initializer()
+
+    @nn.compact
+    def __call__(self, x):
+        in_ch = x.shape[-1]
+        if in_ch % self.blocks != 0 or self.out_ch % self.blocks != 0:
+            raise ValueError(
+                f"BlockLinear requires divisible dims, got {in_ch}, "
+                f"{self.out_ch}, blocks={self.blocks}")
+        weight = self.param(
+            "kernel",
+            self.initializer,
+            (self.out_ch // self.blocks, in_ch // self.blocks, self.blocks),
+        )
+        bias = self.param("bias", nn.initializers.zeros, (self.out_ch,))
+        x_shape = x.shape[:-1]
+        x = x.reshape(*x_shape, self.blocks, in_ch // self.blocks)
+        x = jnp.einsum("...gi,oig->...go", x, weight)
+        x = x.reshape(*x_shape, self.out_ch)
+        return x + bias
+
+
+class R2DreamerDeter(nn.Module):
+    deter: int
+    flat_stoch: int
+    act_dim: int
+    hidden: int
+    blocks: int
+    dyn_layers: int
+    dtype: Dtype = jnp.float32
+    initializer: Any = _r2_initializer()
+
+    @nn.compact
+    def __call__(self, stoch, deter, action):
+        batch_size = action.shape[0]
+        stoch = stoch.reshape(batch_size, -1)
+        action = action / jax.lax.stop_gradient(
+            jnp.maximum(jnp.abs(action), 1.0))
+
+        def dense_norm_act(x, features, name):
+            x = nn.Dense(features,
+                         kernel_init=self.initializer,
+                         dtype=self.dtype,
+                         name=f"{name}_dense")(x)
+            x = nn.RMSNorm(epsilon=1e-4,
+                           dtype=jnp.float32,
+                           name=f"{name}_norm")(x)
+            return nn.silu(x)
+
+        x0 = dense_norm_act(deter, self.hidden, "dyn_in0")
+        x1 = dense_norm_act(stoch, self.hidden, "dyn_in1")
+        x2 = dense_norm_act(action, self.hidden, "dyn_in2")
+        x = jnp.concatenate([x0, x1, x2], axis=-1)
+        x = jnp.expand_dims(x, axis=-2)
+        x = jnp.broadcast_to(x, (batch_size, self.blocks, 3 * self.hidden))
+        grouped_deter = deter.reshape(batch_size, self.blocks,
+                                      self.deter // self.blocks)
+        x = jnp.concatenate([grouped_deter, x], axis=-1)
+        x = x.reshape(batch_size, -1)
+
+        for i in range(self.dyn_layers):
+            x = R2BlockLinear(self.deter,
+                              self.blocks,
+                              initializer=self.initializer,
+                              name=f"dyn_hid_{i}")(x)
+            x = nn.RMSNorm(epsilon=1e-4,
+                           dtype=jnp.float32,
+                           name=f"dyn_hid_norm_{i}")(x)
+            x = nn.silu(x)
+
+        x = R2BlockLinear(3 * self.deter,
+                          self.blocks,
+                          initializer=self.initializer,
+                          name="dyn_gru")(x)
+        gates = x.reshape(batch_size, self.blocks,
+                          3 * self.deter // self.blocks)
+        reset, cand, update = jnp.split(gates, 3, axis=-1)
+        reset = jax.nn.sigmoid(reset.reshape(batch_size, self.deter))
+        cand = cand.reshape(batch_size, self.deter)
+        update = update.reshape(batch_size, self.deter)
+        cand = jnp.tanh(reset * cand)
+        update = jax.nn.sigmoid(update - 1.0)
+        return update * cand + (1.0 - update) * deter
+
+
+class R2DreamerRSSM(nn.Module):
+    embed_size: int
+    act_dim: int
+    stoch: int = 32
+    deter: int = 6144
+    hidden: int = 768
+    discrete: int = 48
+    img_layers: int = 2
+    obs_layers: int = 1
+    dyn_layers: int = 1
+    blocks: int = 8
+    unimix_ratio: float = 0.01
+    dtype: Dtype = jnp.float32
+    initializer: Any = _r2_initializer()
+
+    @property
+    def flat_stoch(self):
+        return self.stoch * self.discrete
+
+    @property
+    def feat_size(self):
+        return self.flat_stoch + self.deter
+
+    def initial(self, batch_size):
+        stoch = jnp.zeros((batch_size, self.stoch, self.discrete),
+                          dtype=jnp.float32)
+        deter = jnp.zeros((batch_size, self.deter), dtype=jnp.float32)
+        return stoch, deter
+
+    @nn.compact
+    def _obs_logits(self, x):
+        for i in range(self.obs_layers):
+            x = nn.Dense(self.hidden,
+                         kernel_init=self.initializer,
+                         dtype=self.dtype,
+                         name=f"obs_net_{i}")(x)
+            x = nn.RMSNorm(epsilon=1e-4,
+                           dtype=jnp.float32,
+                           name=f"obs_net_norm_{i}")(x)
+            x = nn.silu(x)
+        x = nn.Dense(self.stoch * self.discrete,
+                     kernel_init=self.initializer,
+                     dtype=self.dtype,
+                     name="obs_net_logit")(x)
+        return x.reshape(*x.shape[:-1], self.stoch, self.discrete)
+
+    @nn.compact
+    def _prior_logits(self, deter):
+        x = deter
+        for i in range(self.img_layers):
+            x = nn.Dense(self.hidden,
+                         kernel_init=self.initializer,
+                         dtype=self.dtype,
+                         name=f"img_net_{i}")(x)
+            x = nn.RMSNorm(epsilon=1e-4,
+                           dtype=jnp.float32,
+                           name=f"img_net_norm_{i}")(x)
+            x = nn.silu(x)
+        x = nn.Dense(self.stoch * self.discrete,
+                     kernel_init=self.initializer,
+                     dtype=self.dtype,
+                     name="img_net_logit")(x)
+        return x.reshape(*x.shape[:-1], self.stoch, self.discrete)
+
+    def _sample_stoch(self, logits, rng):
+        probs = jax.nn.softmax(logits.astype(jnp.float32), axis=-1)
+        uniform = self.unimix_ratio / probs.shape[-1]
+        probs = probs * (1.0 - self.unimix_ratio) + uniform
+        mixed_logits = jnp.log(probs + 1e-8)
+        gumbel = jax.random.gumbel(rng, mixed_logits.shape)
+        y_soft = jax.nn.softmax(mixed_logits + gumbel, axis=-1)
+        y_hard = jax.nn.one_hot(jnp.argmax(y_soft, axis=-1), y_soft.shape[-1])
+        return y_hard + y_soft - jax.lax.stop_gradient(y_soft)
+
+    @nn.compact
+    def obs_step(self, stoch, deter, prev_action, embed, reset, rng):
+        reset = reset.astype(bool).reshape((reset.shape[0],))
+        stoch = jnp.where(reset[:, None, None], jnp.zeros_like(stoch), stoch)
+        deter = jnp.where(reset[:, None], jnp.zeros_like(deter), deter)
+        prev_action = jnp.where(reset[:, None], jnp.zeros_like(prev_action),
+                                prev_action)
+        deter = R2DreamerDeter(
+            deter=self.deter,
+            flat_stoch=self.flat_stoch,
+            act_dim=self.act_dim,
+            hidden=self.hidden,
+            blocks=self.blocks,
+            dyn_layers=self.dyn_layers,
+            dtype=self.dtype,
+            initializer=self.initializer,
+            name="deter_net",
+        )(stoch, deter, prev_action)
+        logits = self._obs_logits(jnp.concatenate([deter, embed], axis=-1))
+        stoch = self._sample_stoch(logits, rng)
+        return stoch, deter, logits
+
+    @nn.compact
+    def img_step(self, stoch, deter, prev_action, rng):
+        """One action-conditioned prior transition."""
+        deter = R2DreamerDeter(
+            deter=self.deter,
+            flat_stoch=self.flat_stoch,
+            act_dim=self.act_dim,
+            hidden=self.hidden,
+            blocks=self.blocks,
+            dyn_layers=self.dyn_layers,
+            dtype=self.dtype,
+            initializer=self.initializer,
+            name="deter_net",
+        )(stoch, deter, prev_action)
+        logits = self._prior_logits(deter)
+        stoch = self._sample_stoch(logits, rng)
+        return stoch, deter, logits
+
+    def observe(self, embed, action, initial, reset, rng):
+        stoch, deter = initial
+        keys = jax.random.split(rng, embed.shape[1])
+        stochs, deters, logits = [], [], []
+        reset = jnp.squeeze(reset, axis=-1)
+        for i in range(embed.shape[1]):
+            stoch, deter, logit = self.obs_step(stoch, deter, action[:, i],
+                                                embed[:, i], reset[:, i],
+                                                keys[i])
+            stochs.append(stoch)
+            deters.append(deter)
+            logits.append(logit)
+        return (jnp.stack(stochs, axis=1), jnp.stack(deters, axis=1),
+                jnp.stack(logits, axis=1))
+
+    def prior_logits(self, deter):
+        return self._prior_logits(deter)
+
+    def get_feat(self, stoch, deter):
+        stoch = stoch.reshape(*stoch.shape[:-2], self.flat_stoch)
+        return jnp.concatenate([stoch, deter], axis=-1)
+
+    def kl_loss(self, post_logit, prior_logit, free):
+        rep_loss = jnp.sum(
+            _r2_kl_divergence(post_logit,
+                              jax.lax.stop_gradient(prior_logit)),
+            axis=-1)
+        dyn_loss = jnp.sum(
+            _r2_kl_divergence(jax.lax.stop_gradient(post_logit), prior_logit),
+            axis=-1)
+        return jnp.maximum(dyn_loss, free), jnp.maximum(rep_loss, free)
+
+
+class R2DreamerMLPHead(nn.Module):
+    """RMS-normalized MLP used by the world model and latent value."""
+
+    out_dim: int
+    layers: int = 1
+    units: int = 768
+    outscale: float = 1.0
+    dtype: Dtype = jnp.float32
+    initializer: Any = _r2_initializer()
+
+    @nn.compact
+    def __call__(self, x):
+        for i in range(self.layers):
+            x = nn.Dense(self.units,
+                         kernel_init=self.initializer,
+                         dtype=self.dtype,
+                         name=f"mlp_linear_{i}")(x)
+            x = nn.RMSNorm(epsilon=1e-4,
+                           dtype=jnp.float32,
+                           name=f"mlp_norm_{i}")(x)
+            x = nn.silu(x)
+        if self.outscale == 0.0:
+            kernel_init = nn.initializers.zeros
+        else:
+            base_init = self.initializer
+
+            def kernel_init(key, shape, dtype=jnp.float32):
+                return self.outscale * base_init(key, shape, dtype)
+
+        return nn.Dense(self.out_dim,
+                        kernel_init=kernel_init,
+                        bias_init=nn.initializers.zeros,
+                        dtype=self.dtype,
+                        name="last")(x)
+
+
+class R2DreamerProjector(nn.Module):
+    out_dim: int
+    dtype: Dtype = jnp.float32
+    initializer: Any = _r2_initializer()
+
+    @nn.compact
+    def __call__(self, x):
+        return nn.Dense(self.out_dim,
+                        use_bias=False,
+                        kernel_init=self.initializer,
+                        dtype=self.dtype)(x)
+
+
+class R2DreamerWorldModel(nn.Module):
+    """Decoder-free R2-Dreamer world model over the BBF representation."""
+
+    embed_size: int
+    act_dim: int
+    stoch: int = 32
+    deter: int = 6144
+    hidden: int = 768
+    discrete: int = 48
+    units: int = 768
+    blocks: int = 8
+    img_layers: int = 2
+    obs_layers: int = 1
+    dyn_layers: int = 1
+    kl_free: float = 1.0
+    unimix_ratio: float = 0.01
+    barlow_lambd: float = 5e-4
+    reward_bins: int = 255
+    loss_scale_dyn: float = 1.0
+    loss_scale_rep: float = 0.1
+    loss_scale_barlow: float = 0.05
+    loss_scale_rew: float = 1.0
+    loss_scale_con: float = 1.0
+    dtype: Dtype = jnp.float32
+    initializer: Any = _r2_initializer()
+
+    def setup(self):
+        self.rssm = R2DreamerRSSM(
+            embed_size=self.embed_size,
+            act_dim=self.act_dim,
+            stoch=self.stoch,
+            deter=self.deter,
+            hidden=self.hidden,
+            discrete=self.discrete,
+            img_layers=self.img_layers,
+            obs_layers=self.obs_layers,
+            dyn_layers=self.dyn_layers,
+            blocks=self.blocks,
+            unimix_ratio=self.unimix_ratio,
+            dtype=self.dtype,
+            initializer=self.initializer,
+        )
+        self.projector = R2DreamerProjector(self.embed_size,
+                                            dtype=jnp.float32,
+                                            initializer=self.initializer)
+        self.reward = R2DreamerMLPHead(self.reward_bins,
+                                       layers=1,
+                                       units=self.units,
+                                       outscale=0.0,
+                                       dtype=jnp.float32,
+                                       initializer=self.initializer)
+        self.cont = R2DreamerMLPHead(1,
+                                     layers=1,
+                                     units=self.units,
+                                     outscale=1.0,
+                                     dtype=jnp.float32,
+                                     initializer=self.initializer)
+
+    @property
+    def feat_size(self):
+        return self.stoch * self.discrete + self.deter
+
+    def initial(self, batch_size):
+        return self.rssm.initial(batch_size)
+
+    def feature(self, stoch, deter):
+        return self.rssm.get_feat(stoch, deter)
+
+    def project_feature(self, stoch, deter):
+        return self.projector(self.feature(stoch, deter))
+
+    def reward_value(self, stoch, deter):
+        logits = self.reward(self.feature(stoch, deter))
+        return _r2_twohot_mode(logits, self.reward_bins)
+
+    def continue_probability(self, stoch, deter):
+        logits = self.cont(self.feature(stoch, deter))
+        return jnp.squeeze(jax.nn.sigmoid(logits), axis=-1)
+
+    def observe_single(self, embed, prev_action, stoch, deter, is_first, rng):
+        return self.rssm.obs_step(stoch, deter, prev_action, embed, is_first,
+                                  rng)
+
+    def imagine_step(self, stoch, deter, action, rng):
+        return self.rssm.img_step(stoch, deter, action, rng)
+
+    def loss(self, embed, action, reward, terminal, is_first, initial, rng):
+        batch_size, batch_length = embed.shape[:2]
+        post_stoch, post_deter, post_logit = self.rssm.observe(
+            embed, action, initial, is_first, rng)
+        prior_logit = self.rssm.prior_logits(post_deter)
+        dyn_loss, rep_loss = self.rssm.kl_loss(post_logit, prior_logit,
+                                               self.kl_free)
+        dyn_loss = jnp.mean(dyn_loss)
+        rep_loss = jnp.mean(rep_loss)
+
+        feat = self.feature(post_stoch, post_deter)
+        projected_feat = self.projector(
+            feat.reshape(batch_size * batch_length, -1))
+        embed_target = jax.lax.stop_gradient(
+            embed.reshape(batch_size * batch_length, -1))
+        x1 = (projected_feat - jnp.mean(projected_feat, axis=0)) / (
+            jnp.std(projected_feat, axis=0, ddof=1) + 1e-8)
+        x2 = (embed_target - jnp.mean(embed_target, axis=0)) / (
+            jnp.std(embed_target, axis=0, ddof=1) + 1e-8)
+        corr = jnp.matmul(x1.T, x2) / (batch_size * batch_length)
+        invariance = jnp.sum(jnp.square(jnp.diag(corr) - 1.0))
+        off_diag = corr - jnp.diag(jnp.diag(corr))
+        redundancy = jnp.sum(jnp.square(off_diag))
+        barlow_loss = invariance + self.barlow_lambd * redundancy
+
+        reward_logits = self.reward(feat)
+        rew_loss = jnp.mean(
+            _r2_twohot_neg_log_prob(reward_logits, reward, self.reward_bins))
+        cont_target = 1.0 - terminal.astype(jnp.float32)
+        con_loss = jnp.mean(
+            optax.sigmoid_binary_cross_entropy(self.cont(feat), cont_target))
+
+        total = (
+            self.loss_scale_dyn * dyn_loss +
+            self.loss_scale_rep * rep_loss +
+            self.loss_scale_barlow * barlow_loss +
+            self.loss_scale_rew * rew_loss +
+            self.loss_scale_con * con_loss)
+        metrics = {
+            "R2WMLoss": total,
+            "R2WMDynLoss": dyn_loss,
+            "R2WMRepLoss": rep_loss,
+            "R2WMBarlowLoss": barlow_loss,
+            "R2WMRewardLoss": rew_loss,
+            "R2WMContLoss": con_loss,
+            "R2WMDynEntropy": jnp.mean(
+                _r2_onehot_entropy(prior_logit, self.unimix_ratio)),
+            "R2WMRepEntropy": jnp.mean(
+                _r2_onehot_entropy(post_logit, self.unimix_ratio)),
+        }
+        return total, metrics, post_stoch, post_deter
+
+
 @gin.configurable
 class RainbowDQNNetwork(nn.Module):
     """Jax Rainbow network for Full Rainbow.
@@ -384,6 +888,13 @@ class RainbowDQNNetwork(nn.Module):
     hidden_dim: int = 512
     width_scale: float = 1.0
     dtype: Dtype = jnp.float32
+    r2_world_model_enabled: bool = False
+    r2_world_model_stoch: int = 32
+    r2_world_model_deter: int = 6144
+    r2_world_model_hidden: int = 768
+    r2_world_model_discrete: int = 48
+    r2_world_model_units: int = 768
+    r2_world_model_blocks: int = 8
 
     def setup(self):
         initializer = nn.initializers.xavier_uniform()
@@ -441,6 +952,27 @@ class RainbowDQNNetwork(nn.Module):
                                kernel_init=initializer)
         self._log_alpha = self.param('_log_alpha', nn.initializers.zeros_init(),
                                      ())
+        if self.r2_world_model_enabled:
+            self.r2_world_model = R2DreamerWorldModel(
+                embed_size=int(self.hidden_dim),
+                act_dim=self.num_actions,
+                stoch=self.r2_world_model_stoch,
+                deter=self.r2_world_model_deter,
+                hidden=self.r2_world_model_hidden,
+                discrete=self.r2_world_model_discrete,
+                units=self.r2_world_model_units,
+                blocks=self.r2_world_model_blocks,
+                dtype=jnp.float32,
+                name="r2_world_model",
+            )
+            self.r2_value_head = R2DreamerMLPHead(
+                1,
+                layers=3,
+                units=self.r2_world_model_units,
+                outscale=0.0,
+                dtype=jnp.float32,
+                name="r2_value",
+            )
 
     def entropy_scale(self):
         return jnp.exp(self._log_alpha)
@@ -473,6 +1005,11 @@ class RainbowDQNNetwork(nn.Module):
                                in_axes=(0, None))(representations, True)
         return predictions
 
+    def policy_logits_from_feature(self, feature, eval_mode=False):
+        """Apply the existing shared policy to a BBF representation."""
+        return self.policy(
+            nn.relu(self.policy_projection(feature, eval_mode)))
+
     def init_fn(
         self,
         x,
@@ -482,6 +1019,30 @@ class RainbowDQNNetwork(nn.Module):
         eval_mode=False,
     ):
         y = self(x, support, actions, do_rollout, eval_mode)
+        # These dummy calls exist only to materialize the auxiliary parameter
+        # subtrees during ``Module.init``. ``init_fn`` is also the hot BBF
+        # forward used by every real-data update, where tracing the 100M world
+        # model would be pure overhead.
+        if self.r2_world_model_enabled and self.is_initializing():
+            dummy_states = jnp.zeros((1, 1) + x.shape, dtype=x.dtype)
+            dummy_actions = jnp.zeros((1, 1, self.num_actions),
+                                      dtype=jnp.float32)
+            dummy_rewards = jnp.zeros((1, 1, 1), dtype=jnp.float32)
+            dummy_terminals = jnp.zeros((1, 1, 1), dtype=jnp.float32)
+            dummy_first = jnp.ones((1, 1, 1), dtype=jnp.float32)
+            dummy_stoch, dummy_deter = self.r2_world_model.initial(1)
+            self.r2_world_model_loss_from_states(
+                dummy_states,
+                dummy_actions,
+                dummy_rewards,
+                dummy_terminals,
+                dummy_first,
+                dummy_stoch,
+                dummy_deter,
+                jax.random.PRNGKey(0),
+                eval_mode=True,
+            )
+            self.r2_value(dummy_stoch, dummy_deter)
         return (
             y,
             self.policy(
@@ -502,6 +1063,160 @@ class RainbowDQNNetwork(nn.Module):
         #logits = self.policy(jax.lax.stop_gradient(nn.relu(self.encode_project(x, False))))
         return (logits,
                 jax.random.categorical(self.make_rng('action_sample'), logits))
+
+    def _require_r2_world_model(self):
+        if not self.r2_world_model_enabled:
+            raise ValueError("R2 world model is disabled.")
+
+    def r2_initial(self, batch_size):
+        self._require_r2_world_model()
+        return self.r2_world_model.initial(batch_size)
+
+    def r2_project_feature(self, stoch, deter):
+        """Project RSSM features into the existing BBF representation space."""
+        self._require_r2_world_model()
+        return self.r2_world_model.project_feature(stoch, deter)
+
+    def r2_shared_policy_logits(self, stoch, deter, eval_mode=False):
+        """Shared observation-policy logits evaluated on an RSSM feature."""
+        projected = self.r2_project_feature(stoch, deter)
+        return self.policy_logits_from_feature(projected, eval_mode)
+
+    def r2_value(self, stoch, deter):
+        """Normalized latent value; target params can provide the slow value."""
+        self._require_r2_world_model()
+        feature = self.r2_world_model.feature(stoch, deter)
+        return jnp.squeeze(self.r2_value_head(feature), axis=-1)
+
+    def r2_world_model_loss_from_states(
+        self,
+        states,
+        actions,
+        rewards,
+        terminals,
+        is_first,
+        initial_stoch,
+        initial_deter,
+        rng,
+        eval_mode=True,
+    ):
+        """Train the decoder-free world model from BBF state sequences."""
+        self._require_r2_world_model()
+        batch_size, batch_length = states.shape[:2]
+        flat_states = states.reshape(batch_size * batch_length,
+                                     *states.shape[2:])
+        flat_embed = jax.vmap(
+            lambda state: self.encode_project(state, eval_mode),
+            in_axes=0,
+            axis_name="r2_world_model_batch",
+        )(flat_states)
+        embed = flat_embed.reshape(batch_size, batch_length, -1)
+        loss, metrics, post_stoch, post_deter = self.r2_world_model.loss(
+            embed,
+            actions,
+            rewards,
+            terminals,
+            is_first,
+            (initial_stoch, initial_deter),
+            rng,
+        )
+        return loss, metrics, post_stoch, post_deter, embed
+
+    def r2_world_model_observe(
+        self,
+        state,
+        prev_action,
+        stoch,
+        deter,
+        is_first,
+        rng,
+        eval_mode=True,
+    ):
+        self._require_r2_world_model()
+        embed = jax.vmap(lambda x: self.encode_project(x, eval_mode),
+                         in_axes=0)(state)
+        return self.r2_world_model.observe_single(embed, prev_action, stoch,
+                                                  deter, is_first, rng)
+
+    def r2_imagine(
+        self,
+        initial_stoch,
+        initial_deter,
+        horizon,
+        rng,
+        eval_mode=False,
+    ):
+        """Roll out the RSSM prior under the existing shared discrete policy.
+
+        The caller owns gradient routing. In particular, callers can stop the
+        posterior start and all model outputs while retaining gradients through
+        the shared-policy log probabilities and the latent value head.
+        """
+        self._require_r2_world_model()
+        if horizon < 1:
+            raise ValueError(f"Expected a positive imagination horizon, got {horizon}")
+
+        stoch = initial_stoch
+        deter = initial_deter
+        keys = jax.random.split(rng, 2 * horizon)
+
+        stochs = [stoch]
+        deters = [deter]
+        projected_features = [self.r2_project_feature(stoch, deter)]
+        values = [self.r2_value(stoch, deter)]
+        actions = []
+        action_onehots = []
+        log_probs = []
+        entropies = []
+        rewards = []
+        continues = []
+
+        for i in range(horizon):
+            # Score-function actor gradients belong to the shared policy only.
+            # The projector and recurrent model are trained exclusively by the
+            # real-sequence world-model/bridge objectives.
+            actor_feature = jax.lax.stop_gradient(
+                self.r2_project_feature(stoch, deter))
+            logits = self.policy_logits_from_feature(actor_feature, eval_mode)
+            log_prob = jax.nn.log_softmax(logits, axis=-1)
+            probability = jax.nn.softmax(logits, axis=-1)
+            action = jax.random.categorical(keys[2 * i], logits, axis=-1)
+            action_onehot = jax.nn.one_hot(action,
+                                           self.num_actions,
+                                           dtype=jnp.float32)
+
+            next_stoch, next_deter, _ = self.r2_world_model.imagine_step(
+                stoch, deter, action_onehot, keys[2 * i + 1])
+
+            actions.append(action)
+            action_onehots.append(action_onehot)
+            log_probs.append(
+                jnp.take_along_axis(log_prob, action[..., None], axis=-1)[..., 0])
+            entropies.append(-jnp.sum(probability * log_prob, axis=-1))
+            rewards.append(
+                self.r2_world_model.reward_value(next_stoch, next_deter))
+            continues.append(
+                self.r2_world_model.continue_probability(next_stoch,
+                                                         next_deter))
+
+            stoch, deter = next_stoch, next_deter
+            stochs.append(stoch)
+            deters.append(deter)
+            projected_features.append(self.r2_project_feature(stoch, deter))
+            values.append(self.r2_value(stoch, deter))
+
+        return {
+            "stoch": jnp.stack(stochs, axis=1),
+            "deter": jnp.stack(deters, axis=1),
+            "projected_features": jnp.stack(projected_features, axis=1),
+            "actions": jnp.stack(actions, axis=1),
+            "action_onehot": jnp.stack(action_onehots, axis=1),
+            "log_probs": jnp.stack(log_probs, axis=1),
+            "entropies": jnp.stack(entropies, axis=1),
+            "rewards": jnp.stack(rewards, axis=1),
+            "continues": jnp.stack(continues, axis=1),
+            "values": jnp.stack(values, axis=1),
+        }
 
     def __call__(
         self,

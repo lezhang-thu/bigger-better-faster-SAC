@@ -1,0 +1,38 @@
+# Common R2-Dreamer settings for the Atari100k experiment ladder.
+# Load after bbf/configs/BBF-100K.gin and before exactly one stage file.
+
+# One 16x64 model update per 16 BBF gradient updates. At replay ratio 64 and
+# batch size 32 this processes 128 world-model time steps per environment step,
+# matching the standalone R2-Dreamer Atari100k train ratio.
+BBFAgent.r2_world_model_batch_size = 16
+BBFAgent.r2_world_model_batch_length = 64
+# Atari100k contributes about 100k regular rows plus separate reset rows. A
+# 125k ring retains essentially the whole run without reserving the ~30 GB of
+# host address space required by the historical 500k stacked-state buffer.
+BBFAgent.r2_world_model_replay_capacity = 125_000
+BBFAgent.r2_world_model_learning_rate = 0.00004
+BBFAgent.r2_world_model_beta1 = 0.9
+BBFAgent.r2_world_model_beta2 = 0.999
+BBFAgent.r2_world_model_eps = 0.00000000000000000001
+BBFAgent.r2_world_model_warmup = 1000
+BBFAgent.r2_world_model_agc = 0.3
+BBFAgent.r2_world_model_pmin = 0.001
+BBFAgent.r2_world_model_update_period = 16
+BBFAgent.r2_world_model_train_encoder = True
+BBFAgent.r2_control_learning_rate = 0.00004
+
+# R2-Dreamer size100M RSSM dimensions.
+BBFAgent.r2_world_model_stoch = 32
+BBFAgent.r2_world_model_deter = 6144
+BBFAgent.r2_world_model_hidden = 768
+BBFAgent.r2_world_model_discrete = 48
+BBFAgent.r2_world_model_units = 768
+BBFAgent.r2_world_model_blocks = 8
+
+# Shared imagination settings. Individual stages control whether the bridge,
+# value, and actor losses are active.
+BBFAgent.r2_imag_start_step = 10_000
+BBFAgent.r2_imag_pause_after_reset = 1000
+BBFAgent.r2_imag_lambda = 0.95
+BBFAgent.r2_imag_entropy_weight = 0.0003
+BBFAgent.r2_slow_value_fraction = 0.02
