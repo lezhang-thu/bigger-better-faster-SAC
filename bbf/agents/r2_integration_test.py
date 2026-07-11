@@ -17,7 +17,7 @@ from bbf.agents import spr_agent
 
 class R2IntegrationTest(unittest.TestCase):
 
-    def _network_and_params(self, enabled=True):
+    def _network_and_params(self, enabled=True, do_rollout=False):
         network = spr_networks.RainbowDQNNetwork(
             num_actions=4,
             num_atoms=11,
@@ -38,7 +38,7 @@ class R2IntegrationTest(unittest.TestCase):
             method=network.init_fn,
             x=jnp.zeros((16, 16, 4), dtype=jnp.float32),
             actions=jnp.zeros((2,), dtype=jnp.int32),
-            do_rollout=False,
+            do_rollout=do_rollout,
             support=jnp.linspace(-5.0, 5.0, 11),
         ))
         return network, params
@@ -66,7 +66,7 @@ class R2IntegrationTest(unittest.TestCase):
 
         grads = jax.grad(actor_loss)(params)["params"]
         self.assertGreater(self._tree_norm(grads["policy"]), 0.0)
-        self.assertGreater(self._tree_norm(grads["policy_projection"]), 0.0)
+        self.assertEqual(self._tree_norm(grads["policy_projection"]), 0.0)
         self.assertEqual(self._tree_norm(grads["r2_world_model"]), 0.0)
         self.assertEqual(self._tree_norm(grads["r2_value"]), 0.0)
         self.assertEqual(self._tree_norm(grads["encoder"]), 0.0)
@@ -80,49 +80,126 @@ class R2IntegrationTest(unittest.TestCase):
                     jax.tree_util.tree_leaves(baseline_subtree),
                     jax.tree_util.tree_leaves(integrated_subtree)):
                 np.testing.assert_array_equal(baseline_leaf, integrated_leaf)
+        self.assertNotIn("observation_adapter", integrated["params"])
+        self.assertNotIn("actor_bridge", integrated["params"])
+        self.assertIn("observation_adapter",
+                      integrated["params"]["r2_world_model"])
+        self.assertIn("actor_bridge",
+                      integrated["params"]["r2_world_model"])
+
+    def test_stage0_has_true_pre_abf_network_contract(self):
+        network, params = self._network_and_params(
+            enabled=False, do_rollout=True)
+        self.assertEqual(set(params["params"]), {
+            "_log_alpha",
+            "encoder",
+            "transition_model",
+            "projection",
+            "predictor",
+            "head",
+            "policy_projection",
+            "predict_policy",
+            "policy",
+        })
+        self.assertNotIn("representation_projection", params["params"])
+
+        state = jnp.arange(16 * 16 * 4, dtype=jnp.float32).reshape(16, 16, 4)
+        support = jnp.linspace(-5.0, 5.0, 11)
+        actions = jnp.asarray([0, 1], dtype=jnp.int32)
+        output, policy_logits = network.apply(
+            params,
+            state,
+            support,
+            actions,
+            True,
+            True,
+            method=network.init_fn,
+        )
+        encoded = network.apply(params, state, True, method=network.encode)
+        raw_representation = encoded.reshape(-1)
+        np.testing.assert_array_equal(output.representation,
+                                      raw_representation)
+
+        q_feature = network.apply(
+            params, raw_representation, True, method=network.project)
+        policy_feature = network.apply(
+            params,
+            raw_representation,
+            True,
+            method=lambda module, x, eval_mode: module.policy_projection(
+                x, eval_mode),
+        )
+        spr_target = network.apply(
+            params, state, True, method=network.encode_project)
+        np.testing.assert_array_equal(
+            spr_target, jnp.concatenate([q_feature, policy_feature], axis=-1))
+        self.assertEqual(spr_target.shape, (2 * network.hidden_dim,))
+
+        expected_policy_logits = network.apply(
+            params,
+            raw_representation,
+            True,
+            method=network.policy_logits_from_feature,
+        )
+        np.testing.assert_array_equal(policy_logits, expected_policy_logits)
+        self.assertEqual(output.latent.shape, (actions.shape[0],
+                                               2 * network.hidden_dim))
+
+    def test_spr_loss_normalizes_two_branches_independently(self):
+        predictions = jnp.asarray([[[3.0, 4.0, 0.0, 5.0]]])
+        targets = jnp.asarray([[[0.0, 5.0, 12.0, 0.0]]])
+        pred_branches = predictions.reshape(1, 1, 2, 2)
+        target_branches = targets.reshape(1, 1, 2, 2)
+        pred_branches /= jnp.linalg.norm(
+            pred_branches, axis=-1, keepdims=True)
+        target_branches /= jnp.linalg.norm(
+            target_branches, axis=-1, keepdims=True)
+        expected = jnp.square(pred_branches - target_branches).sum((-1, -2))
+        actual = spr_agent._two_branch_spr_loss(predictions, targets)
+        np.testing.assert_allclose(actual, expected)
 
     def test_post_adam_actor_step_scaling_distinguishes_ladder_stages(self):
         params = flax.core.FrozenDict({
-            "policy_projection": {"kernel": jnp.ones((3, 3))},
             "policy": {"kernel": jnp.ones((3, 2))},
             "r2_value": {"kernel": jnp.ones((3, 1))},
         })
-        optimizer = optax.adam(1e-3)
+        optimizer = optax.adam(0.1)
 
         def update(actor_scale):
             grads = jax.tree_util.tree_map(jnp.ones_like, params)
             grads = grads.copy(add_or_replace={
                 key: jax.tree_util.tree_map(
                     lambda grad: actor_scale * grad, grads[key])
-                for key in ("policy_projection", "policy")
+                for key in ("policy",)
             })
-            updated, _ = spr_agent._r2_control_optimizer_step(
+            updated, _, _ = spr_agent._r2_control_optimizer_step(
                 optimizer,
                 optimizer.init(params),
                 params,
                 grads,
                 actor_scale,
+                1.0,
             )
             return updated
 
-        stage4 = update(0.001)
-        stage5 = update(0.002)
-        stage4_delta = self._tree_norm(jax.tree_util.tree_map(
-            lambda old, new: new - old,
-            params["policy"], stage4["policy"]))
+        stage5 = update(1e-4)
+        stage6 = update(1e-3)
         stage5_delta = self._tree_norm(jax.tree_util.tree_map(
             lambda old, new: new - old,
             params["policy"], stage5["policy"]))
-        self.assertAlmostEqual(stage5_delta / stage4_delta, 2.0, places=3)
-        for stage4_leaf, stage5_leaf in zip(
-                jax.tree_util.tree_leaves(stage4["r2_value"]),
-                jax.tree_util.tree_leaves(stage5["r2_value"])):
-            np.testing.assert_allclose(stage4_leaf, stage5_leaf)
+        stage6_delta = self._tree_norm(jax.tree_util.tree_map(
+            lambda old, new: new - old,
+            params["policy"], stage6["policy"]))
+        self.assertAlmostEqual(stage6_delta / stage5_delta, 10.0, places=1)
+        for stage5_leaf, stage6_leaf in zip(
+                jax.tree_util.tree_leaves(stage5["r2_value"]),
+                jax.tree_util.tree_leaves(stage6["r2_value"])):
+            np.testing.assert_allclose(stage5_leaf, stage6_leaf)
 
     def test_world_model_only_aux_update_is_finite(self):
         network, params = self._network_and_params()
-        encoder_keys = ("encoder", "representation_projection")
-        control_keys = ("policy_projection", "policy", "r2_value")
+        encoder_keys = ("encoder",)
+        control_keys = ("policy", "r2_value")
         encoder_params = spr_agent._param_subset(params, encoder_keys)
         control_params = spr_agent._param_subset(params, control_keys)
         encoder_optimizer = spr_agent.create_scaling_optimizer(1e-4)
@@ -167,7 +244,7 @@ class R2IntegrationTest(unittest.TestCase):
             jax.random.PRNGKey(2),
             jnp.float32,
             True,
-            True,
+            False,
             False,
             False,
             0,
@@ -183,6 +260,7 @@ class R2IntegrationTest(unittest.TestCase):
             0.0,
             0.0,
             0.0,
+            1e-5,
             0.997,
             0.95,
             3e-4,
@@ -197,6 +275,16 @@ class R2IntegrationTest(unittest.TestCase):
             self.assertTrue(np.isfinite(np.asarray(value)).all())
         self.assertEqual(float(metrics["R2ImagActorGradNorm"]), 0.0)
         self.assertEqual(float(metrics["R2ValueGradNorm"]), 0.0)
+        self.assertEqual(float(metrics["R2EncoderUpdateEnabled"]), 0.0)
+        self.assertEqual(float(metrics["R2EncoderGradNorm"]), 0.0)
+        updated_params = result[0]
+        for key, original_subtree in params["params"].items():
+            if key == "r2_world_model":
+                continue
+            for original_leaf, updated_leaf in zip(
+                    jax.tree_util.tree_leaves(original_subtree),
+                    jax.tree_util.tree_leaves(updated_params["params"][key])):
+                np.testing.assert_array_equal(original_leaf, updated_leaf)
 
     def test_agent_collection_reaches_jitted_aux_update(self):
         gin.clear_config()
@@ -243,6 +331,7 @@ class R2IntegrationTest(unittest.TestCase):
             r2_imag_actor_weight=0.01,
             r2_imag_actor_grad_scale=0.1,
             r2_imag_start_step=0,
+            r2_actor_start_step=0,
             seed=5,
         )
         observation = np.zeros((1, 84, 84, 1), dtype=np.uint8)
@@ -261,15 +350,52 @@ class R2IntegrationTest(unittest.TestCase):
 
         self.assertEqual(agent._r2_replay.count(), 4)
         primary_rng = np.asarray(agent._rng).copy()
+        params_before_aux = agent.online_params
         agent._r2_aux_update()
         np.testing.assert_array_equal(agent._rng, primary_rng)
         self.assertEqual(agent.r2_update_count, 1)
         self.assertEqual(agent.r2_metrics["R2UpdateRan"], 1.0)
         self.assertEqual(agent.r2_metrics["R2ImagHorizon"], 2.0)
+        self.assertEqual(agent.r2_metrics["R2EncoderUpdateEnabled"], 0.0)
+        self.assertEqual(agent.r2_metrics["R2EncoderGradNorm"], 0.0)
         self.assertAlmostEqual(
             agent.r2_metrics["R2ImagActorStepScale"], 0.001)
+        self.assertLessEqual(
+            agent.r2_metrics["R2ImagActorUpdateRatio"],
+            agent.r2_actor_max_update_ratio * 1.0001)
+        self.assertGreaterEqual(
+            agent.r2_metrics["R2RealPolicyUpdateKL"], -1e-7)
+        for key, old_subtree in params_before_aux["params"].items():
+            if key in ("r2_world_model", "r2_value", "policy"):
+                continue
+            for old_leaf, new_leaf in zip(
+                    jax.tree_util.tree_leaves(old_subtree),
+                    jax.tree_util.tree_leaves(
+                        agent.online_params["params"][key])):
+                np.testing.assert_array_equal(old_leaf, new_leaf)
+        policy_delta = self._tree_norm(jax.tree_util.tree_map(
+            lambda old, new: new - old,
+            params_before_aux["params"]["policy"],
+            agent.online_params["params"]["policy"]))
+        self.assertGreater(policy_delta, 0.0)
         self.assertTrue(all(np.isfinite(value)
                             for value in agent.r2_metrics.values()))
+
+        # Stage 4 uses the same bridge/value/imagination path with actor weight
+        # zero. Every BBF-owned subtree must then remain byte-identical.
+        agent.r2_imag_actor_weight = 0.0
+        params_before_value_only = agent.online_params
+        agent._r2_aux_update()
+        for key, old_subtree in params_before_value_only["params"].items():
+            if key in ("r2_world_model", "r2_value"):
+                continue
+            for old_leaf, new_leaf in zip(
+                    jax.tree_util.tree_leaves(old_subtree),
+                    jax.tree_util.tree_leaves(
+                        agent.online_params["params"][key])):
+                np.testing.assert_array_equal(old_leaf, new_leaf)
+        self.assertEqual(agent.r2_metrics["R2ImagActorGradNorm"], 0.0)
+        self.assertEqual(agent.r2_metrics["R2RealPolicyUpdateKL"], 0.0)
 
         # Match the runner ordering: preserve the final row, reset recurrent
         # state, then log/flush a distinct first row.

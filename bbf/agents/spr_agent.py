@@ -484,18 +484,57 @@ def _tree_l2_norm(tree):
                         for x in leaves))
 
 
+def _two_branch_spr_loss(predictions, targets):
+    """Original BBF SPR distance with separate Q and policy branches."""
+    branch_width = predictions.shape[-1] // 2
+    predictions = predictions.reshape(*predictions.shape[:-1], 2,
+                                      branch_width)
+    targets = targets.reshape(*targets.shape[:-1], 2, branch_width)
+    predictions = predictions / jnp.linalg.norm(
+        predictions, 2, -1, keepdims=True)
+    targets = targets / jnp.linalg.norm(targets, 2, -1, keepdims=True)
+    return jnp.power(predictions - targets, 2).sum((-1, -2))
+
+
 def _r2_control_optimizer_step(optimizer, optimizer_state, params, grads,
-                               actor_step_scale):
+                               actor_step_scale, actor_max_update_ratio):
     """Applies full value updates and explicitly scaled shared-actor updates."""
     updates, optimizer_state = optimizer.update(
         grads, optimizer_state, params=params)
-    updates = updates.copy(add_or_replace={
+    # The first actor rung may change only the final categorical policy layer.
+    # BBF remains the sole owner of its observation-side policy projection.
+    actor_keys = ("policy",)
+    scaled_actor_updates = {
         key: jax.tree_util.tree_map(
             lambda update: actor_step_scale * update,
             updates[key])
-        for key in ("policy_projection", "policy")
-    })
-    return optax.apply_updates(params, updates), optimizer_state
+        for key in actor_keys
+    }
+    candidate_norm = _tree_l2_norm(scaled_actor_updates)
+    actor_param_norm = _tree_l2_norm(
+        {key: params[key] for key in actor_keys})
+    max_update_norm = (actor_max_update_ratio *
+                       jnp.maximum(actor_param_norm, 1e-6))
+    bounded_scale = jnp.minimum(
+        1.0, max_update_norm / jnp.maximum(candidate_norm, 1e-16))
+    clip_scale = jnp.where(actor_max_update_ratio > 0.0,
+                           bounded_scale, 1.0)
+    applied_actor_updates = {
+        key: jax.tree_util.tree_map(
+            lambda update: clip_scale * update,
+            scaled_actor_updates[key])
+        for key in actor_keys
+    }
+    updates = updates.copy(add_or_replace=applied_actor_updates)
+    applied_norm = candidate_norm * clip_scale
+    update_ratio = applied_norm / jnp.maximum(actor_param_norm, 1e-6)
+    stats = {
+        "R2ImagActorCandidateUpdateNorm": candidate_norm,
+        "R2ImagActorAppliedUpdateNorm": applied_norm,
+        "R2ImagActorUpdateRatio": update_ratio,
+        "R2ImagActorClipScale": clip_scale,
+    }
+    return (optax.apply_updates(params, updates), optimizer_state, stats)
 
 
 def r2_lambda_return(rewards, continues, values, discount, lambd):
@@ -567,6 +606,7 @@ def r2_aux_train(
     imag_value_weight,
     imag_actor_weight,
     imag_actor_grad_scale,
+    actor_max_update_ratio,
     discount,
     imag_lambda,
     imag_entropy_weight,
@@ -589,8 +629,11 @@ def r2_aux_train(
                         if imag_horizon > 0 else 0.0)
 
     def loss_fn(params):
+        model_params = params
+        if not train_shared_encoder:
+            model_params = _stop_param_subsets(params, ("encoder",))
         result = network_def.apply(
-            params,
+            model_params,
             states,
             actions,
             rewards,
@@ -602,12 +645,12 @@ def r2_aux_train(
             eval_mode=True,
             method=network_def.r2_world_model_loss_from_states,
         )
-        wm_loss, wm_metrics, post_stoch, post_deter, embed = result
+        wm_loss, wm_metrics, post_stoch, post_deter, representation = result
 
         flat_count = batch_size * batch_length
         flat_stoch = post_stoch.reshape(flat_count, *post_stoch.shape[2:])
         flat_deter = post_deter.reshape(flat_count, *post_deter.shape[2:])
-        flat_embed = embed.reshape(flat_count, -1)
+        flat_representation = representation.reshape(flat_count, -1)
         stopped_stoch = jax.lax.stop_gradient(flat_stoch)
         stopped_deter = jax.lax.stop_gradient(flat_deter)
         zero = jnp.asarray(0.0, dtype=jnp.float32)
@@ -619,7 +662,7 @@ def r2_aux_train(
         if bridge_enabled or latent_value_enabled:
             real_logits = network_def.apply(
                 params,
-                jax.lax.stop_gradient(flat_embed),
+                jax.lax.stop_gradient(flat_representation),
                 eval_mode=True,
                 method=network_def.policy_logits_from_feature,
             )
@@ -631,8 +674,8 @@ def r2_aux_train(
                 params, ("policy_projection", "policy"))
             latent_logits = network_def.apply(
                 bridge_params,
-                flat_stoch,
-                flat_deter,
+                stopped_stoch,
+                stopped_deter,
                 method=network_def.r2_shared_policy_logits,
             )
             real_prob = jax.lax.stop_gradient(
@@ -768,23 +811,23 @@ def r2_aux_train(
             "R2AuxLoss": total_loss,
         })
         aux = (metrics, post_stoch, post_deter, imag_return_low,
-               imag_return_high)
+               imag_return_high,
+               jax.lax.stop_gradient(flat_representation))
         return total_loss, aux
 
     (_, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(online_params)
-    metrics, post_stoch, post_deter, return_ema_low, return_ema_high = aux
+    (metrics, post_stoch, post_deter, return_ema_low, return_ema_high,
+     real_policy_feature) = aux
     metrics = dict(metrics)
     metrics.update({
         "R2WMGradNorm": _tree_l2_norm(
             grads["params"]["r2_world_model"]),
-        "R2EncoderGradNorm": _tree_l2_norm({
-            key: grads["params"][key]
-            for key in ("encoder", "representation_projection")
-        }),
-        "R2ImagActorGradNorm": _tree_l2_norm({
-            key: grads["params"][key]
-            for key in ("policy_projection", "policy")
-        }),
+        "R2EncoderGradNorm": _tree_l2_norm(
+            grads["params"]["encoder"]),
+        "R2EncoderUpdateEnabled": jnp.asarray(train_shared_encoder,
+                                               dtype=jnp.float32),
+        "R2ImagActorGradNorm": _tree_l2_norm(
+            grads["params"]["policy"]),
         "R2ValueGradNorm": _tree_l2_norm(
             grads["params"]["r2_value"]),
         "R2ImagActorStepScale": jnp.asarray(actor_step_scale,
@@ -809,33 +852,57 @@ def r2_aux_train(
         "r2_world_model": optax.apply_updates(wm_params, wm_updates)
     }
 
-    encoder_keys = ("encoder", "representation_projection")
-    encoder_params = _param_subset(online_params, encoder_keys)
-    encoder_grads = FrozenDict(
-        {key: grads["params"][key] for key in encoder_keys})
-    encoder_updates, encoder_optimizer_state = encoder_optimizer.update(
-        encoder_grads, encoder_optimizer_state, params=encoder_params)
-    updated_encoder = optax.apply_updates(encoder_params, encoder_updates)
+    encoder_keys = ("encoder",)
     if train_shared_encoder:
+        encoder_params = _param_subset(online_params, encoder_keys)
+        encoder_grads = FrozenDict(
+            {key: grads["params"][key] for key in encoder_keys})
+        encoder_updates, encoder_optimizer_state = encoder_optimizer.update(
+            encoder_grads, encoder_optimizer_state, params=encoder_params)
+        updated_encoder = optax.apply_updates(encoder_params, encoder_updates)
         replacements.update(dict(updated_encoder))
 
-    control_keys = ("policy_projection", "policy", "r2_value")
+    control_keys = ("policy", "r2_value")
     control_params = _param_subset(online_params, control_keys)
     control_grads = FrozenDict(
         {key: grads["params"][key] for key in control_keys})
     # Adam is nearly invariant to multiplying a loss by a positive scalar.
-    # Scale the *parameter step* as well so 0.01/0.02 are genuinely weak and
+    # Scale the *parameter step* as well so ladder rungs are genuinely weak and
     # distinct actor interventions. The latent value keeps its full update.
-    updated_control, control_optimizer_state = _r2_control_optimizer_step(
-        control_optimizer,
-        control_optimizer_state,
-        control_params,
-        control_grads,
-        actor_step_scale,
-    )
+    updated_control, control_optimizer_state, actor_update_stats = (
+        _r2_control_optimizer_step(
+            control_optimizer,
+            control_optimizer_state,
+            control_params,
+            control_grads,
+            actor_step_scale,
+            actor_max_update_ratio,
+        ))
+    metrics.update(actor_update_stats)
     replacements.update(dict(updated_control))
 
+    old_online_params = online_params
     online_params = _replace_param_subsets(online_params, replacements)
+    real_policy_update_kl = jnp.asarray(0.0, dtype=jnp.float32)
+    if imag_horizon > 0:
+        old_logits = network_def.apply(
+            old_online_params,
+            real_policy_feature,
+            eval_mode=True,
+            method=network_def.policy_logits_from_feature,
+        )
+        new_logits = network_def.apply(
+            online_params,
+            real_policy_feature,
+            eval_mode=True,
+            method=network_def.policy_logits_from_feature,
+        )
+        old_prob = jax.lax.stop_gradient(jax.nn.softmax(old_logits, axis=-1))
+        real_policy_update_kl = jnp.mean(jnp.sum(
+            old_prob * (jax.nn.log_softmax(old_logits, axis=-1) -
+                        jax.nn.log_softmax(new_logits, axis=-1)),
+            axis=-1))
+    metrics["R2RealPolicyUpdateKL"] = real_policy_update_kl
     new_value_params = online_params["params"]["r2_value"]
     slow_value_params = jax.tree_util.tree_map(
         lambda slow, new: ((1.0 - slow_value_fraction) * slow +
@@ -1021,13 +1088,7 @@ def train(
                 target * jnp.log(target)).sum(-1)
 
             spr_predictions = spr_predictions.transpose(1, 0, 2)
-
-            spr_predictions = spr_predictions / jnp.linalg.norm(
-                spr_predictions, 2, -1, keepdims=True)
-
-            spr_targets = spr_targets / jnp.linalg.norm(
-                spr_targets, 2, -1, keepdims=True)
-            spr_loss = jnp.power(spr_predictions - spr_targets, 2).sum(-1)
+            spr_loss = _two_branch_spr_loss(spr_predictions, spr_targets)
             #logging.info("spr_loss.shape: {}".format(spr_loss.shape))
             spr_loss = (spr_loss * same_traj_mask.transpose(1, 0)).mean(0) * .5
             #logging.info("spr_loss.shape: {}".format(spr_loss.shape))
@@ -1094,9 +1155,11 @@ def train(
         # The BBF target owns Q/encoder/policy state only. R2 has its own slow
         # value target and does not need a second 100M-model Polyak update on
         # every real-data gradient step.
-        target_keys = tuple(
-            key for key in online_params["params"]
-            if key not in ("r2_world_model", "r2_value"))
+        target_keys = None
+        if "r2_world_model" in online_params["params"]:
+            target_keys = tuple(
+                key for key in online_params["params"]
+                if key not in ("r2_world_model", "r2_value"))
         target_update_step = functools.partial(
             interpolate_weights,
             keys=target_keys,
@@ -1368,7 +1431,7 @@ class BBFAgent(JaxDQNAgent):
         r2_world_model_discrete=48,
         r2_world_model_units=768,
         r2_world_model_blocks=8,
-        r2_world_model_train_encoder=True,
+        r2_world_model_train_encoder=False,
         r2_control_learning_rate=4e-5,
         r2_value_q_anchor_weight=0.0,
         r2_bridge_policy_consistency_weight=0.0,
@@ -1376,8 +1439,11 @@ class BBFAgent(JaxDQNAgent):
         r2_imag_value_weight=0.0,
         r2_imag_actor_weight=0.0,
         r2_imag_actor_grad_scale=0.0,
+        r2_actor_max_update_ratio=1e-5,
         r2_imag_start_step=10000,
         r2_imag_pause_after_reset=1000,
+        r2_actor_start_step=40000,
+        r2_actor_pause_after_reset=2000,
         r2_imag_lambda=0.95,
         r2_imag_entropy_weight=3e-4,
         r2_slow_value_fraction=0.02,
@@ -1466,8 +1532,11 @@ class BBFAgent(JaxDQNAgent):
         self.r2_imag_value_weight = float(r2_imag_value_weight)
         self.r2_imag_actor_weight = float(r2_imag_actor_weight)
         self.r2_imag_actor_grad_scale = float(r2_imag_actor_grad_scale)
+        self.r2_actor_max_update_ratio = float(r2_actor_max_update_ratio)
         self.r2_imag_start_step = int(r2_imag_start_step)
         self.r2_imag_pause_after_reset = int(r2_imag_pause_after_reset)
+        self.r2_actor_start_step = int(r2_actor_start_step)
+        self.r2_actor_pause_after_reset = int(r2_actor_pause_after_reset)
         self.r2_imag_lambda = float(r2_imag_lambda)
         self.r2_imag_entropy_weight = float(r2_imag_entropy_weight)
         self.r2_slow_value_fraction = float(r2_slow_value_fraction)
@@ -1476,6 +1545,7 @@ class BBFAgent(JaxDQNAgent):
         self._r2_replay_seed = r2_seed
         self._r2_rng = jax.random.PRNGKey(r2_seed)
         self._r2_imag_resume_step = self.r2_imag_start_step
+        self._r2_actor_resume_step = self.r2_actor_start_step
         self._r2_return_ema_low = jnp.asarray(0.0, dtype=jnp.float32)
         self._r2_return_ema_high = jnp.asarray(0.0, dtype=jnp.float32)
         self.log_every = 100 if log_every is None else max(1, int(log_every))
@@ -1607,14 +1677,12 @@ class BBFAgent(JaxDQNAgent):
             }
         })
 
-        head_keys = {
-            "representation_projection", "projection", "head", "predictor"
-        }
+        head_keys = {"projection", "head", "predictor"}
         head_mask = FrozenDict({
             "params": {k: k in head_keys for k in self.online_params["params"]}
         })
 
-        policy_key = {"policy_projection", "policy"}
+        policy_key = {"policy_projection", "policy", "predict_policy"}
         policy_mask = FrozenDict({
             "params": {
                 k: k in policy_key for k in self.online_params["params"]
@@ -1674,13 +1742,15 @@ class BBFAgent(JaxDQNAgent):
         if self.r2_world_model_enabled:
             self.r2wm_optimizer_state = r2_laprop_init(
                 self.online_params["params"]["r2_world_model"])
-            encoder_keys = ("encoder", "representation_projection")
-            encoder_params = _param_subset(self.online_params, encoder_keys)
-            self.r2_encoder_optimizer = create_scaling_optimizer(
-                learning_rate=self.encoder_learning_rate)
-            self.r2_encoder_optimizer_state = self.r2_encoder_optimizer.init(
-                encoder_params)
-            control_keys = ("policy_projection", "policy", "r2_value")
+            if self.r2_world_model_train_encoder:
+                encoder_keys = ("encoder",)
+                encoder_params = _param_subset(self.online_params,
+                                               encoder_keys)
+                self.r2_encoder_optimizer = create_scaling_optimizer(
+                    learning_rate=self.encoder_learning_rate)
+                self.r2_encoder_optimizer_state = (
+                    self.r2_encoder_optimizer.init(encoder_params))
+            control_keys = ("policy", "r2_value")
             control_params = _param_subset(self.online_params, control_keys)
             self.r2_control_optimizer = optax.adam(
                 self.r2_control_learning_rate)
@@ -1850,6 +1920,11 @@ class BBFAgent(JaxDQNAgent):
             self.r2_imag_horizon > 0 and
             self.training_steps >= self._r2_imag_resume_step)
         effective_horizon = self.r2_imag_horizon if imagination_active else 0
+        actor_active = (
+            effective_horizon > 0 and
+            self.training_steps >= self._r2_actor_resume_step)
+        effective_actor_weight = (
+            self.r2_imag_actor_weight if actor_active else 0.0)
         (
             self.online_params,
             self.r2wm_optimizer_state,
@@ -1897,8 +1972,9 @@ class BBFAgent(JaxDQNAgent):
             self.r2_bridge_policy_consistency_weight,
             self.r2_value_q_anchor_weight,
             self.r2_imag_value_weight,
-            self.r2_imag_actor_weight,
+            effective_actor_weight,
             self.r2_imag_actor_grad_scale,
+            self.r2_actor_max_update_ratio,
             self.gamma,
             self.r2_imag_lambda,
             self.r2_imag_entropy_weight,
@@ -1923,6 +1999,7 @@ class BBFAgent(JaxDQNAgent):
             "R2UpdateFraction": (
                 self.r2_update_count / self.r2_scheduled_update_count),
             "R2ImagHorizon": float(effective_horizon),
+            "R2ImagActorEnabled": float(actor_active),
         })
         self.r2_metrics = host_metrics
         if self.r2_update_count % self.log_every == 0:
@@ -2033,8 +2110,7 @@ class BBFAgent(JaxDQNAgent):
         self._rng, reset_rng = jax.random.split(self._rng, 2)
 
         #keys_to_copy = ("encoder", "transition_model")
-        keys_to_copy = ("encoder", "transition_model",
-                        "representation_projection", "_log_alpha")
+        keys_to_copy = ("encoder", "transition_model", "_log_alpha")
         if self.r2_world_model_enabled:
             # Preserve learned dynamics across BBF plasticity resets. The
             # policy-dependent latent value is intentionally recalibrated.
@@ -2062,7 +2138,7 @@ class BBFAgent(JaxDQNAgent):
         )
 
         if self.r2_world_model_enabled:
-            control_keys = ("policy_projection", "policy", "r2_value")
+            control_keys = ("policy", "r2_value")
             self.r2_control_optimizer_state = self.r2_control_optimizer.init(
                 _param_subset(self.online_params, control_keys))
             self.r2_slow_value_params = copy.deepcopy(
@@ -2070,6 +2146,10 @@ class BBFAgent(JaxDQNAgent):
             self._r2_imag_resume_step = max(
                 self.r2_imag_start_step,
                 self.training_steps + self.r2_imag_pause_after_reset,
+            )
+            self._r2_actor_resume_step = max(
+                self.r2_actor_start_step,
+                self.training_steps + self.r2_actor_pause_after_reset,
             )
 
         self.cycle_grad_steps = 0

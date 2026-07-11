@@ -1,4 +1,4 @@
-# Stage 0: exact BBF/SAC baseline. All R2 paths are disabled.
+# Stage 0: true pre-abf7870 BBF/SAC algorithm (2634d962). All R2 paths are off.
 BBFAgent.r2_world_model_enabled = False
 BBFAgent.r2_control_bridge_enabled = False
 BBFAgent.r2_latent_value_enabled = False

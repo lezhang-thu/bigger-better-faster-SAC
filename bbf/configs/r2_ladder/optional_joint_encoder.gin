@@ -1,0 +1,6 @@
+# Optional diagnostic, loaded after common.gin and a numbered stage.
+# This recovers the shared-encoder ownership used by the periodic-WM prototype,
+# but is not part of the default ladder because it changes BBF's acting/Q
+# representation before imagined control is enabled. BBF projection heads stay
+# read-only; the observation adapter remains R2-owned.
+BBFAgent.r2_world_model_train_encoder = True

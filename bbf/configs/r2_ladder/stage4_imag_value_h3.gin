@@ -1,11 +1,10 @@
-# Stage 2: align the R2 projector with the shared actor representation and
-# train latent value from the stopped BBF target-Q expectation. No imagination.
+# Stage 4: horizon-3 rollouts train latent value, but cannot update the actor.
 BBFAgent.r2_world_model_enabled = True
 BBFAgent.r2_control_bridge_enabled = True
 BBFAgent.r2_latent_value_enabled = True
 BBFAgent.r2_value_q_anchor_weight = 1.0
 BBFAgent.r2_bridge_policy_consistency_weight = 1.0
-BBFAgent.r2_imag_horizon = 0
-BBFAgent.r2_imag_value_weight = 0.0
+BBFAgent.r2_imag_horizon = 3
+BBFAgent.r2_imag_value_weight = 0.1
 BBFAgent.r2_imag_actor_weight = 0.0
 BBFAgent.r2_imag_actor_grad_scale = 0.0

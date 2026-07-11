@@ -1,10 +1,11 @@
-# Stage 3: horizon-3 rollouts train latent value, but cannot update the actor.
+# Stage 3: add a latent value trained toward the stopped BBF target-Q
+# expectation. There is still no imagination and no shared-actor update.
 BBFAgent.r2_world_model_enabled = True
 BBFAgent.r2_control_bridge_enabled = True
 BBFAgent.r2_latent_value_enabled = True
 BBFAgent.r2_value_q_anchor_weight = 1.0
 BBFAgent.r2_bridge_policy_consistency_weight = 1.0
-BBFAgent.r2_imag_horizon = 3
-BBFAgent.r2_imag_value_weight = 1.0
+BBFAgent.r2_imag_horizon = 0
+BBFAgent.r2_imag_value_weight = 0.0
 BBFAgent.r2_imag_actor_weight = 0.0
 BBFAgent.r2_imag_actor_grad_scale = 0.0

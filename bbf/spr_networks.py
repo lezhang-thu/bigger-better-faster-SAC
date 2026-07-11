@@ -730,9 +730,14 @@ class R2DreamerProjector(nn.Module):
 
 
 class R2DreamerWorldModel(nn.Module):
-    """Decoder-free R2-Dreamer world model over the BBF representation."""
+    """Decoder-free R2-Dreamer world model attached after the BBF encoder.
+
+    Both adapters in this module are R2-owned.  In particular, neither is part
+    of the observation-side BBF Q or actor path when the world model is off.
+    """
 
     embed_size: int
+    policy_feature_size: int
     act_dim: int
     stoch: int = 32
     deter: int = 6144
@@ -756,6 +761,11 @@ class R2DreamerWorldModel(nn.Module):
     initializer: Any = _r2_initializer()
 
     def setup(self):
+        self.observation_adapter = R2DreamerProjector(
+            self.embed_size,
+            dtype=jnp.float32,
+            initializer=self.initializer,
+        )
         self.rssm = R2DreamerRSSM(
             embed_size=self.embed_size,
             act_dim=self.act_dim,
@@ -774,6 +784,11 @@ class R2DreamerWorldModel(nn.Module):
         self.projector = R2DreamerProjector(self.embed_size,
                                             dtype=jnp.float32,
                                             initializer=self.initializer)
+        self.actor_bridge = R2DreamerProjector(
+            self.policy_feature_size,
+            dtype=jnp.float32,
+            initializer=self.initializer,
+        )
         self.reward = R2DreamerMLPHead(self.reward_bins,
                                        layers=1,
                                        units=self.units,
@@ -797,8 +812,14 @@ class R2DreamerWorldModel(nn.Module):
     def feature(self, stoch, deter):
         return self.rssm.get_feat(stoch, deter)
 
+    def encode_observation(self, representation):
+        return self.observation_adapter(representation)
+
     def project_feature(self, stoch, deter):
         return self.projector(self.feature(stoch, deter))
+
+    def actor_feature(self, stoch, deter):
+        return self.actor_bridge(self.feature(stoch, deter))
 
     def reward_value(self, stoch, deter):
         logits = self.reward(self.feature(stoch, deter))
@@ -815,7 +836,9 @@ class R2DreamerWorldModel(nn.Module):
     def imagine_step(self, stoch, deter, action, rng):
         return self.rssm.img_step(stoch, deter, action, rng)
 
-    def loss(self, embed, action, reward, terminal, is_first, initial, rng):
+    def loss(self, representation, action, reward, terminal, is_first, initial,
+             rng):
+        embed = self.encode_observation(representation)
         batch_size, batch_length = embed.shape[:2]
         post_stoch, post_deter, post_logit = self.rssm.observe(
             embed, action, initial, is_first, rng)
@@ -926,11 +949,6 @@ class RainbowDQNNetwork(nn.Module):
             dtype=jnp.float32,
             initializer=initializer,
         )
-        self.representation_projection = FeatureLayer(
-            int(self.hidden_dim),
-            dtype=jnp.float32,
-            initializer=initializer,
-        )
         self.predictor = nn.Dense(int(self.hidden_dim),
                                   dtype=jnp.float32,
                                   kernel_init=initializer)
@@ -947,6 +965,9 @@ class RainbowDQNNetwork(nn.Module):
             dtype=jnp.float32,
             initializer=initializer,
         )
+        self.predict_policy = nn.Dense(int(self.hidden_dim),
+                                       dtype=jnp.float32,
+                                       kernel_init=initializer)
         self.policy = nn.Dense(self.num_actions,
                                dtype=jnp.float32,
                                kernel_init=initializer)
@@ -955,6 +976,7 @@ class RainbowDQNNetwork(nn.Module):
         if self.r2_world_model_enabled:
             self.r2_world_model = R2DreamerWorldModel(
                 embed_size=int(self.hidden_dim),
+                policy_feature_size=int(self.hidden_dim),
                 act_dim=self.num_actions,
                 stoch=self.r2_world_model_stoch,
                 deter=self.r2_world_model_deter,
@@ -985,17 +1007,21 @@ class RainbowDQNNetwork(nn.Module):
 
     def encode_project(self, x, eval_mode):
         latent = self.encode(x, eval_mode)
-        return self.represent(latent.reshape(-1), eval_mode)
+        representation = latent.reshape(-1)
+        return jnp.concatenate([
+            self.project(representation, eval_mode),
+            self.policy_projection(representation, eval_mode),
+        ], axis=-1)
 
     def project(self, x, eval_mode):
         projected = self.projection(x, eval_mode=eval_mode)
         return projected
 
-    def represent(self, x, eval_mode):
-        return self.representation_projection(x, eval_mode=eval_mode)
-
     def spr_predict(self, x, eval_mode):
-        return self.predictor(self.represent(x, eval_mode))
+        return jnp.concatenate([
+            self.predictor(self.project(x, eval_mode)),
+            self.predict_policy(self.policy_projection(x, eval_mode)),
+        ], axis=-1)
 
     def spr_rollout(self, latent, actions):
         _, pred_latents = self.transition_model(latent, actions)
@@ -1006,9 +1032,13 @@ class RainbowDQNNetwork(nn.Module):
         return predictions
 
     def policy_logits_from_feature(self, feature, eval_mode=False):
-        """Apply the existing shared policy to a BBF representation."""
+        """Apply the original BBF actor to a flattened CNN representation."""
         return self.policy(
             nn.relu(self.policy_projection(feature, eval_mode)))
+
+    def policy_logits_from_hidden(self, feature):
+        """Apply only the final shared policy layer to an actor hidden state."""
+        return self.policy(nn.relu(feature))
 
     def init_fn(
         self,
@@ -1042,6 +1072,7 @@ class RainbowDQNNetwork(nn.Module):
                 jax.random.PRNGKey(0),
                 eval_mode=True,
             )
+            self.r2_world_model.actor_feature(dummy_stoch, dummy_deter)
             self.r2_value(dummy_stoch, dummy_deter)
         return (
             y,
@@ -1057,7 +1088,6 @@ class RainbowDQNNetwork(nn.Module):
     def get_policy(self, x):
         x = self.encode(x, False)
         x = x.reshape(-1)
-        x = self.represent(x, False)
         #x = jax.lax.stop_gradient(x)
         logits = self.policy(nn.relu(self.policy_projection(x, False)))
         #logits = self.policy(jax.lax.stop_gradient(nn.relu(self.encode_project(x, False))))
@@ -1073,14 +1103,20 @@ class RainbowDQNNetwork(nn.Module):
         return self.r2_world_model.initial(batch_size)
 
     def r2_project_feature(self, stoch, deter):
-        """Project RSSM features into the existing BBF representation space."""
+        """Project RSSM features into the R2 Barlow embedding space."""
         self._require_r2_world_model()
         return self.r2_world_model.project_feature(stoch, deter)
 
+    def r2_actor_feature(self, stoch, deter):
+        """Bridge an RSSM feature to the input of BBF's final policy layer."""
+        self._require_r2_world_model()
+        return self.r2_world_model.actor_feature(stoch, deter)
+
     def r2_shared_policy_logits(self, stoch, deter, eval_mode=False):
-        """Shared observation-policy logits evaluated on an RSSM feature."""
-        projected = self.r2_project_feature(stoch, deter)
-        return self.policy_logits_from_feature(projected, eval_mode)
+        """Final shared-policy logits evaluated on an RSSM feature."""
+        del eval_mode
+        actor_feature = self.r2_actor_feature(stoch, deter)
+        return self.policy_logits_from_hidden(actor_feature)
 
     def r2_value(self, stoch, deter):
         """Normalized latent value; target params can provide the slow value."""
@@ -1105,14 +1141,15 @@ class RainbowDQNNetwork(nn.Module):
         batch_size, batch_length = states.shape[:2]
         flat_states = states.reshape(batch_size * batch_length,
                                      *states.shape[2:])
-        flat_embed = jax.vmap(
-            lambda state: self.encode_project(state, eval_mode),
+        flat_representation = jax.vmap(
+            lambda state: self.encode(state, eval_mode).reshape(-1),
             in_axes=0,
             axis_name="r2_world_model_batch",
         )(flat_states)
-        embed = flat_embed.reshape(batch_size, batch_length, -1)
+        representation = flat_representation.reshape(batch_size, batch_length,
+                                                      -1)
         loss, metrics, post_stoch, post_deter = self.r2_world_model.loss(
-            embed,
+            representation,
             actions,
             rewards,
             terminals,
@@ -1120,7 +1157,7 @@ class RainbowDQNNetwork(nn.Module):
             (initial_stoch, initial_deter),
             rng,
         )
-        return loss, metrics, post_stoch, post_deter, embed
+        return loss, metrics, post_stoch, post_deter, representation
 
     def r2_world_model_observe(
         self,
@@ -1133,8 +1170,10 @@ class RainbowDQNNetwork(nn.Module):
         eval_mode=True,
     ):
         self._require_r2_world_model()
-        embed = jax.vmap(lambda x: self.encode_project(x, eval_mode),
-                         in_axes=0)(state)
+        representation = jax.vmap(
+            lambda x: self.encode(x, eval_mode).reshape(-1),
+            in_axes=0)(state)
+        embed = self.r2_world_model.encode_observation(representation)
         return self.r2_world_model.observe_single(embed, prev_action, stoch,
                                                   deter, is_first, rng)
 
@@ -1162,7 +1201,6 @@ class RainbowDQNNetwork(nn.Module):
 
         stochs = [stoch]
         deters = [deter]
-        projected_features = [self.r2_project_feature(stoch, deter)]
         values = [self.r2_value(stoch, deter)]
         actions = []
         action_onehots = []
@@ -1173,11 +1211,11 @@ class RainbowDQNNetwork(nn.Module):
 
         for i in range(horizon):
             # Score-function actor gradients belong to the shared policy only.
-            # The projector and recurrent model are trained exclusively by the
-            # real-sequence world-model/bridge objectives.
+            # The actor bridge and recurrent model are trained exclusively by
+            # the real-sequence world-model/bridge objectives.
             actor_feature = jax.lax.stop_gradient(
-                self.r2_project_feature(stoch, deter))
-            logits = self.policy_logits_from_feature(actor_feature, eval_mode)
+                self.r2_actor_feature(stoch, deter))
+            logits = self.policy_logits_from_hidden(actor_feature)
             log_prob = jax.nn.log_softmax(logits, axis=-1)
             probability = jax.nn.softmax(logits, axis=-1)
             action = jax.random.categorical(keys[2 * i], logits, axis=-1)
@@ -1202,13 +1240,11 @@ class RainbowDQNNetwork(nn.Module):
             stoch, deter = next_stoch, next_deter
             stochs.append(stoch)
             deters.append(deter)
-            projected_features.append(self.r2_project_feature(stoch, deter))
             values.append(self.r2_value(stoch, deter))
 
         return {
             "stoch": jnp.stack(stochs, axis=1),
             "deter": jnp.stack(deters, axis=1),
-            "projected_features": jnp.stack(projected_features, axis=1),
             "actions": jnp.stack(actions, axis=1),
             "action_onehot": jnp.stack(action_onehots, axis=1),
             "log_probs": jnp.stack(log_probs, axis=1),
@@ -1227,7 +1263,7 @@ class RainbowDQNNetwork(nn.Module):
         eval_mode=False,
     ):
         spatial_latent = self.encode(x, eval_mode)
-        representation = self.represent(spatial_latent.reshape(-1), eval_mode)
+        representation = spatial_latent.reshape(-1)
         # Single hidden layer
         x = self.project(representation, eval_mode)
         x = nn.relu(x)

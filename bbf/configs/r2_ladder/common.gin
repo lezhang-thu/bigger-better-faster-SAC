@@ -18,7 +18,10 @@ BBFAgent.r2_world_model_warmup = 1000
 BBFAgent.r2_world_model_agc = 0.3
 BBFAgent.r2_world_model_pmin = 0.001
 BBFAgent.r2_world_model_update_period = 16
-BBFAgent.r2_world_model_train_encoder = True
+# Keep stages 1--4 behaviorally isolated from BBF. An R2-owned adapter maps the
+# raw BBF encoder output to the world-model embedding; its auxiliary loss does
+# not update the shared encoder unless the optional diagnostic is loaded.
+BBFAgent.r2_world_model_train_encoder = False
 BBFAgent.r2_control_learning_rate = 0.00004
 
 # R2-Dreamer size100M RSSM dimensions.
@@ -33,6 +36,11 @@ BBFAgent.r2_world_model_blocks = 8
 # value, and actor losses are active.
 BBFAgent.r2_imag_start_step = 10_000
 BBFAgent.r2_imag_pause_after_reset = 1000
+# Actor intervention is a later gate than imagined-value learning and receives
+# a longer recovery pause after each BBF plasticity reset.
+BBFAgent.r2_actor_start_step = 40_000
+BBFAgent.r2_actor_pause_after_reset = 2000
+BBFAgent.r2_actor_max_update_ratio = 0.00001
 BBFAgent.r2_imag_lambda = 0.95
 BBFAgent.r2_imag_entropy_weight = 0.0003
 BBFAgent.r2_slow_value_fraction = 0.02

@@ -1,10 +1,12 @@
-# Stage 4: weak shared-actor improvement from horizon-3 imagined rollouts.
+# Optional stage 6: increase the post-Adam actor step from 1e-4 to 1e-3 after
+# stage 5 passes the multi-game, matched-seed promotion gate. The actor loss
+# weight stays fixed so this isolates only the applied step size.
 BBFAgent.r2_world_model_enabled = True
 BBFAgent.r2_control_bridge_enabled = True
 BBFAgent.r2_latent_value_enabled = True
 BBFAgent.r2_value_q_anchor_weight = 1.0
 BBFAgent.r2_bridge_policy_consistency_weight = 1.0
 BBFAgent.r2_imag_horizon = 3
-BBFAgent.r2_imag_value_weight = 1.0
+BBFAgent.r2_imag_value_weight = 0.1
 BBFAgent.r2_imag_actor_weight = 0.01
 BBFAgent.r2_imag_actor_grad_scale = 0.1
