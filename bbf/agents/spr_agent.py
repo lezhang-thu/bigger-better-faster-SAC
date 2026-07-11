@@ -1,6 +1,5 @@
 # coding=utf-8
 
-import sys
 import collections
 import random
 import copy
@@ -76,6 +75,89 @@ def softmax_cross_entropy_loss_with_logits(labels: jnp.array,
     return -jnp.sum(labels * flax.linen.log_softmax(logits))
 
 
+def sigmoid_binary_cross_entropy(logits, labels):
+    """Numerically stable sigmoid cross entropy."""
+    return jnp.maximum(logits, 0) - logits * labels + jnp.log1p(
+        jnp.exp(-jnp.abs(logits)))
+
+
+def masked_mean(values, mask, eps=1e-6):
+    mask = mask.astype(jnp.float32)
+    return jnp.sum(values * mask) / (jnp.sum(mask) + eps)
+
+
+def weighted_barlow_twins_loss(predictions,
+                               targets,
+                               mask,
+                               lambd=5e-4,
+                               eps=1e-5):
+    """Barlow Twins loss over valid predicted/target latent pairs."""
+    predictions = predictions.reshape((-1, predictions.shape[-1]))
+    targets = targets.reshape((-1, targets.shape[-1]))
+    weights = mask.reshape((-1, 1)).astype(jnp.float32)
+    count = jnp.sum(weights) + eps
+
+    pred_mean = jnp.sum(predictions * weights, axis=0, keepdims=True) / count
+    targ_mean = jnp.sum(targets * weights, axis=0, keepdims=True) / count
+    pred_centered = predictions - pred_mean
+    targ_centered = targets - targ_mean
+    pred_std = jnp.sqrt(
+        jnp.sum(jnp.square(pred_centered) * weights, axis=0, keepdims=True) /
+        count + eps)
+    targ_std = jnp.sqrt(
+        jnp.sum(jnp.square(targ_centered) * weights, axis=0, keepdims=True) /
+        count + eps)
+    pred_norm = pred_centered / pred_std
+    targ_norm = targ_centered / targ_std
+
+    corr = (pred_norm * weights).T @ targ_norm / count
+    diag = jnp.diag(corr)
+    eye = jnp.eye(corr.shape[0], dtype=corr.dtype)
+    invariance = jnp.sum(jnp.square(diag - 1.0))
+    redundancy = jnp.sum(jnp.square(corr * (1.0 - eye)))
+    return invariance + lambd * redundancy
+
+
+def lambda_return(rewards, continues, values, discount, lambd):
+    """Computes lambda returns for action-aligned imagined transitions.
+
+    Rewards and continuations at time t describe the transition caused by the
+    action at t. Values contain both the pre-action values and one final
+    post-action bootstrap. This explicit contract prevents a one-step shift.
+
+    Args:
+      rewards: Array with shape [B, H].
+      continues: Array with shape [B, H].
+      values: Array with shape [B, H + 1].
+      discount: Scalar discount.
+      lambd: Scalar lambda-return mixing coefficient.
+
+    Returns:
+      Array with shape [B, H].
+    """
+    if rewards.shape != continues.shape:
+        raise ValueError("rewards and continues must have identical shapes")
+    if (values.shape[:-1] != rewards.shape[:-1] or
+            values.shape[-1] != rewards.shape[-1] + 1):
+        raise ValueError("values must contain one more time step than rewards")
+
+    next_values = values[:, 1:]
+    inputs = rewards + continues * discount * (1.0 - lambd) * next_values
+    discounts = continues * discount * lambd
+
+    def scan_fn(carry, elems):
+        inp, disc = elems
+        ret = inp + disc * carry
+        return ret, ret
+
+    _, returns = jax.lax.scan(scan_fn,
+                              values[:, -1],
+                              (jnp.swapaxes(inputs, 0, 1),
+                               jnp.swapaxes(discounts, 0, 1)),
+                              reverse=True)
+    return jnp.swapaxes(returns, 0, 1)
+
+
 def prefetch_to_device(iterator, size):
     queue = collections.deque()
 
@@ -144,6 +226,7 @@ def interpolate_weights(
   Returns:
     A parameter dictionary of the same shape as the inputs.
   """
+    input_was_frozen = isinstance(old_params, FrozenDict)
     if strip_params_layer:
         old_params = old_params["params"]
         new_params = new_params["params"]
@@ -163,7 +246,8 @@ def interpolate_weights(
 
     if strip_params_layer:
         combined_params = {"params": combined_params}
-    return FrozenDict(combined_params)
+    return (FrozenDict(combined_params)
+            if input_was_frozen else combined_params)
 
 
 @functools.partial(
@@ -324,57 +408,54 @@ def exponential_decay_scheduler(decay_period,
     return scheduler
 
 
-@functools.partial(jax.jit, static_argnames=[
-    "network_def",
-    "eval_mode",
-])
-def select_action(
+@functools.partial(
+    jax.jit,
+    static_argnames=("network_def", "eval_mode"),
+)
+def select_rssm_action(
     network_def,
     params,
     state,
+    prev_rssm_state,
+    prev_action,
+    is_first,
     rng,
-    num_actions,
     eval_mode,
 ):
-    rng, key = jax.random.split(rng)
-    state = spr_networks.process_inputs(state,
-                                        rng=key,
-                                        data_augmentation=False,
-                                        dtype=jnp.float32)
-
-    #epsilon = jnp.where(eval_mode, 1e-3, 0)
-
-    def logits_w_samples(state, action_sample_key):
-        return network_def.apply(
-            params,
-            state,
-            rngs={"action_sample": action_sample_key},
-            method=network_def.get_policy,
-        )
-
-    rng, key = jax.random.split(key)
-    key = jax.random.split(key, state.shape[0])
-    logits, samples = jax.vmap(logits_w_samples, in_axes=0,
-                               axis_name="batch")(state, key)
-    new_actions = jnp.where(eval_mode, jnp.argmax(logits, axis=-1), samples)
-    return rng, new_actions, jax.nn.softmax(logits)
-
-    #best_actions = jnp.argmax(logits, axis=-1)
-
-    #rng, key0, key1 = jax.random.split(rng, num=3)
-    #p = jax.random.uniform(key0, shape=(state.shape[0],))
-    #new_actions = jnp.where(
-    #    p < epsilon,
-    #    jax.random.randint(
-    #        key1,
-    #        (state.shape[0],),
-    #        0,
-    #        num_actions,
-    #    ),
-    #    best_actions,
-    #)
-    ##return rng, new_actions, jax.nn.softmax(logits)
-    #return rng, samples, jax.nn.softmax(logits)
+    """Updates the online posterior and samples from the shared actor."""
+    rng, posterior_key, action_key = jax.random.split(rng, 3)
+    state = spr_networks.process_inputs(
+        state,
+        rng=posterior_key,
+        data_augmentation=False,
+        dtype=jnp.float32,
+    )
+    post, _ = network_def.apply(
+        params,
+        state,
+        prev_rssm_state,
+        prev_action,
+        is_first,
+        eval_mode,
+        rngs={"sample": posterior_key},
+        method=network_def.rssm_observe_step,
+    )
+    feature = network_def.apply(
+        params,
+        post,
+        method=network_def.rssm_feature,
+    )
+    logits = network_def.apply(
+        params,
+        feature,
+        eval_mode,
+        method=network_def.actor_from_rssm_feature,
+    )
+    if eval_mode:
+        actions = jnp.argmax(logits, axis=-1)
+    else:
+        actions = jax.random.categorical(action_key, logits)
+    return rng, actions, jax.nn.softmax(logits, axis=-1), post
 
 
 train_static_argnames = [
@@ -389,261 +470,577 @@ train_static_argnames = [
     'use_target_backups',
     'match_online_target_rngs',
     'target_eval_mode',
+    'world_model_weight',
+    'imag_horizon',
+    'rssm_burnin',
+    'target_action_selection',
 ]
 
 
 def train(
-    network_def,  # 0, static
-    online_params,  # 1
-    target_params,  # 2
-    optimizer,  # 3, static
-    optimizer_state,  # 4
-    raw_states,  # 5
-    actions,  # 6
-    raw_next_states,  # 7
-    rewards,  # 8
-    terminals,  # 9
-    same_traj_mask,  # 10
-    loss_weights,  # 11
-    support,  # 12
-    cumulative_gamma,  # 13
-    double_dqn,  # 14, static
-    distributional,  # 15, static
-    rng,  # 16
-    spr_weight,  # 17, static (gates rollouts)
-    data_augmentation,  # static
-    dtype,  # static
-    batch_size,  # static
-    use_target_backups,  # static
+    network_def,
+    online_params,
+    target_params,
+    optimizer,
+    optimizer_state,
+    raw_states,
+    actions,
+    raw_next_states,
+    td_returns,
+    one_step_rewards,
+    terminals,
+    same_traj_mask,
+    loss_weights,
+    support,
+    cumulative_gamma,
+    double_dqn,
+    distributional,
+    rng,
+    spr_weight,
+    data_augmentation,
+    dtype,
+    batch_size,
+    use_target_backups,
     target_update_tau,
     target_update_every,
     step,
-    match_online_target_rngs,  # static
-    target_eval_mode,  # static
-    #ent_targ,
+    match_online_target_rngs,
+    target_eval_mode,
     x_ent_coef,
+    world_model_weight,
+    reward_weight,
+    continue_weight,
+    barlow_weight,
+    barlow_lambd,
+    rssm_dyn_weight,
+    rssm_rep_weight,
+    rssm_burnin,
+    imag_horizon,
+    imag_actor_weight,
+    imag_value_weight,
+    imag_discount,
+    imag_lambda,
+    imag_entropy_weight,
+    imag_warmup_steps,
+    target_action_selection,
 ):
+    """Trains a shared RSSM actor with real C51 and imagined value critics.
 
-    @functools.partial(
-        jax.jit,
-        donate_argnums=(0,),
-    )
+    Replay rows follow (s_t, a_t, r_{t+1}, done_{t+1}). C51 is updated only
+    from replay data. The separate scalar value is updated only from imagined
+    lambda returns, and imagined transitions never enter prioritized replay.
+    """
+
+    del double_dqn, distributional, match_online_target_rngs
+
+    @functools.partial(jax.jit, donate_argnums=(0,))
     def train_one_batch(state, inputs):
-        """Runs a training step."""
-        # Unpack inputs from scan
-        (
-            online_params,
-            target_params,
-            optimizer_state,
-            rng,
-            step,
-        ) = state
+        (online_params, target_params, optimizer_state, rng, step) = state
         (
             raw_states,
             actions,
             raw_next_states,
-            rewards,
+            td_returns,
+            one_step_rewards,
             terminals,
             same_traj_mask,
             loss_weights,
             cumulative_gamma,
         ) = inputs
-        same_traj_mask = same_traj_mask[:, 1:]
-        rewards = rewards[:, 0]
-        terminals = terminals[:, 0]
-        cumulative_gamma = cumulative_gamma[:, 0]
 
-        rng, rng1, rng2 = jax.random.split(rng, num=3)
+        same_mask = same_traj_mask.astype(jnp.float32)
+        same_mask = same_mask.at[:, 0].set(1.0)
+        batch_indices = jnp.arange(raw_states.shape[0])[:, None]
+        last_valid = (
+            jnp.sum(same_mask > 0.5, axis=1).astype(jnp.int32) - 1)
+        last_valid = jnp.maximum(last_valid, 0)
+        # Ground C51 and the real actor at both a zero-context posterior and
+        # the longest valid recurrent posterior in each sampled sequence.
+        control_indices = jnp.stack(
+            [jnp.zeros_like(last_valid), last_valid], axis=1)
+        td_rewards = td_returns[batch_indices, control_indices]
+        td_terminals = terminals[batch_indices, control_indices]
+        td_cumulative_gamma = cumulative_gamma[
+            batch_indices, control_indices]
+        control_next_states = raw_next_states[
+            batch_indices, control_indices]
+
+        (
+            rng,
+            state_aug_key,
+            next_aug_key,
+            target_action_key,
+            loss_key,
+        ) = jax.random.split(rng, 5)
         states = spr_networks.process_inputs(
             raw_states,
-            rng=rng1,
+            rng=state_aug_key,
             data_augmentation=data_augmentation,
-            dtype=dtype)
+            dtype=dtype,
+        )
         next_states = spr_networks.process_inputs(
-            raw_next_states[:, 0],
-            rng=rng2,
+            control_next_states,
+            rng=next_aug_key,
             data_augmentation=data_augmentation,
             dtype=dtype,
         )
         current_state = states[:, 0]
 
-        # Split the current rng to update the rng after this call
-        rng, rng1, rng2 = jax.random.split(rng, num=3)
-
-        batch_rngs = jax.random.split(rng, num=states.shape[0])
-        if match_online_target_rngs:
-            target_rng = batch_rngs
-        else:
-            target_rng = jax.random.split(rng1, num=states.shape[0])
-        use_spr = spr_weight > 0
-
-        def policy_online(state, action_sample_key):
-            return network_def.apply(
-                online_params,
-                state,
-                rngs={"action_sample": action_sample_key},
-                method=network_def.get_policy,
-            )
-
-        def q_target(state):
-            return network_def.apply(
-                target_params,
-                state,
-                support=support,
-                eval_mode=target_eval_mode,
-            )
-
-        def encode_project(state):
-            return network_def.apply(
-                target_params,
-                state,
-                eval_mode=True,
-                method=network_def.encode_project,
-            )
-
-        def loss_fn(
-            params,
-            target,
-            spr_targets,
-            loss_multipliers,
-            key,
-        ):
-
-            def all_results(state, actions, do_rollout):
-                return network_def.apply(params,
-                                         state,
-                                         support,
-                                         actions,
-                                         do_rollout,
-                                         method=network_def.init_fn)
-
-            def policy_loss(q_values, logits, x_key):
-                samples = jax.random.categorical(x_key, logits)
-
-                log_prob = jax.nn.log_softmax(logits)
-                prob = jax.nn.softmax(logits)
-                q_values = q_values[samples] - (q_values * prob).sum()
-                ent_coef = network_def.apply(params,
-                                             method=network_def.entropy_scale)
-                x_ent = -(prob * log_prob).sum()
-                #if True:
-                if False:
-                    return -(jax.lax.stop_gradient(q_values) * log_prob[samples]
-                            ) + ent_coef * (-x_ent + ent_targ), x_ent
-                else:
-                    return -(jax.lax.stop_gradient(q_values) *
-                             log_prob[samples]) + x_ent_coef * (-x_ent), x_ent
-                    #return -(jax.lax.stop_gradient(q_values) *
-                    #         log_prob[samples]), x_ent
-
-            x, logits = jax.vmap(all_results,
-                                 in_axes=(0, 0, None),
-                                 axis_name="batch")(current_state,
-                                                    actions[:, :-1], use_spr)
-            spr_predictions = x.latent
-            q_logits = jnp.squeeze(x.logits)
-            chosen_action_logits = q_logits[jnp.arange(q_logits.shape[0]),
-                                            actions[:, 0]]
-            dqn_loss = jax.vmap(softmax_cross_entropy_loss_with_logits)(
-                target, chosen_action_logits)
-            td_error = dqn_loss + jnp.nan_to_num(
-                target * jnp.log(target)).sum(-1)
-
-            spr_predictions = spr_predictions.transpose(1, 0, 2)
-
-            spr_predictions = spr_predictions / jnp.linalg.norm(
-                spr_predictions, 2, -1, keepdims=True)
-
-            spr_targets = spr_targets / jnp.linalg.norm(
-                spr_targets, 2, -1, keepdims=True)
-            spr_loss = jnp.power(spr_predictions - spr_targets, 2).sum(-1)
-            #logging.info("spr_loss.shape: {}".format(spr_loss.shape))
-            spr_loss = (spr_loss * same_traj_mask.transpose(1, 0)).mean(0) * .5
-            #logging.info("spr_loss.shape: {}".format(spr_loss.shape))
-            #exit(0)
-            loss = dqn_loss + spr_weight * spr_loss
-            loss = loss_multipliers * loss
-
-            mean_loss = jnp.mean(loss)
-
-            x = jax.vmap(policy_loss, in_axes=0, axis_name="batch")(x.q_values,
-                                                                    logits, key)
-            aux_losses = {
-                "TotalLoss": jnp.mean(mean_loss),
-                "DQNLoss": jnp.mean(dqn_loss),
-                "TD Error": jnp.mean(td_error),
-                "SPRLoss": jnp.mean(spr_loss),
-                "ent": jnp.mean(x[1]),
-            }
-            return mean_loss + jnp.mean(loss_multipliers * x[0]), (aux_losses)
-
-        # Use the weighted mean loss for gradient computation.
-        target = jax.vmap(target_output,
-                          in_axes=(None, None, 0, 0, 0, None, 0, 0),
-                          axis_name="batch")(
-                              policy_online,
-                              q_target,
-                              next_states,
-                              rewards,
-                              terminals,
-                              support,
-                              cumulative_gamma,
-                              target_rng,
-                          )
-
-        future_states = states[:, 1:]
-        spr_targets = jax.vmap(jax.vmap(encode_project,
-                                        in_axes=0,
-                                        axis_name="time"),
-                               in_axes=0,
-                               axis_name="batch")(future_states)
-        spr_targets = spr_targets.transpose(1, 0, 2)
-
-        # Get the unweighted loss without taking its mean for updating priorities.
-        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-        x = jax.random.split(rng2, current_state.shape[0] + 1)
-        rng2 = x[0]
-        key = x[1:]
-        (_, aux_losses), grad = grad_fn(
-            online_params,
-            target,
-            spr_targets,
-            loss_weights,
-            key,
+        q_target_params = (
+            target_params if use_target_backups else online_params)
+        target_post, _ = network_def.apply(
+            q_target_params,
+            next_states,
+            True,
+            method=network_def.rssm_from_observation,
+        )
+        target_feature = network_def.apply(
+            q_target_params,
+            target_post,
+            method=network_def.rssm_feature,
+        )
+        target_feature = jax.lax.stop_gradient(target_feature)
+        target_q = network_def.apply(
+            q_target_params,
+            target_feature,
+            support,
+            target_eval_mode,
+            method=network_def.q_from_rssm_feature,
         )
 
-        updates, new_optimizer_state = optimizer.update(grad,
-                                                        optimizer_state,
-                                                        params=online_params)
-        new_online_params = optax.apply_updates(online_params, updates)
+        actor_target_params = (
+            target_params if target_action_selection else online_params)
+        target_policy_logits = network_def.apply(
+            actor_target_params,
+            target_feature,
+            target_eval_mode,
+            method=network_def.actor_from_rssm_feature,
+        )
+        if target_eval_mode:
+            next_actions = jnp.argmax(target_policy_logits, axis=-1)
+        else:
+            next_actions = jax.random.categorical(
+                target_action_key, target_policy_logits)
+        next_probabilities = jnp.take_along_axis(
+            target_q.probabilities,
+            next_actions[..., None, None],
+            axis=2,
+        )[:, :, 0]
+        gamma_with_terminal = (
+            td_cumulative_gamma *
+            (1.0 - td_terminals.astype(jnp.float32)))
+        target_supports = (
+            td_rewards[..., None] +
+            gamma_with_terminal[..., None] * support[None, None])
+        flat_target_supports = target_supports.reshape(
+            (-1, support.shape[0]))
+        flat_next_probabilities = next_probabilities.reshape(
+            (-1, support.shape[0]))
+        target = jax.vmap(
+            project_distribution,
+            in_axes=(0, 0, None),
+        )(flat_target_supports, flat_next_probabilities, support)
+        target = target.reshape(target_supports.shape)
+        target = jax.lax.stop_gradient(target)
 
-        optimizer_state = new_optimizer_state
-        online_params = new_online_params
+        if spr_weight > 0.0:
+            future_states = states[:, 1:]
+
+            def encode_project_target(observation):
+                return network_def.apply(
+                    target_params,
+                    observation,
+                    True,
+                    method=network_def.encode_project,
+                )
+
+            spr_targets = jax.vmap(
+                jax.vmap(encode_project_target, in_axes=0),
+                in_axes=0,
+            )(future_states)
+            spr_targets = jax.lax.stop_gradient(spr_targets)
+        else:
+            spr_targets = None
+
+        def loss_fn(params, key):
+            (
+                rssm_key,
+                real_actor_key,
+                imag_action_key,
+                imag_model_key,
+            ) = jax.random.split(key, 4)
+
+            embeds = network_def.apply(
+                params,
+                states,
+                False,
+                method=network_def.encode_rssm,
+            )
+            action_onehots = jax.nn.one_hot(
+                actions,
+                network_def.num_actions,
+                dtype=embeds.dtype,
+            )
+            prev_actions = jnp.concatenate(
+                [jnp.zeros_like(action_onehots[:, :1]),
+                 action_onehots[:, :-1]],
+                axis=1,
+            )
+            is_first = jnp.zeros_like(same_mask, dtype=jnp.bool_)
+            is_first = is_first.at[:, 0].set(True)
+            post, prior = network_def.apply(
+                params,
+                embeds,
+                prev_actions,
+                is_first,
+                False,
+                rngs={"sample": rssm_key},
+                method=network_def.rssm_observe,
+            )
+            post_features = network_def.apply(
+                params,
+                post,
+                method=network_def.rssm_feature,
+            )
+            prior_features = network_def.apply(
+                params,
+                prior,
+                method=network_def.rssm_feature,
+            )
+
+            control_feature = jax.lax.stop_gradient(
+                post_features[batch_indices, control_indices])
+            control_actions = actions[batch_indices, control_indices]
+            q_output = network_def.apply(
+                params,
+                control_feature,
+                support,
+                False,
+                method=network_def.q_from_rssm_feature,
+            )
+            chosen_logits = jnp.take_along_axis(
+                q_output.logits,
+                control_actions[..., None, None],
+                axis=2,
+            )[:, :, 0]
+            dqn_loss_per_position = -jnp.sum(
+                target * jax.nn.log_softmax(chosen_logits, axis=-1),
+                axis=-1,
+            )
+            dqn_loss = jnp.mean(dqn_loss_per_position, axis=1)
+            target_entropy_term = jnp.sum(
+                target * jnp.log(jnp.maximum(target, 1e-8)),
+                axis=-1,
+            )
+            td_error = jnp.mean(
+                dqn_loss_per_position + target_entropy_term, axis=1)
+
+            if spr_weight > 0.0:
+                def spr_result(observation, rollout_actions):
+                    return network_def.apply(
+                        params,
+                        observation,
+                        rollout_actions,
+                        False,
+                        method=network_def.spr_from_observation,
+                    )
+
+                spr_predictions = jax.vmap(
+                    spr_result,
+                    in_axes=(0, 0),
+                )(current_state, actions[:, :-1])
+                branch_shape = (
+                    *spr_predictions.shape[:-1],
+                    2,
+                    network_def.hidden_dim,
+                )
+                spr_predictions = spr_predictions.reshape(branch_shape)
+                normalized_targets = spr_targets.reshape(branch_shape)
+                spr_predictions = spr_predictions / jnp.maximum(
+                    jnp.linalg.norm(
+                        spr_predictions, axis=-1, keepdims=True),
+                    1e-8,
+                )
+                normalized_targets = normalized_targets / jnp.maximum(
+                    jnp.linalg.norm(
+                        normalized_targets, axis=-1, keepdims=True),
+                    1e-8,
+                )
+                spr_per_step = 0.5 * jnp.sum(
+                    jnp.square(spr_predictions - normalized_targets),
+                    axis=(-1, -2),
+                )
+                spr_valid = same_mask[:, 1:]
+                spr_loss = (
+                    jnp.sum(spr_per_step * spr_valid, axis=1) /
+                    jnp.maximum(jnp.sum(spr_valid, axis=1), 1.0))
+            else:
+                spr_loss = jnp.zeros_like(dqn_loss)
+
+            real_policy_logits = network_def.apply(
+                params,
+                control_feature,
+                False,
+                method=network_def.actor_from_rssm_feature,
+            )
+            real_log_probs = jax.nn.log_softmax(
+                real_policy_logits, axis=-1)
+            real_probs = jax.nn.softmax(real_policy_logits, axis=-1)
+            sampled_actions = jax.random.categorical(
+                real_actor_key, real_policy_logits)
+            sampled_q = jnp.take_along_axis(
+                q_output.q_values,
+                sampled_actions[..., None],
+                axis=-1,
+            )[:, :, 0]
+            q_baseline = jnp.sum(
+                real_probs * q_output.q_values, axis=-1)
+            real_advantage = jax.lax.stop_gradient(
+                sampled_q - q_baseline)
+            selected_log_prob = jnp.take_along_axis(
+                real_log_probs,
+                sampled_actions[..., None],
+                axis=-1,
+            )[:, :, 0]
+            real_entropy = -jnp.sum(
+                real_probs * real_log_probs, axis=-1)
+            real_actor_per_position = (
+                -real_advantage * selected_log_prob -
+                x_ent_coef * real_entropy)
+            real_actor_per_sample = jnp.mean(
+                real_actor_per_position, axis=1)
+
+            real_loss = jnp.mean(
+                loss_weights * (dqn_loss + spr_weight * spr_loss))
+            real_actor_loss = jnp.mean(
+                loss_weights * real_actor_per_sample)
+
+            _, dyn_kl, rep_kl = network_def.apply(
+                params,
+                post,
+                prior,
+                method=network_def.rssm_kl_loss,
+            )
+            dyn_loss = masked_mean(dyn_kl, same_mask)
+            rep_loss = masked_mean(rep_kl, same_mask)
+
+            barlow_predictions = network_def.apply(
+                params,
+                post_features,
+                False,
+                method=network_def.rssm_barlow_prediction,
+            )
+            barlow_loss = weighted_barlow_twins_loss(
+                barlow_predictions,
+                jax.lax.stop_gradient(embeds),
+                same_mask,
+                lambd=barlow_lambd,
+            )
+
+            if states.shape[1] > 1:
+                transition_mask = same_mask[:, :-1]
+                # A full-game boundary may replace the terminal observation
+                # with the next episode's reset frame. Use the action-aligned
+                # prior for terminal transitions and the posterior otherwise.
+                transition_features = jnp.where(
+                    (same_mask[:, 1:] > 0.5)[..., None],
+                    post_features[:, 1:],
+                    prior_features[:, 1:],
+                )
+                reward_predictions = network_def.apply(
+                    params,
+                    transition_features,
+                    method=network_def.reward_from_feature,
+                )
+                continue_logits = network_def.apply(
+                    params,
+                    transition_features,
+                    method=network_def.continue_from_feature,
+                )
+                reward_loss = masked_mean(
+                    jnp.square(
+                        reward_predictions - one_step_rewards[:, :-1]),
+                    transition_mask,
+                )
+                continue_loss = masked_mean(
+                    sigmoid_binary_cross_entropy(
+                        continue_logits, same_mask[:, 1:]),
+                    transition_mask,
+                )
+            else:
+                reward_loss = jnp.asarray(0.0, dtype=embeds.dtype)
+                continue_loss = jnp.asarray(0.0, dtype=embeds.dtype)
+
+            model_loss = (
+                rssm_dyn_weight * dyn_loss +
+                rssm_rep_weight * rep_loss +
+                reward_weight * reward_loss +
+                continue_weight * continue_loss +
+                barlow_weight * barlow_loss)
+
+            imag_actor_loss = jnp.asarray(0.0, dtype=embeds.dtype)
+            imag_value_loss = jnp.asarray(0.0, dtype=embeds.dtype)
+            imag_return_scale = jnp.asarray(1.0, dtype=embeds.dtype)
+            imag_weight_mean = jnp.asarray(0.0, dtype=embeds.dtype)
+            imagination_gate = jnp.asarray(
+                step >= imag_warmup_steps, dtype=embeds.dtype)
+
+            if imag_horizon > 0:
+                flat_start = jax.tree_util.tree_map(
+                    lambda value: value.reshape(
+                        (-1,) + value.shape[2:]),
+                    post,
+                )
+                flat_start = jax.tree_util.tree_map(
+                    jax.lax.stop_gradient, flat_start)
+                num_starts = flat_start.deter.shape[0]
+                action_keys = jax.random.split(
+                    imag_action_key, num_starts)
+                model_keys = jax.random.split(
+                    imag_model_key, num_starts)
+
+                def imagine_one(start_state, action_key, model_key):
+                    return network_def.apply(
+                        params,
+                        start_state,
+                        imag_horizon,
+                        False,
+                        rngs={
+                            "action_sample": action_key,
+                            "sample": model_key,
+                        },
+                        method=network_def.imagine_from_rssm,
+                    )
+
+                imagined = jax.vmap(imagine_one)(
+                    flat_start, action_keys, model_keys)
+                imag_features = jax.lax.stop_gradient(
+                    imagined["features"])
+                slow_values = network_def.apply(
+                    target_params,
+                    imag_features,
+                    method=network_def.value_from_feature,
+                )
+                slow_values = jax.lax.stop_gradient(slow_values)
+                imagined_rewards = jax.lax.stop_gradient(
+                    imagined["rewards"])
+                imagined_continues = jax.lax.stop_gradient(
+                    imagined["continues"])
+                imag_returns = lambda_return(
+                    imagined_rewards,
+                    imagined_continues,
+                    slow_values,
+                    imag_discount,
+                    imag_lambda,
+                )
+                imag_returns = jax.lax.stop_gradient(imag_returns)
+
+                start_mask = same_mask
+                if rssm_burnin > 0:
+                    burnin = min(rssm_burnin, start_mask.shape[1])
+                    start_mask = start_mask.at[:, :burnin].set(0.0)
+                start_mask = start_mask.reshape((-1, 1))
+                prefix = jnp.concatenate(
+                    [
+                        jnp.ones_like(imagined_continues[:, :1]),
+                        (imagined_continues[:, :-1] * imag_discount),
+                    ],
+                    axis=1,
+                )
+                imag_weights = (
+                    jnp.cumprod(prefix, axis=1) * start_mask)
+                imag_weights = jax.lax.stop_gradient(imag_weights)
+                weight_sum = jnp.sum(imag_weights) + 1e-6
+                return_mean = (
+                    jnp.sum(imag_weights * imag_returns) / weight_sum)
+                return_variance = (
+                    jnp.sum(
+                        imag_weights *
+                        jnp.square(imag_returns - return_mean)) /
+                    weight_sum)
+                imag_return_scale = jax.lax.stop_gradient(
+                    jnp.maximum(1.0, jnp.sqrt(return_variance + 1e-8)))
+
+                advantage = jax.lax.stop_gradient(
+                    (imag_returns - slow_values[:, :-1]) /
+                    imag_return_scale)
+                actor_objective = (
+                    imagined["log_probs"] * advantage +
+                    imag_entropy_weight * imagined["entropies"])
+                imag_actor_loss = (
+                    -jnp.sum(imag_weights * actor_objective) /
+                    weight_sum)
+
+                online_values = imagined["values"][:, :-1]
+                slow_consistency = slow_values[:, :-1]
+                value_error = 0.5 * (
+                    jnp.square(online_values - imag_returns) +
+                    jnp.square(online_values - slow_consistency))
+                imag_value_loss = (
+                    jnp.sum(imag_weights * value_error) /
+                    weight_sum)
+                imag_weight_mean = jnp.mean(imag_weights)
+                imag_actor_loss *= imagination_gate
+                imag_value_loss *= imagination_gate
+
+            total_loss = (
+                real_loss +
+                real_actor_loss +
+                world_model_weight * model_loss +
+                imag_actor_weight * imag_actor_loss +
+                imag_value_weight * imag_value_loss)
+            aux_losses = {
+                "TotalLoss": total_loss,
+                "DQNLoss": dqn_loss,
+                "TD Error": jnp.mean(td_error),
+                "SPRLoss": jnp.mean(spr_loss),
+                "RealActorLoss": real_actor_loss,
+                "ControlDepth": jnp.mean(last_valid.astype(jnp.float32)),
+                "WorldModelLoss": model_loss,
+                "RSSMDynamicsLoss": dyn_loss,
+                "RSSMRepresentationLoss": rep_loss,
+                "RewardLoss": reward_loss,
+                "ContinueLoss": continue_loss,
+                "BarlowLoss": barlow_loss,
+                "ImagActorLoss": imag_actor_loss,
+                "ImagValueLoss": imag_value_loss,
+                "ImagReturnScale": imag_return_scale,
+                "ImagWeight": imag_weight_mean,
+                "ImagEnabled": imagination_gate,
+                "ent": jnp.mean(real_entropy),
+            }
+            return total_loss, aux_losses
+
+        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+        (_, aux_losses), grad = grad_fn(
+            online_params, loss_key)
+        updates, new_optimizer_state = optimizer.update(
+            grad, optimizer_state, params=online_params)
+        new_online_params = optax.apply_updates(
+            online_params, updates)
 
         target_update_step = functools.partial(
             interpolate_weights,
             keys=None,
-            old_weight=1 - target_update_tau,
+            old_weight=1.0 - target_update_tau,
             new_weight=target_update_tau,
         )
-        target_params = jax.lax.cond(
+        new_target_params = jax.lax.cond(
             step % target_update_every == 0,
             target_update_step,
             lambda old, new: old,
             target_params,
-            online_params,
+            new_online_params,
         )
 
-        return (
-            (
-                online_params,
-                target_params,
-                optimizer_state,
-                rng2,
-                step + 1,
-            ),
-            aux_losses,
+        new_state = (
+            new_online_params,
+            new_target_params,
+            new_optimizer_state,
+            rng,
+            step + 1,
         )
+        return new_state, aux_losses
 
     init_state = (
         online_params,
@@ -652,36 +1049,32 @@ def train(
         rng,
         step,
     )
-    assert raw_states.shape[0] % batch_size == 0
+    if raw_states.shape[0] % batch_size:
+        raise ValueError("Grouped replay batch must divide by batch_size")
     num_batches = raw_states.shape[0] // batch_size
 
-    # debug - start
-    #print(" num_batches: {}\n batch_size: {}".format(num_batches, batch_size))
-    #print(" raw_policy_states: {}".format(raw_policy_states))
-    #exit(0)
-    # debug - end
+    def group(value):
+        return value.reshape(
+            num_batches, batch_size, *value.shape[1:])
 
     inputs = (
-        raw_states.reshape(num_batches, batch_size, *raw_states.shape[1:]),
-        actions.reshape(num_batches, batch_size, *actions.shape[1:]),
-        raw_next_states.reshape(num_batches, batch_size,
-                                *raw_next_states.shape[1:]),
-        rewards.reshape(num_batches, batch_size, *rewards.shape[1:]),
-        terminals.reshape(num_batches, batch_size, *terminals.shape[1:]),
-        same_traj_mask.reshape(num_batches, batch_size,
-                               *same_traj_mask.shape[1:]),
-        loss_weights.reshape(num_batches, batch_size, *loss_weights.shape[1:]),
-        cumulative_gamma.reshape(num_batches, batch_size,
-                                 *cumulative_gamma.shape[1:]),
+        group(raw_states),
+        group(actions),
+        group(raw_next_states),
+        group(td_returns),
+        group(one_step_rewards),
+        group(terminals),
+        group(same_traj_mask),
+        group(loss_weights),
+        group(cumulative_gamma),
     )
-
     (
         (
             online_params,
             target_params,
             optimizer_state,
-            rng,
-            step,
+            _,
+            _,
         ),
         aux_losses,
     ) = jax.lax.scan(train_one_batch, init_state, inputs)
@@ -690,32 +1083,9 @@ def train(
         online_params,
         target_params,
         optimizer_state,
-        {k: jnp.reshape(v, (-1,)) for k, v in aux_losses.items()},
+        {key: jnp.reshape(value, (-1,))
+         for key, value in aux_losses.items()},
     )
-
-
-def target_output(
-    policy_info,
-    target_network,
-    next_states,
-    rewards,
-    terminals,
-    support,
-    cumulative_gamma,
-    rng,
-):
-    gamma_with_terminal = (cumulative_gamma *
-                           (1.0 - terminals.astype(jnp.float32)))
-    target_dist = target_network(next_states)
-    _, next_qt_argmax = policy_info(next_states, rng)
-
-    # Compute the target Q-value distribution
-    probabilities = jnp.squeeze(target_dist.probabilities)
-    next_probabilities = probabilities[next_qt_argmax]
-    target_support = rewards + gamma_with_terminal * support
-    target = project_distribution(target_support, next_probabilities, support)
-
-    return jax.lax.stop_gradient(target)
 
 
 @gin.configurable
@@ -867,6 +1237,21 @@ class BBFAgent(JaxDQNAgent):
         match_online_target_rngs=True,
         target_eval_mode=False,
         offline_update_frac=0,
+        world_model_weight=0.0,
+        reward_weight=1.0,
+        continue_weight=1.0,
+        barlow_weight=0.05,
+        barlow_lambd=5e-4,
+        rssm_dyn_weight=1.0,
+        rssm_rep_weight=0.1,
+        rssm_burnin=1,
+        imag_horizon=0,
+        imag_actor_weight=0.0,
+        imag_value_weight=0.0,
+        imag_discount=None,
+        imag_lambda=0.95,
+        imag_entropy_weight=3e-4,
+        imag_warmup_steps=10_000,
         half_precision=False,
         seed=None,
         log_every=None,
@@ -900,6 +1285,7 @@ class BBFAgent(JaxDQNAgent):
         self.reset_target = reset_target
         self.reset_head = reset_head
         self.reset_projection = reset_projection
+        self.log_every = None if log_every is None else int(log_every)
         self.reset_encoder = reset_encoder
         self.offline_update_frac = float(offline_update_frac)
         self.no_resets_after = int(no_resets_after)
@@ -918,19 +1304,35 @@ class BBFAgent(JaxDQNAgent):
         self.shrink_factor = shrink_factor
         self.perturb_factor = perturb_factor
 
-        self.target_action_selection = target_action_selection
-        self.use_target_network = use_target_network
-        self.match_online_target_rngs = match_online_target_rngs
-        self.target_eval_mode = target_eval_mode
-
-        # debug - start
-        print('*' * 20)
-        print(' self.target_eval_mode: {}'.format(self.target_eval_mode))
-        print(' self.target_action_selection: {}'.format(
-            self.target_action_selection))
-        print(" num_actions: {}".format(num_actions))
-        print(" self.reset_target: {}".format(self.reset_target))
-        # debug - end
+        self.target_action_selection = bool(target_action_selection)
+        self.use_target_network = bool(use_target_network)
+        self.match_online_target_rngs = bool(match_online_target_rngs)
+        self.target_eval_mode = bool(target_eval_mode)
+        self.world_model_weight = float(world_model_weight)
+        self.reward_weight = float(reward_weight)
+        self.continue_weight = float(continue_weight)
+        self.barlow_weight = float(barlow_weight)
+        self.barlow_lambd = float(barlow_lambd)
+        self.rssm_dyn_weight = float(rssm_dyn_weight)
+        self.rssm_rep_weight = float(rssm_rep_weight)
+        self.rssm_burnin = int(rssm_burnin)
+        self.imag_horizon = int(imag_horizon)
+        self.imag_actor_weight = float(imag_actor_weight)
+        self.imag_value_weight = float(imag_value_weight)
+        self.imag_discount = None if imag_discount is None else float(
+            imag_discount)
+        self.imag_lambda = float(imag_lambda)
+        self.imag_entropy_weight = float(imag_entropy_weight)
+        self.imag_warmup_steps = int(imag_warmup_steps)
+        if self.rssm_burnin < 0 or self.imag_warmup_steps < 0:
+            raise ValueError(
+                "RSSM burn-in and imagination warm-up must be nonnegative")
+        logging.info(
+            "\t RSSM burn-in: %d, imagination horizon: %d, warm-up: %d",
+            self.rssm_burnin,
+            self.imag_horizon,
+            self.imag_warmup_steps,
+        )
 
         self.grad_steps = 0
         self.cycle_grad_steps = 0
@@ -945,7 +1347,8 @@ class BBFAgent(JaxDQNAgent):
             n_schedule = exponential_decay_scheduler(
                 cycle_steps, 0, 1,
                 self.update_horizon / self.max_update_horizon)
-            self.update_horizon_scheduler = lambda x: int(  # pylint: disable=g-long-lambda
+            # pylint: disable=g-long-lambda
+            self.update_horizon_scheduler = lambda x: int(
                 np.round(n_schedule(x) * self.max_update_horizon))
 
         self.max_target_update_tau = target_update_tau
@@ -972,6 +1375,8 @@ class BBFAgent(JaxDQNAgent):
             update_horizon=self.max_update_horizon,
             seed=seed,
         )
+        if self.imag_discount is None:
+            self.imag_discount = self.gamma
 
         self.set_replay_settings()
 
@@ -993,13 +1398,10 @@ class BBFAgent(JaxDQNAgent):
                                 static_argnames=train_static_argnames,
                                 device=jax.local_devices()[0])
 
-        # debug - start
         self.greedy_action = False
-        # debug - end
         self.stats_ent = 0
         self.explore_end_steps = explore_end_steps
-        print('explore_end_steps: {}'.format(explore_end_steps))
-        sys.stdout.flush()
+        logging.info("\t exploration schedule end: %s", explore_end_steps)
 
     def _build_networks_and_optimizer(self):
         self._rng, rng = jax.random.split(self._rng)
@@ -1014,7 +1416,9 @@ class BBFAgent(JaxDQNAgent):
                 method=self.network_def.init_fn,
                 x=self.state.astype(self.dtype),
                 actions=actions,
-                do_rollout=self.spr_weight > 0,
+                do_rollout=(self.spr_weight > 0 or
+                            self.world_model_weight > 0 or
+                            self.imag_horizon > 0),
                 support=self._support,
             ))
 
@@ -1023,7 +1427,10 @@ class BBFAgent(JaxDQNAgent):
             learning_rate=self.encoder_learning_rate,)
         policy_optim = create_scaling_optimizer(learning_rate=1e-4,)
 
-        encoder_keys = {"encoder", "transition_model"}
+        encoder_keys = {
+            "encoder", "transition_model", "rssm_embed_projection",
+            "rssm", "rssm_projector"
+        }
         encoder_mask = FrozenDict({
             "params": {
                 k: k in encoder_keys for k in self.online_params["params"]
@@ -1031,16 +1438,20 @@ class BBFAgent(JaxDQNAgent):
         })
 
         head_keys = {
-            "representation_projection", "projection", "head", "predictor"
+            "projection", "q_projection", "head", "predictor",
+            "reward_head", "continue_head", "value_head"
         }
         head_mask = FrozenDict({
             "params": {k: k in head_keys for k in self.online_params["params"]}
         })
 
-        policy_key = {"policy_projection", "policy"}
+        policy_keys = {
+            "policy_projection", "predict_policy", "actor_projection", "policy"
+        }
         policy_mask = FrozenDict({
             "params": {
-                k: k in policy_key for k in self.online_params["params"]
+                key: key in policy_keys
+                for key in self.online_params["params"]
             }
         })
 
@@ -1049,34 +1460,6 @@ class BBFAgent(JaxDQNAgent):
         alpha_mask = FrozenDict({
             "params": {k: k in alpha_key for k in self.online_params["params"]}
         })
-        #print(" alpha_mask:\n{}".format(alpha_mask))
-        #print(" policy_mask:\n{}".format(policy_mask))
-        #exit(0)
-
-        # debug - start
-        if False:
-            print(' self.head_mask: {}'.format(self.head_mask))
-            print(
-                ' jax.tree_util.tree_map(lambda x: x.shape, self.online_params["params"]["projection"]: {}'
-                .format(
-                    jax.tree_util.tree_map(
-                        lambda x: x.shape,
-                        self.online_params["params"]["projection"])))
-            print(
-                ' jax.tree_util.tree_map(lambda x: x.shape, self.online_params["params"]["predictor"]: {}'
-                .format(
-                    jax.tree_util.tree_map(
-                        lambda x: x.shape,
-                        self.online_params["params"]["predictor"])))
-            print(
-                ' jax.tree_util.tree_map(lambda x: x.shape, self.online_params["params"]["head"]: {}'
-                .format(
-                    jax.tree_util.tree_map(
-                        lambda x: x.shape,
-                        self.online_params["params"]["head"])))
-            #exit(0)
-        # debug - end
-
         self.optimizer = optax.chain(
             optax.masked(encoder_optimizer, encoder_mask),
             optax.masked(optimizer, head_mask),
@@ -1088,11 +1471,10 @@ class BBFAgent(JaxDQNAgent):
         self.target_network_params = copy.deepcopy(self.online_params)
         self.random_params = copy.deepcopy(self.online_params)
 
-        #print(' so far so good')
-        #exit(0)
-
     def _build_replay_buffer(self):
-        prioritized_buffer = subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
+        replay_cls = (subsequence_replay_buffer.
+                      PrioritizedJaxSubsequenceParallelEnvReplayBuffer)
+        prioritized_buffer = replay_cls(
             observation_shape=self.observation_shape,
             stack_size=self.stack_size,
             update_horizon=self.max_update_horizon,
@@ -1135,12 +1517,6 @@ class BBFAgent(JaxDQNAgent):
         self._num_updates_per_train_step = int(
             max(1, self._num_updates_per_train_step / self._batches_to_group))
 
-        # debug - start
-        print(
-            " self._num_updates_per_train_step: {}\n self._batches_to_group: {}"
-            .format(self._num_updates_per_train_step, self._batches_to_group))
-        #exit(0)
-        # debug - end
 
         logging.info(
             "\t Running %s groups of %s batch%s per %s env step%s",
@@ -1173,7 +1549,8 @@ class BBFAgent(JaxDQNAgent):
         samples = self._replay.sample_transition_batch(rng,
                                                        batch_size=batch_size,
                                                        subseq_len=subseq_len)
-        types = self._replay.get_transition_elements()
+        types = self._replay.get_transition_elements(
+            batch_size=batch_size, subseq_len=subseq_len)
         replay_elements = collections.OrderedDict()
         for element, element_type in zip(samples, types):
             replay_elements[element_type.name] = element
@@ -1205,8 +1582,10 @@ class BBFAgent(JaxDQNAgent):
 
         self._rng, reset_rng = jax.random.split(self._rng, 2)
 
-        #keys_to_copy = ("encoder", "transition_model")
-        keys_to_copy = ("encoder", "transition_model", "representation_projection", "_log_alpha")
+        keys_to_copy = ("encoder", "transition_model",
+                        "rssm_embed_projection",
+                        "rssm", "rssm_projector", "reward_head",
+                        "continue_head", "value_head", "_log_alpha")
         (
             self.online_params,
             self.target_network_params,
@@ -1220,7 +1599,8 @@ class BBFAgent(JaxDQNAgent):
             self.optimizer,
             reset_rng,
             self.state_shape,
-            self.spr_weight > 0,
+            (self.spr_weight > 0 or self.world_model_weight > 0 or
+             self.imag_horizon > 0),
             self._support,
             self.reset_target,
             self.shrink_perturb_keys,
@@ -1228,6 +1608,13 @@ class BBFAgent(JaxDQNAgent):
             self.perturb_factor,
             keys_to_copy,
         )
+
+        if hasattr(self, "rssm_state"):
+            n_envs = self.state.shape[0]
+            self.rssm_state = self._initial_rssm_state(n_envs)
+            self.rssm_prev_action = np.zeros(
+                (n_envs, self.num_actions), dtype=np.float32)
+            self.rssm_is_first = np.ones((n_envs,), dtype=np.bool_)
 
         self.cycle_grad_steps = 0
 
@@ -1280,6 +1667,7 @@ class BBFAgent(JaxDQNAgent):
             self.replay_elements["action"],
             self.replay_elements["next_state"],
             self.replay_elements["return"],
+            self.replay_elements["reward"],
             self.replay_elements["terminal"],
             self.replay_elements["same_trajectory"],
             loss_weights,
@@ -1298,8 +1686,23 @@ class BBFAgent(JaxDQNAgent):
             self.grad_steps,
             self.match_online_target_rngs,
             self.target_eval_mode,
-            #self.ent_targ,
             self.x_ent_coef,
+            self.world_model_weight,
+            self.reward_weight,
+            self.continue_weight,
+            self.barlow_weight,
+            self.barlow_lambd,
+            self.rssm_dyn_weight,
+            self.rssm_rep_weight,
+            self.rssm_burnin,
+            self.imag_horizon,
+            self.imag_actor_weight,
+            self.imag_value_weight,
+            self.imag_discount,
+            self.imag_lambda,
+            self.imag_entropy_weight,
+            self.imag_warmup_steps,
+            self.target_action_selection,
         )
         self.grad_steps += self._batches_to_group
         self.cycle_grad_steps += self._batches_to_group
@@ -1324,6 +1727,13 @@ class BBFAgent(JaxDQNAgent):
 
         priorities = np.sqrt(dqn_loss + 1e-10)
         self._replay.set_priority(indices, priorities)
+        if (self.log_every and
+                self.grad_steps % self.log_every < self._batches_to_group):
+            metrics = {
+                key: float(np.mean(np.asarray(value)))
+                for key, value in aux_losses.items()
+            }
+            logging.info("train metrics: %s", metrics)
 
         self.target_network_params = new_target_params
         self.online_params = new_online_params
@@ -1441,29 +1851,76 @@ class BBFAgent(JaxDQNAgent):
         self.state = np.roll(self.state, -1, axis=-1)
         self.state[Ellipsis, -1] = self._observation
 
+    def _initial_rssm_state(self, n_envs):
+        state = self.network_def.apply(
+            self.online_params,
+            n_envs,
+            method=self.network_def.rssm_initial,
+        )
+        return jax.tree_util.tree_map(np.asarray, state)
+
     def reset_all(self, new_obs):
-        """Resets the agent state by filling it with zeros."""
+        """Resets frame stacks and recurrent latent state for all envs."""
         n_envs = new_obs.shape[0]
         self.state = np.zeros((n_envs, *self.state_shape))
+        self.rssm_state = self._initial_rssm_state(n_envs)
+        self.rssm_prev_action = np.zeros(
+            (n_envs, self.num_actions), dtype=np.float32)
+        self.rssm_is_first = np.ones((n_envs,), dtype=np.bool_)
         self._record_observation(new_obs)
 
     def reset_one(self, env_id):
         self.state[env_id].fill(0)
+        fresh = self._initial_rssm_state(1)
+
+        def replace_one(current, initial):
+            current = np.array(current, copy=True)
+            current[env_id] = initial[0]
+            return current
+
+        self.rssm_state = jax.tree_util.tree_map(
+            replace_one, self.rssm_state, fresh)
+        self.rssm_prev_action[env_id].fill(0)
+        self.rssm_is_first[env_id] = True
 
     def delete_one(self, env_id):
         self.state = np.concatenate(
-            [self.state[:env_id], self.state[env_id + 1:]], 0)
+            [self.state[:env_id], self.state[env_id + 1:]], axis=0)
+        self.rssm_state = jax.tree_util.tree_map(
+            lambda value: np.concatenate(
+                [value[:env_id], value[env_id + 1:]], axis=0),
+            self.rssm_state,
+        )
+        self.rssm_prev_action = np.concatenate(
+            [self.rssm_prev_action[:env_id],
+             self.rssm_prev_action[env_id + 1:]],
+            axis=0,
+        )
+        self.rssm_is_first = np.concatenate(
+            [self.rssm_is_first[:env_id],
+             self.rssm_is_first[env_id + 1:]],
+            axis=0,
+        )
 
     def cache_train_state(self):
         self.training_state = (
             copy.deepcopy(self.state),
             copy.deepcopy(self._last_observation),
             copy.deepcopy(self._observation),
+            copy.deepcopy(self.rssm_state),
+            copy.deepcopy(self.rssm_prev_action),
+            copy.deepcopy(self.rssm_is_first),
         )
 
     def restore_train_state(self):
-        (self.state, self._last_observation,
-         self._observation) = (self.training_state)
+        (
+            self.state,
+            self._last_observation,
+            self._observation,
+            self.rssm_state,
+            self.rssm_prev_action,
+            self.rssm_is_first,
+        ) = self.training_state
 
     def log_transition(self, observation, action, reward, terminal,
                        episode_end):
@@ -1485,55 +1942,60 @@ class BBFAgent(JaxDQNAgent):
         select_params,
         eval_mode,
     ):
-        if not eval_mode and self.training_steps < self.min_replay_history:
-            self._rng, key = jax.random.split(self._rng)
-            return jax.random.randint(
-                key,
+        self._rng, policy_action, probs, posterior = select_rssm_action(
+            self.network_def,
+            select_params,
+            state,
+            self.rssm_state,
+            self.rssm_prev_action,
+            self.rssm_is_first,
+            self._rng,
+            eval_mode,
+        )
+        self.rssm_state = jax.tree_util.tree_map(
+            np.asarray, posterior)
+
+        in_random_warmup = (
+            not eval_mode and
+            self.training_steps < self.min_replay_history)
+        if in_random_warmup:
+            self._rng, random_key = jax.random.split(self._rng)
+            action = jax.random.randint(
+                random_key,
                 (state.shape[0],),
                 0,
                 self.num_actions,
             )
-        self._rng, action, probs = select_action(
-            self.network_def,
-            select_params,
-            state,
-            self._rng,
-            self.num_actions,
-            False,
-            #eval_mode,
-            #eval_mode=self.greedy_action,
-            #eval_mode=True,
-        )
-        #print(probs.shape)
-        #if not self.eval_mode:
-        if not self.eval_mode:
-            self.stats_ent = 0.99 * self.stats_ent + 0.01 * scipy.stats.entropy(
-                probs[0])
+        else:
+            action = policy_action
+
+        action_array = np.asarray(action)
+        self.rssm_prev_action = np.array(
+            jax.nn.one_hot(
+                action_array,
+                self.num_actions,
+                dtype=jnp.float32,
+            ),
+            copy=True)
+        self.rssm_is_first = np.zeros(
+            (state.shape[0],), dtype=np.bool_)
+
+        if not eval_mode and not in_random_warmup:
+            self.stats_ent = (
+                0.99 * self.stats_ent +
+                0.01 * scipy.stats.entropy(np.asarray(probs[0])))
             if random.uniform(0, 1) < 1e-3:
-                logging.info('ema entropy: {}'.format(self.stats_ent))
-        #exit(0)
+                logging.info("ema entropy: %s", self.stats_ent)
         return action
 
     def step(self):
-        """Records the most recent transition, returns the agent's next action, and trains if appropriate.
-    """
+        """Trains if needed, advances the posterior, and chooses an action."""
         if not self.eval_mode:
             self._train_step()
-        state = self.state
-        select_params = self.target_network_params
-        #select_params = self.online_params
-        ## time inference - start
-        #self.eval_mode = True
-        #import time
-        #start_time = time.time()
-        #for _ in range(int(100 * 32)):
         action = self.select_action(
-            state,
-            select_params,
+            self.state,
+            self.online_params,
             self.eval_mode,
         )
         self.action = np.asarray(action)
-        #time_delta = time.time() - start_time
-        #print('time_delta: {}'.format(time_delta))
-        #exit(0)
         return self.action
