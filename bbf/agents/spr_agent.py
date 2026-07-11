@@ -1619,6 +1619,7 @@ class BBFAgent(JaxDQNAgent):
         r2_world_model_units=768,
         r2_world_model_blocks=8,
         r2_world_model_clip_reward=True,
+        r2_stop_encoder_grads=True,
         r2_bridge_weight=1.0,
         r2_value_through_wm=False,
         r2_value_weight=0.3,
@@ -1754,6 +1755,7 @@ class BBFAgent(JaxDQNAgent):
         self.r2_world_model_units = int(r2_world_model_units)
         self.r2_world_model_blocks = int(r2_world_model_blocks)
         self.r2_world_model_clip_reward = bool(r2_world_model_clip_reward)
+        self.r2_stop_encoder_grads = bool(r2_stop_encoder_grads)
         self.r2_bridge_weight = float(r2_bridge_weight)
         self.r2_value_through_wm = bool(r2_value_through_wm)
         self.r2_value_weight = float(r2_value_weight)
@@ -1791,6 +1793,7 @@ class BBFAgent(JaxDQNAgent):
                 r2_world_model_blocks=self.r2_world_model_blocks,
                 r2_world_model_bridge_weight=self.r2_bridge_weight,
                 r2_world_model_value_through_wm=self.r2_value_through_wm,
+                r2_world_model_stop_encoder_grads=self.r2_stop_encoder_grads,
             ),
             target_update_period=self.target_update_period,
             update_horizon=self.max_update_horizon,

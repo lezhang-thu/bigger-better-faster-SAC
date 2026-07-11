@@ -989,6 +989,7 @@ class RainbowDQNNetwork(nn.Module):
     r2_world_model_blocks: int = 8
     r2_world_model_bridge_weight: float = 1.0
     r2_world_model_value_through_wm: bool = False
+    r2_world_model_stop_encoder_grads: bool = True
 
     def setup(self):
         initializer = nn.initializers.xavier_uniform()
@@ -1231,7 +1232,11 @@ class RainbowDQNNetwork(nn.Module):
             in_axes=0,
             axis_name="r2_world_model_batch",
         )(flat_states)
-        #flat_embed = jax.lax.stop_gradient(flat_embed)
+        if self.r2_world_model_stop_encoder_grads:
+            # Full encoder isolation: the WM observes the BBF representation
+            # but never shapes it. With this on, the anchor's gradient
+            # stream is exactly the original BBF-SAC (abf7870).
+            flat_embed = jax.lax.stop_gradient(flat_embed)
         embed = flat_embed.reshape(batch_size, batch_length, -1)
         return self.r2_world_model.loss(embed, actions, rewards, terminals,
                                         is_first,
