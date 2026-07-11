@@ -27,12 +27,15 @@
 >   It is the decoder-free analog of a decoder: it decodes latents into the
 >   RL feature space so the shared policy can run in imagination.
 >   **Readout rule:** the bridge and value heads are strict readouts — their
->   losses never backprop through the RSSM into the encoder. Only the
->   `284d8e7`-validated WM losses (KL/Barlow/reward/continue) shape the
->   encoder. (The bridge's summed MSE is ~1000x the other losses early on;
->   letting it reach the encoder stalls the BBF anchor at -21 on Pong.)
->   `r2_value_through_wm=True` restores r2dreamer's repval-through-WM
->   behavior for ablation.
+>   losses never backprop through the RSSM into the encoder. (The bridge's
+>   summed MSE is ~1000x the other losses early on; letting it reach the
+>   encoder stalls the BBF anchor at -21 on Pong.) `r2_value_through_wm=True`
+>   restores r2dreamer's repval-through-WM behavior for ablation.
+>   **Isolation rule (default `r2_stop_encoder_grads=True`):** the WM
+>   consumes `sg(representation)` — no WM loss shapes the encoder at all,
+>   so the anchor's gradient stream is exactly `abf7870`. The 284d8e7-style
+>   co-training (flag False) was Pong-validated only and left Kangaroo flat
+>   (~50 mean through 61k vs baseline cluster 1682-3065).
 > - **Feat value head (new):** 255-bin symexp-twohot critic on RSSM
 >   features, trained on real-sequence lambda-returns bootstrapped per-step
 >   from the BBF critic (`boot = E_pi[Q]`), plus a slow-value regularizer
