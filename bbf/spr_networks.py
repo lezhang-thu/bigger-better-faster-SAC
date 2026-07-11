@@ -30,7 +30,10 @@ import numpy as onp
 
 SPROutputType = collections.namedtuple(
     'RL_network',
-    ['q_values', 'logits', 'probabilities', 'latent', 'representation'],
+    [
+        'q_values', 'logits', 'probabilities', 'latent', 'representation',
+        'spatial_latent', 'rollout_reps'
+    ],
 )
 PRNGKey = Any
 Array = Any
@@ -330,6 +333,33 @@ class ResidualStage(nn.Module):
         return conv_out
 
 
+class PredictionHead(nn.Module):
+    """Small MLP head for world-model reward/continue prediction.
+
+  Attributes:
+    hidden_dim: Width of the single hidden layer.
+    zero_init: Whether to zero-initialize the output layer, so that
+      predictions start neutral (as in DreamerV3's outscale=0).
+    dtype: Jax dtype.
+    initializer: Jax initializer.
+  """
+    hidden_dim: int
+    zero_init: bool = False
+    dtype: Dtype = jnp.float32
+    initializer: Any = nn.initializers.xavier_uniform()
+
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Dense(self.hidden_dim,
+                     kernel_init=self.initializer,
+                     dtype=self.dtype)(nn.relu(x))
+        x = nn.relu(x)
+        out_initializer = (nn.initializers.zeros
+                           if self.zero_init else self.initializer)
+        x = nn.Dense(1, kernel_init=out_initializer, dtype=self.dtype)(x)
+        return jnp.squeeze(x, -1)
+
+
 class TransitionModel(nn.Module):
     """An SPR-style transition model.
 
@@ -415,11 +445,6 @@ class RainbowDQNNetwork(nn.Module):
             dtype=jnp.float32,
             initializer=initializer,
         )
-        self.representation_projection = FeatureLayer(
-            int(self.hidden_dim),
-            dtype=jnp.float32,
-            initializer=initializer,
-        )
         self.predictor = nn.Dense(int(self.hidden_dim),
                                   dtype=jnp.float32,
                                   kernel_init=initializer)
@@ -436,11 +461,28 @@ class RainbowDQNNetwork(nn.Module):
             dtype=jnp.float32,
             initializer=initializer,
         )
+        self.predict_policy = nn.Dense(int(self.hidden_dim),
+                                       dtype=jnp.float32,
+                                       kernel_init=initializer)
         self.policy = nn.Dense(self.num_actions,
                                dtype=jnp.float32,
                                kernel_init=initializer)
         self._log_alpha = self.param('_log_alpha', nn.initializers.zeros_init(),
                                      ())
+
+        # ******** world-model heads for imagination ******** #
+        self.reward_head = PredictionHead(
+            hidden_dim=512,
+            zero_init=True,
+            dtype=jnp.float32,
+            initializer=initializer,
+        )
+        self.continue_head = PredictionHead(
+            hidden_dim=512,
+            zero_init=False,
+            dtype=jnp.float32,
+            initializer=initializer,
+        )
 
     def entropy_scale(self):
         return jnp.exp(self._log_alpha)
@@ -453,17 +495,51 @@ class RainbowDQNNetwork(nn.Module):
 
     def encode_project(self, x, eval_mode):
         latent = self.encode(x, eval_mode)
-        return self.represent(latent.reshape(-1), eval_mode)
+        representation = latent.reshape(-1)
+        return jnp.concatenate([
+            self.project(representation, eval_mode),
+            self.policy_projection(representation, eval_mode)
+        ],
+                               axis=-1)
+
+    def encode_project_with_latent(self, x, eval_mode):
+        latent = self.encode(x, eval_mode)
+        representation = latent.reshape(-1)
+        projection = jnp.concatenate([
+            self.project(representation, eval_mode),
+            self.policy_projection(representation, eval_mode)
+        ],
+                                     axis=-1)
+        return projection, representation
 
     def project(self, x, eval_mode):
         projected = self.projection(x, eval_mode=eval_mode)
         return projected
 
-    def represent(self, x, eval_mode):
-        return self.representation_projection(x, eval_mode=eval_mode)
-
     def spr_predict(self, x, eval_mode):
-        return self.predictor(self.represent(x, eval_mode))
+        return jnp.concatenate([
+            self.predictor(self.project(x, eval_mode)),
+            self.predict_policy(self.policy_projection(x, eval_mode))
+        ],
+                               axis=-1)
+
+    def reward_from_feature(self, x):
+        return self.reward_head(x)
+
+    def continue_from_feature(self, x):
+        return self.continue_head(x)
+
+    def policy_logits_from_feature(self, x, eval_mode):
+        return self.policy(nn.relu(self.policy_projection(x, eval_mode)))
+
+    def q_logits_from_feature(self, x):
+        h = nn.relu(self.project(x, eval_mode=True))
+        return self.head(h, eval_mode=True)
+
+    def q_values_from_feature(self, x, support):
+        logits = self.q_logits_from_feature(x)
+        probabilities = nn.softmax(logits)
+        return jnp.sum(support * probabilities, axis=-1)
 
     def spr_rollout(self, latent, actions):
         _, pred_latents = self.transition_model(latent, actions)
@@ -471,7 +547,53 @@ class RainbowDQNNetwork(nn.Module):
         representations = pred_latents.reshape(pred_latents.shape[0], -1)
         predictions = jax.vmap(self.spr_predict,
                                in_axes=(0, None))(representations, True)
-        return predictions
+        return predictions, representations
+
+    def imagine_from_latent(self, latent, horizon):
+        """Rolls out the transition model under the current policy.
+
+    All features are stop-gradiented so imagination losses can only train
+    the heads applied to them (policy and, optionally, Q), never the
+    encoder or transition model.
+
+    Args:
+      latent: Spatial latent of the start state, from encode().
+      horizon: Number of imagined transitions (returns horizon + 1 steps).
+
+    Returns:
+      Dict of arrays stacked along a leading time axis of size horizon + 1.
+    """
+        latent = jax.lax.stop_gradient(latent)
+        key = self.make_rng('action_sample')
+        keys = jax.random.split(key, horizon + 1)
+        features, actions, log_probs, entropies = [], [], [], []
+        probs, rewards, continues = [], [], []
+        for i in range(horizon + 1):
+            feature = jax.lax.stop_gradient(latent.reshape(-1))
+            logits = self.policy_logits_from_feature(feature, False)
+            log_prob = jax.nn.log_softmax(logits)
+            prob = jax.nn.softmax(logits)
+            action = jax.random.categorical(keys[i], logits)
+
+            features.append(feature)
+            actions.append(action)
+            log_probs.append(log_prob[action])
+            entropies.append(-jnp.sum(prob * log_prob))
+            probs.append(prob)
+            rewards.append(self.reward_from_feature(feature))
+            continues.append(jax.nn.sigmoid(self.continue_from_feature(feature)))
+
+            latent, _ = self.transition_model(latent, action[None])
+            latent = jax.lax.stop_gradient(latent)
+        return {
+            'features': jnp.stack(features),
+            'actions': jnp.stack(actions),
+            'log_probs': jnp.stack(log_probs),
+            'entropies': jnp.stack(entropies),
+            'probs': jnp.stack(probs),
+            'rewards': jnp.stack(rewards),
+            'continues': jnp.stack(continues),
+        }
 
     def init_fn(
         self,
@@ -482,21 +604,20 @@ class RainbowDQNNetwork(nn.Module):
         eval_mode=False,
     ):
         y = self(x, support, actions, do_rollout, eval_mode)
+        _ = self.reward_from_feature(y.representation)
+        _ = self.continue_from_feature(y.representation)
         return (
             y,
-            self.policy(
-                nn.relu(
-                    self.policy_projection(
-                        #jax.lax.stop_gradient(y.representation),
-                        y.representation,
-                        eval_mode))))
+            self.policy_logits_from_feature(
+                #jax.lax.stop_gradient(y.representation),
+                y.representation,
+                eval_mode))
         #return (y,
         #        self.policy(jax.lax.stop_gradient(nn.relu(self.project(y.representation, eval_mode)))))
 
     def get_policy(self, x):
         x = self.encode(x, False)
         x = x.reshape(-1)
-        x = self.represent(x, False)
         #x = jax.lax.stop_gradient(x)
         logits = self.policy(nn.relu(self.policy_projection(x, False)))
         #logits = self.policy(jax.lax.stop_gradient(nn.relu(self.encode_project(x, False))))
@@ -512,17 +633,19 @@ class RainbowDQNNetwork(nn.Module):
         eval_mode=False,
     ):
         spatial_latent = self.encode(x, eval_mode)
-        representation = self.represent(spatial_latent.reshape(-1), eval_mode)
+        representation = spatial_latent.reshape(-1)
         # Single hidden layer
         x = self.project(representation, eval_mode)
         x = nn.relu(x)
 
         logits = self.head(x, eval_mode)
 
+        latent = spatial_latent
+        rollout_reps = None
         if do_rollout:
-            spatial_latent = self.spr_rollout(spatial_latent, actions)
+            latent, rollout_reps = self.spr_rollout(spatial_latent, actions)
 
         probabilities = jnp.squeeze(nn.softmax(logits))
         q_values = jnp.squeeze(jnp.sum(support * probabilities, axis=-1))
-        return SPROutputType(q_values, logits, probabilities, spatial_latent,
-                             representation)
+        return SPROutputType(q_values, logits, probabilities, latent,
+                             representation, spatial_latent, rollout_reps)

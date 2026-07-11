@@ -76,6 +76,58 @@ def softmax_cross_entropy_loss_with_logits(labels: jnp.array,
     return -jnp.sum(labels * flax.linen.log_softmax(logits))
 
 
+def sigmoid_binary_cross_entropy(logits, labels):
+    """Numerically stable sigmoid cross entropy."""
+    return jnp.maximum(logits, 0) - logits * labels + jnp.log1p(
+        jnp.exp(-jnp.abs(logits)))
+
+
+def masked_mean(values, mask, eps=1e-6):
+    mask = mask.astype(jnp.float32)
+    return jnp.sum(values * mask) / (jnp.sum(mask) + eps)
+
+
+def masked_correlation(x, y, mask, eps=1e-6):
+    """Pearson correlation over masked entries."""
+    mask = mask.astype(jnp.float32)
+    count = jnp.sum(mask) + eps
+    x_mean = jnp.sum(x * mask) / count
+    y_mean = jnp.sum(y * mask) / count
+    x_var = jnp.sum(jnp.square(x - x_mean) * mask) / count
+    y_var = jnp.sum(jnp.square(y - y_mean) * mask) / count
+    cov = jnp.sum((x - x_mean) * (y - y_mean) * mask) / count
+    return cov / jnp.sqrt(x_var * y_var + 1e-12)
+
+
+def imagined_lambda_return(rewards, continues, values, discount, lamb):
+    """Lambda returns over imagined trajectories.
+
+  Follows r2dreamer's _lambda_return: the return from state t uses the
+  reward and continue predicted at the *next* state (arrival semantics),
+  ret_t = r_{t+1} + disc * c_{t+1} * ((1 - lambda) * V_{t+1}
+                                       + lambda * ret_{t+1}).
+
+  Args:
+    rewards: [B, H + 1] rewards predicted at each imagined state.
+    continues: [B, H + 1] continuation probabilities at each state.
+    values: [B, H + 1] state values.
+    discount: Scalar discount factor.
+    lamb: Lambda mixing parameter.
+
+  Returns:
+    [B, H] lambda returns for states 0..H-1.
+  """
+    next_rewards = rewards[:, 1:]
+    live = continues[:, 1:] * discount
+    interm = next_rewards + live * (1.0 - lamb) * values[:, 1:]
+    ret = values[:, -1]
+    outputs = []
+    for i in reversed(range(next_rewards.shape[1])):
+        ret = interm[:, i] + live[:, i] * lamb * ret
+        outputs.append(ret)
+    return jnp.stack(outputs[::-1], axis=1)
+
+
 def prefetch_to_device(iterator, size):
     queue = collections.deque()
 
@@ -389,6 +441,9 @@ train_static_argnames = [
     'use_target_backups',
     'match_online_target_rngs',
     'target_eval_mode',
+    'reward_weight',
+    'continue_weight',
+    'imag_horizon',
 ]
 
 
@@ -422,6 +477,15 @@ def train(
     target_eval_mode,  # static
     #ent_targ,
     x_ent_coef,
+    per_step_rewards,
+    reward_weight,  # static
+    continue_weight,  # static
+    imag_horizon,  # static
+    imag_actor_mult,
+    imag_value_mult,
+    imag_discount,
+    imag_lambda,
+    return_ema,
 ):
 
     @functools.partial(
@@ -437,6 +501,7 @@ def train(
             optimizer_state,
             rng,
             step,
+            return_ema,
         ) = state
         (
             raw_states,
@@ -447,7 +512,21 @@ def train(
             same_traj_mask,
             loss_weights,
             cumulative_gamma,
+            per_step_rewards,
         ) = inputs
+        # World-model targets, aligned to arrival semantics: the feature of
+        # state s_{k+1} (column k below) predicts reward r_k and whether the
+        # episode continues at s_{k+1}.
+        continue_targets = same_traj_mask[:, 1:].astype(jnp.float32)
+        model_mask = jnp.concatenate(
+            [
+                jnp.ones_like(continue_targets[:, :1]),
+                continue_targets[:, :-1],
+            ],
+            axis=1,
+        )
+        model_rewards = per_step_rewards[:, :-1].astype(jnp.float32)
+
         same_traj_mask = same_traj_mask[:, 1:]
         rewards = rewards[:, 0]
         terminals = terminals[:, 0]
@@ -475,7 +554,8 @@ def train(
             target_rng = batch_rngs
         else:
             target_rng = jax.random.split(rng1, num=states.shape[0])
-        use_spr = spr_weight > 0
+        use_spr = (spr_weight > 0 or reward_weight > 0 or continue_weight > 0
+                   or imag_horizon > 0)
 
         def policy_online(state, action_sample_key):
             return network_def.apply(
@@ -498,15 +578,17 @@ def train(
                 target_params,
                 state,
                 eval_mode=True,
-                method=network_def.encode_project,
+                method=network_def.encode_project_with_latent,
             )
 
         def loss_fn(
             params,
             target,
             spr_targets,
+            future_latents,
             loss_multipliers,
             key,
+            imag_keys,
         ):
 
             def all_results(state, actions, do_rollout):
@@ -550,13 +632,17 @@ def train(
                 target * jnp.log(target)).sum(-1)
 
             spr_predictions = spr_predictions.transpose(1, 0, 2)
+            spr_predictions = spr_predictions.reshape(
+                *spr_predictions.shape[:2], 2, 2048)
 
             spr_predictions = spr_predictions / jnp.linalg.norm(
                 spr_predictions, 2, -1, keepdims=True)
 
+            spr_targets = spr_targets.reshape(*spr_targets.shape[:2], 2, 2048)
             spr_targets = spr_targets / jnp.linalg.norm(
                 spr_targets, 2, -1, keepdims=True)
-            spr_loss = jnp.power(spr_predictions - spr_targets, 2).sum(-1)
+            spr_loss = jnp.power(spr_predictions - spr_targets,
+                                 2).sum((-1, -2))
             #logging.info("spr_loss.shape: {}".format(spr_loss.shape))
             spr_loss = (spr_loss * same_traj_mask.transpose(1, 0)).mean(0) * .5
             #logging.info("spr_loss.shape: {}".format(spr_loss.shape))
@@ -566,16 +652,169 @@ def train(
 
             mean_loss = jnp.mean(loss)
 
-            x = jax.vmap(policy_loss, in_axes=0, axis_name="batch")(x.q_values,
-                                                                    logits, key)
+            # === World-model heads: reward and continue prediction ===
+            aux_model = {}
+            model_loss = jnp.asarray(0.0, dtype=jnp.float32)
+            if reward_weight > 0 or continue_weight > 0:
+                # Rollout features keep gradients so reward errors also shape
+                # the encoder/transition model; the real-frame features come
+                # from the target encoder and only train the heads.
+                rollout_reps = x.rollout_reps
+                real_reps = jax.lax.stop_gradient(future_latents)
+
+                def reward_fn(feature):
+                    return network_def.apply(
+                        params,
+                        feature,
+                        method=network_def.reward_from_feature)
+
+                def continue_fn(feature):
+                    return network_def.apply(
+                        params,
+                        feature,
+                        method=network_def.continue_from_feature)
+
+                pred_reward_roll = jax.vmap(jax.vmap(reward_fn))(rollout_reps)
+                pred_reward_real = jax.vmap(jax.vmap(reward_fn))(real_reps)
+                # Real frames past a terminal belong to the next episode.
+                real_mask = model_mask * continue_targets
+                reward_loss = (masked_mean(
+                    jnp.square(pred_reward_roll - model_rewards),
+                    model_mask) + masked_mean(
+                        jnp.square(pred_reward_real - model_rewards),
+                        real_mask))
+                continue_logits = jax.vmap(
+                    jax.vmap(continue_fn))(rollout_reps)
+                continue_loss = masked_mean(
+                    sigmoid_binary_cross_entropy(continue_logits,
+                                                 continue_targets),
+                    model_mask)
+                model_loss = (reward_weight * reward_loss +
+                              continue_weight * continue_loss)
+                aux_model.update({
+                    "RewardLoss":
+                        reward_loss,
+                    "ContinueLoss":
+                        continue_loss,
+                    "RewardCorr":
+                        masked_correlation(pred_reward_roll, model_rewards,
+                                           model_mask),
+                })
+
+            # === Imagination: on-policy actor(-critic) over imagined rollouts ===
+            imag_metrics = {}
+            imag_actor_loss = jnp.asarray(0.0, dtype=jnp.float32)
+            imag_value_loss = jnp.asarray(0.0, dtype=jnp.float32)
+            new_return_ema = return_ema
+            if imag_horizon > 0:
+
+                def imagine_one(latent, imagine_key):
+                    return network_def.apply(
+                        params,
+                        latent,
+                        imag_horizon,
+                        rngs={"action_sample": imagine_key},
+                        method=network_def.imagine_from_latent,
+                    )
+
+                imagined = jax.vmap(imagine_one)(x.spatial_latent, imag_keys)
+
+                def value_fn(feature):
+                    return network_def.apply(
+                        target_params,
+                        feature,
+                        support,
+                        method=network_def.q_values_from_feature)
+
+                # V(z) = sum_a pi(a|z) Q_target(z, a); grounded by real TD.
+                imag_q_target = jax.vmap(jax.vmap(value_fn))(
+                    imagined['features'])
+                imag_probs = jax.lax.stop_gradient(imagined['probs'])
+                imag_values = jnp.sum(imag_probs * imag_q_target, -1)
+
+                # Starts are real replay states: force continue = 1 at step 0.
+                imag_continues = jax.lax.stop_gradient(
+                    jnp.concatenate(
+                        [
+                            jnp.ones_like(imagined['continues'][:, :1]),
+                            imagined['continues'][:, 1:],
+                        ],
+                        axis=1,
+                    ))
+                imag_rewards = jax.lax.stop_gradient(imagined['rewards'])
+                ret = jax.lax.stop_gradient(
+                    imagined_lambda_return(imag_rewards, imag_continues,
+                                           imag_values, imag_discount,
+                                           imag_lambda))
+                weight = jax.lax.stop_gradient(
+                    jnp.cumprod(imag_continues * imag_discount, axis=1))
+
+                percentiles = jnp.percentile(ret, jnp.asarray([5.0, 95.0]))
+                new_return_ema = jnp.where(
+                    imag_actor_mult > 0,
+                    0.01 * percentiles + 0.99 * return_ema,
+                    return_ema,
+                )
+                scale = jnp.maximum(new_return_ema[1] - new_return_ema[0],
+                                    1.0)
+                adv = jax.lax.stop_gradient(
+                    (ret - imag_values[:, :-1]) / scale)
+
+                imag_actor_loss = jnp.mean(
+                    weight[:, :-1] *
+                    -(imagined['log_probs'][:, :-1] * adv +
+                      x_ent_coef * imagined['entropies'][:, :-1]))
+
+                def q_logits_fn(feature):
+                    return network_def.apply(
+                        params,
+                        feature,
+                        method=network_def.q_logits_from_feature)
+
+                imag_q_logits = jax.vmap(jax.vmap(q_logits_fn))(
+                    imagined['features'][:, :-1])
+                chosen_imag_logits = jnp.squeeze(
+                    jnp.take_along_axis(
+                        imag_q_logits,
+                        imagined['actions'][:, :-1, None, None].astype(
+                            jnp.int32),
+                        axis=2,
+                    ), 2)
+                imag_target_dist = jax.vmap(
+                    jax.vmap(lambda r: project_distribution(
+                        r[None], jnp.ones(1), support)))(ret)
+                imag_value_loss = jnp.mean(
+                    weight[:, :-1] * -jnp.sum(
+                        imag_target_dist *
+                        jax.nn.log_softmax(chosen_imag_logits), -1))
+
+                imag_metrics.update({
+                    "ImagActorLoss": imag_actor_loss,
+                    "ImagValueLoss": imag_value_loss,
+                    "ImagRet": jnp.mean(ret),
+                    "ImagValue": jnp.mean(imag_values),
+                    "ImagReward": jnp.mean(imag_rewards),
+                    "ImagContinue": jnp.mean(imag_continues),
+                    "ImagEntropy": jnp.mean(imagined['entropies']),
+                })
+
+            policy_out = jax.vmap(policy_loss, in_axes=0,
+                                  axis_name="batch")(x.q_values, logits, key)
+            total_loss = (mean_loss +
+                          jnp.mean(loss_multipliers * policy_out[0]) +
+                          model_loss + imag_actor_mult * imag_actor_loss +
+                          imag_value_mult * imag_value_loss)
             aux_losses = {
-                "TotalLoss": jnp.mean(mean_loss),
+                "TotalLoss": total_loss,
                 "DQNLoss": jnp.mean(dqn_loss),
                 "TD Error": jnp.mean(td_error),
                 "SPRLoss": jnp.mean(spr_loss),
-                "ent": jnp.mean(x[1]),
+                "ent": jnp.mean(policy_out[1]),
+                "ReturnEMAState": new_return_ema,
             }
-            return mean_loss + jnp.mean(loss_multipliers * x[0]), (aux_losses)
+            aux_losses.update(aux_model)
+            aux_losses.update(imag_metrics)
+            return total_loss, (aux_losses)
 
         # Use the weighted mean loss for gradient computation.
         target = jax.vmap(target_output,
@@ -592,25 +831,30 @@ def train(
                           )
 
         future_states = states[:, 1:]
-        spr_targets = jax.vmap(jax.vmap(encode_project,
-                                        in_axes=0,
-                                        axis_name="time"),
-                               in_axes=0,
-                               axis_name="batch")(future_states)
+        spr_targets, future_latents = jax.vmap(jax.vmap(encode_project,
+                                                        in_axes=0,
+                                                        axis_name="time"),
+                                               in_axes=0,
+                                               axis_name="batch")(future_states)
         spr_targets = spr_targets.transpose(1, 0, 2)
 
         # Get the unweighted loss without taking its mean for updating priorities.
         grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-        x = jax.random.split(rng2, current_state.shape[0] + 1)
-        rng2 = x[0]
-        key = x[1:]
+        n_samples = current_state.shape[0]
+        splits = jax.random.split(rng2, 2 * n_samples + 1)
+        rng2 = splits[0]
+        key = splits[1:n_samples + 1]
+        imag_keys = splits[n_samples + 1:]
         (_, aux_losses), grad = grad_fn(
             online_params,
             target,
             spr_targets,
+            future_latents,
             loss_weights,
             key,
+            imag_keys,
         )
+        new_return_ema = aux_losses.pop("ReturnEMAState")
 
         updates, new_optimizer_state = optimizer.update(grad,
                                                         optimizer_state,
@@ -641,6 +885,7 @@ def train(
                 optimizer_state,
                 rng2,
                 step + 1,
+                new_return_ema,
             ),
             aux_losses,
         )
@@ -651,6 +896,7 @@ def train(
         optimizer_state,
         rng,
         step,
+        return_ema,
     )
     assert raw_states.shape[0] % batch_size == 0
     num_batches = raw_states.shape[0] // batch_size
@@ -673,6 +919,8 @@ def train(
         loss_weights.reshape(num_batches, batch_size, *loss_weights.shape[1:]),
         cumulative_gamma.reshape(num_batches, batch_size,
                                  *cumulative_gamma.shape[1:]),
+        per_step_rewards.reshape(num_batches, batch_size,
+                                 *per_step_rewards.shape[1:]),
     )
 
     (
@@ -682,6 +930,7 @@ def train(
             optimizer_state,
             rng,
             step,
+            return_ema,
         ),
         aux_losses,
     ) = jax.lax.scan(train_one_batch, init_state, inputs)
@@ -691,6 +940,7 @@ def train(
         target_params,
         optimizer_state,
         {k: jnp.reshape(v, (-1,)) for k, v in aux_losses.items()},
+        return_ema,
     )
 
 
@@ -867,6 +1117,14 @@ class BBFAgent(JaxDQNAgent):
         match_online_target_rngs=True,
         target_eval_mode=False,
         offline_update_frac=0,
+        reward_weight=1.0,
+        continue_weight=1.0,
+        imag_horizon=0,
+        imag_actor_weight=0.0,
+        imag_value_weight=0.0,
+        imag_discount=None,
+        imag_lambda=0.95,
+        imag_warmup=2000,
         half_precision=False,
         seed=None,
         log_every=None,
@@ -923,6 +1181,20 @@ class BBFAgent(JaxDQNAgent):
         self.match_online_target_rngs = match_online_target_rngs
         self.target_eval_mode = target_eval_mode
 
+        self.reward_weight = float(reward_weight)
+        self.continue_weight = float(continue_weight)
+        self.imag_horizon = int(imag_horizon)
+        self.imag_actor_weight = float(imag_actor_weight)
+        self.imag_value_weight = float(imag_value_weight)
+        self.imag_discount = (None if imag_discount is None else
+                              float(imag_discount))
+        self.imag_lambda = float(imag_lambda)
+        self.imag_warmup = int(imag_warmup)
+        self.imag_return_ema = np.zeros((2,), dtype=np.float32)
+        self.use_world_model = (self.spr_weight > 0 or self.reward_weight > 0
+                                or self.continue_weight > 0 or
+                                self.imag_horizon > 0)
+
         # debug - start
         print('*' * 20)
         print(' self.target_eval_mode: {}'.format(self.target_eval_mode))
@@ -972,6 +1244,8 @@ class BBFAgent(JaxDQNAgent):
             update_horizon=self.max_update_horizon,
             seed=seed,
         )
+        if self.imag_discount is None:
+            self.imag_discount = self.gamma
 
         self.set_replay_settings()
 
@@ -1014,7 +1288,7 @@ class BBFAgent(JaxDQNAgent):
                 method=self.network_def.init_fn,
                 x=self.state.astype(self.dtype),
                 actions=actions,
-                do_rollout=self.spr_weight > 0,
+                do_rollout=self.use_world_model,
                 support=self._support,
             ))
 
@@ -1031,13 +1305,13 @@ class BBFAgent(JaxDQNAgent):
         })
 
         head_keys = {
-            "representation_projection", "projection", "head", "predictor"
+            "projection", "head", "predictor", "reward_head", "continue_head"
         }
         head_mask = FrozenDict({
             "params": {k: k in head_keys for k in self.online_params["params"]}
         })
 
-        policy_key = {"policy_projection", "policy"}
+        policy_key = {"policy_projection", "policy", "predict_policy"}
         policy_mask = FrozenDict({
             "params": {
                 k: k in policy_key for k in self.online_params["params"]
@@ -1206,7 +1480,8 @@ class BBFAgent(JaxDQNAgent):
         self._rng, reset_rng = jax.random.split(self._rng, 2)
 
         #keys_to_copy = ("encoder", "transition_model")
-        keys_to_copy = ("encoder", "transition_model", "representation_projection", "_log_alpha")
+        keys_to_copy = ("encoder", "transition_model", "reward_head",
+                        "continue_head", "_log_alpha")
         (
             self.online_params,
             self.target_network_params,
@@ -1220,7 +1495,7 @@ class BBFAgent(JaxDQNAgent):
             self.optimizer,
             reset_rng,
             self.state_shape,
-            self.spr_weight > 0,
+            self.use_world_model,
             self._support,
             self.reset_target,
             self.shrink_perturb_keys,
@@ -1264,12 +1539,23 @@ class BBFAgent(JaxDQNAgent):
             exit(0)
             # debug - end
 
+        # Imagination is gated off right after each shrink-and-perturb reset
+        # (the Q target the imagined values come from is also reset), then
+        # ramped back in linearly over another imag_warmup gradient steps.
+        imag_ramp = float(
+            np.clip(
+                (self.cycle_grad_steps - self.imag_warmup) /
+                max(1, self.imag_warmup), 0.0, 1.0))
+        imag_actor_mult = self.imag_actor_weight * imag_ramp
+        imag_value_mult = self.imag_value_weight * imag_ramp
+
         self._rng, train_rng = jax.random.split(self._rng)
         (
             new_online_params,
             new_target_params,
             new_optimizer_state,
             aux_losses,
+            new_return_ema,
         ) = self.train_fn(
             self.network_def,
             self.online_params,
@@ -1300,7 +1586,17 @@ class BBFAgent(JaxDQNAgent):
             self.target_eval_mode,
             #self.ent_targ,
             self.x_ent_coef,
+            self.replay_elements["reward"],
+            self.reward_weight,
+            self.continue_weight,
+            self.imag_horizon,
+            imag_actor_mult,
+            imag_value_mult,
+            self.imag_discount,
+            self.imag_lambda,
+            self.imag_return_ema,
         )
+        self.imag_return_ema = np.asarray(new_return_ema)
         self.grad_steps += self._batches_to_group
         self.cycle_grad_steps += self._batches_to_group
 
@@ -1324,6 +1620,18 @@ class BBFAgent(JaxDQNAgent):
 
         priorities = np.sqrt(dqn_loss + 1e-10)
         self._replay.set_priority(indices, priorities)
+
+        if self.grad_steps % 500 < self._batches_to_group:
+            log_keys = ("RewardLoss", "ContinueLoss", "RewardCorr",
+                        "ImagActorLoss", "ImagValueLoss", "ImagRet",
+                        "ImagReward", "ImagContinue", "ImagEntropy")
+            msgs = ["grad_step {}".format(self.grad_steps)]
+            for k in log_keys:
+                if k in aux_losses:
+                    msgs.append("{}: {:.4f}".format(
+                        k, float(np.mean(np.asarray(aux_losses[k])))))
+            if len(msgs) > 1:
+                logging.info(" | ".join(msgs))
 
         self.target_network_params = new_target_params
         self.online_params = new_online_params

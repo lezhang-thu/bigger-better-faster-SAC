@@ -32,6 +32,16 @@ BBFAgent.batches_to_group = 2
 BBFAgent.batch_size = 32
 BBFAgent.spr_weight = 5
 BBFAgent.jumps = 5
+
+# World-model heads and imagination (r2dreamer-style, on the SPR model).
+BBFAgent.reward_weight = 1.0
+BBFAgent.continue_weight = 1.0
+BBFAgent.imag_horizon = 5
+BBFAgent.imag_actor_weight = 0.1
+BBFAgent.imag_value_weight = 0.0
+BBFAgent.imag_lambda = 0.95
+BBFAgent.imag_warmup = 2000
+
 BBFAgent.data_augmentation = True
 BBFAgent.half_precision = False
 BBFAgent.network    = @bbf.spr_networks.RainbowDQNNetwork
