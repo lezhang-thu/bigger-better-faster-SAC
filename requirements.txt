@@ -8,9 +8,12 @@ opencv-python
 numpy == 1.24.1
 
 # RSSM world-model sequence buffer (buffer.py) — needed on branch
-# stage0123v2 whenever r2_world_model_enabled is True. The buffer runs on
-# CPU (storage_device="cpu"), so a CPU-only torch build suffices; verified
-# with torch 2.12.1 / torchrl 0.13.2 / tensordict 0.13.0.
-torch >= 2.4
+# stage0123v2 whenever r2_world_model_enabled is True. The buffer runs
+# entirely on CPU (storage_device="cpu"), so we pin the CPU-only torch
+# wheel to avoid pulling a second CUDA stack next to jax[cuda12].
+# (+cpu wheels require the exact == pin and the extra index below; if your
+# platform lacks this wheel, install any torch >= 2.4 instead.)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch == 2.12.1+cpu
 torchrl >= 0.13
 tensordict >= 0.13
