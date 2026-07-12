@@ -1,0 +1,7 @@
+# Pure corrected-original BBF-SAC anchor: both imagination engines and all
+# world-model side losses off (baseline reproduction).
+BBFAgent.reward_weight = 0.0
+BBFAgent.continue_weight = 0.0
+BBFAgent.imag_horizon = 0
+BBFAgent.imag_actor_weight = 0.0
+BBFAgent.r2_world_model_enabled = False

@@ -1,0 +1,9 @@
+# RSSM imagination engine, conv-TM engine off — single-variable engine
+# comparison against the base config. Matched settings: H=5, actor 0.1,
+# shared reset-aware warmup ramp (imag_warmup applies to both engines).
+BBFAgent.imag_horizon = 0
+BBFAgent.imag_actor_weight = 0.0
+BBFAgent.r2_imag_horizon = 5
+BBFAgent.r2_imag_start_count = 256
+BBFAgent.r2_imag_actor_weight = 0.1
+BBFAgent.r2_imag_return_norm = True
