@@ -1,0 +1,7 @@
+# Improvement flags (defaults preserve original behavior; enable per line):
+# 1. Deeper transition model: one extra hidden conv in the SPR/imagination
+#    dynamics cell (original = 1 hidden + output conv, per SPR paper).
+bbf.spr_networks.RainbowDQNNetwork.transition_hidden_layers = 2
+# 2. Imagination-only entropy, decoupled from the decaying x_ent_coef
+#    schedule (which reaches 0 by 80k steps).
+BBFAgent.imag_entropy_weight = 3e-4

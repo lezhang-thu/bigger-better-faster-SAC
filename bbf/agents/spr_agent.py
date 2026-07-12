@@ -485,6 +485,7 @@ def train(
     imag_value_mult,
     imag_discount,
     imag_lambda,
+    imag_entropy_coef,
     return_ema,
 ):
 
@@ -763,7 +764,7 @@ def train(
                 imag_actor_loss = jnp.mean(
                     weight[:, :-1] *
                     -(imagined['log_probs'][:, :-1] * adv +
-                      x_ent_coef * imagined['entropies'][:, :-1]))
+                      imag_entropy_coef * imagined['entropies'][:, :-1]))
 
                 def q_logits_fn(feature):
                     return network_def.apply(
@@ -1125,6 +1126,7 @@ class BBFAgent(JaxDQNAgent):
         imag_discount=None,
         imag_lambda=0.95,
         imag_warmup=2000,
+        imag_entropy_weight=None,
         half_precision=False,
         seed=None,
         log_every=None,
@@ -1190,6 +1192,10 @@ class BBFAgent(JaxDQNAgent):
                               float(imag_discount))
         self.imag_lambda = float(imag_lambda)
         self.imag_warmup = int(imag_warmup)
+        # None -> imagination entropy follows the decaying x_ent_coef
+        # schedule (original behavior); a float decouples it (e.g. 3e-4).
+        self.imag_entropy_weight = (None if imag_entropy_weight is None else
+                                    float(imag_entropy_weight))
         self.imag_return_ema = np.zeros((2,), dtype=np.float32)
         self.use_world_model = (self.spr_weight > 0 or self.reward_weight > 0
                                 or self.continue_weight > 0 or
@@ -1594,6 +1600,8 @@ class BBFAgent(JaxDQNAgent):
             imag_value_mult,
             self.imag_discount,
             self.imag_lambda,
+            (self.x_ent_coef if self.imag_entropy_weight is None else
+             self.imag_entropy_weight),
             self.imag_return_ema,
         )
         self.imag_return_ema = np.asarray(new_return_ema)
