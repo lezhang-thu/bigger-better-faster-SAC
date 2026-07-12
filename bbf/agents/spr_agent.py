@@ -1745,19 +1745,6 @@ class BBFAgent(JaxDQNAgent):
         self.use_target_network = use_target_network
         self.match_online_target_rngs = match_online_target_rngs
         self.target_eval_mode = target_eval_mode
-        self.world_model_weight = float(world_model_weight)
-        self.reward_weight = float(reward_weight)
-        self.continue_weight = float(continue_weight)
-        self.barlow_weight = float(barlow_weight)
-        self.barlow_lambd = float(barlow_lambd)
-        self.imag_horizon = int(imag_horizon)
-        self.imag_actor_weight = float(imag_actor_weight)
-        self.imag_value_weight = float(imag_value_weight)
-        self.imag_discount = None if imag_discount is None else float(
-            imag_discount)
-        self.imag_lambda = float(imag_lambda)
-        self.imag_entropy_weight = float(imag_entropy_weight)
-
         self.reward_weight = float(reward_weight)
         self.continue_weight = float(continue_weight)
         self.imag_horizon = int(imag_horizon)
@@ -1779,7 +1766,6 @@ class BBFAgent(JaxDQNAgent):
             self.target_action_selection))
         print(" num_actions: {}".format(num_actions))
         print(" self.reset_target: {}".format(self.reset_target))
-        print(" self.world_model_weight: {}".format(self.world_model_weight))
         print(" self.imag_horizon: {}".format(self.imag_horizon))
         # debug - end
 
