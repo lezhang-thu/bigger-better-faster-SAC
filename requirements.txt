@@ -6,3 +6,11 @@ gym[atari,accept-rom-license]<=0.25.2
 gin-config
 opencv-python
 numpy == 1.24.1
+
+# RSSM world-model sequence buffer (buffer.py) — needed on branch
+# stage0123v2 whenever r2_world_model_enabled is True. The buffer runs on
+# CPU (storage_device="cpu"), so a CPU-only torch build suffices; verified
+# with torch 2.12.1 / torchrl 0.13.2 / tensordict 0.13.0.
+torch >= 2.4
+torchrl >= 0.13
+tensordict >= 0.13
