@@ -1189,6 +1189,8 @@ class BBFAgent(JaxDQNAgent):
         self.imag_horizon = int(imag_horizon)
         self.imag_actor_weight = float(imag_actor_weight)
         self.imag_value_weight = float(imag_value_weight)
+        # None tracks the annealed TD discount (resolved per gradient step in
+        # _training_step_update); a float pins it to that value instead.
         self.imag_discount = (None if imag_discount is None else
                               float(imag_discount))
         self.imag_lambda = float(imag_lambda)
@@ -1247,8 +1249,6 @@ class BBFAgent(JaxDQNAgent):
             update_horizon=self.max_update_horizon,
             seed=seed,
         )
-        if self.imag_discount is None:
-            self.imag_discount = self.gamma
 
         self.set_replay_settings()
 
@@ -1552,6 +1552,12 @@ class BBFAgent(JaxDQNAgent):
         imag_actor_mult = self.imag_actor_weight * imag_ramp
         imag_value_mult = self.imag_value_weight * imag_ramp
 
+        # The Q function that bootstraps the imagined lambda-return is trained
+        # under BBF's annealed discount, so imagination discounts with that
+        # same value rather than with the fixed final gamma.
+        imag_discount = (self.gamma_scheduler(self.cycle_grad_steps)
+                         if self.imag_discount is None else self.imag_discount)
+
         self._rng, train_rng = jax.random.split(self._rng)
         (
             new_online_params,
@@ -1595,7 +1601,7 @@ class BBFAgent(JaxDQNAgent):
             self.imag_horizon,
             imag_actor_mult,
             imag_value_mult,
-            self.imag_discount,
+            imag_discount,
             self.imag_lambda,
             self.imag_return_ema,
         )

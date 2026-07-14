@@ -31,12 +31,20 @@ BBFAgent.replay_ratio = 64
 BBFAgent.batches_to_group = 2
 BBFAgent.batch_size = 32
 BBFAgent.spr_weight = 5
-BBFAgent.jumps = 5
+
+# Depth of the learned model. SPR is the only thing that supervises the
+# transition model, and it does so out to exactly this many steps (as do the
+# reward and continue heads, which train on the SPR rollout features), so
+# imagination must not roll out deeper than this -- past it, the latents are
+# extrapolating into a regime nothing ever trained them on. Tied rather than
+# set twice: overriding MODEL_HORIZON moves both.
+MODEL_HORIZON = 5
+BBFAgent.jumps = %MODEL_HORIZON
 
 # World-model heads and imagination (r2dreamer-style, on the SPR model).
 BBFAgent.reward_weight = 1.0
 BBFAgent.continue_weight = 1.0
-BBFAgent.imag_horizon = 5
+BBFAgent.imag_horizon = %MODEL_HORIZON
 BBFAgent.imag_actor_weight = 1.0
 BBFAgent.imag_value_weight = 0.0
 BBFAgent.imag_lambda = 0.95
