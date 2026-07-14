@@ -760,8 +760,11 @@ def train(
                 adv = jax.lax.stop_gradient(
                     (ret - imag_values[:, :-1]) / scale)
 
+                # Carries the same PER weights as the replay actor loss (the
+                # rollouts start from those states), so imag_actor_mult = 1
+                # really does weight the two actor losses equally.
                 imag_actor_loss = jnp.mean(
-                    weight[:, :-1] *
+                    loss_multipliers[:, None] * weight[:, :-1] *
                     -(imagined['log_probs'][:, :-1] * adv +
                       x_ent_coef * imagined['entropies'][:, :-1]))
 
