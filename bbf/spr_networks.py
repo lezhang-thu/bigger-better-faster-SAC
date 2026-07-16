@@ -193,37 +193,38 @@ def renormalize(tensor, has_batch=False):
 
 
 class ConvTMCell(nn.Module):
-    """MuZero-style transition model for SPR."""
+    """MuZero-style transition model for SPR.
+
+  hidden_layers=1 reproduces the original SPR cell (one hidden conv plus the
+  output conv); larger values add extra hidden convs for deeper dynamics.
+  """
 
     num_actions: int
     latent_dim: int
     renormalize: bool
+    hidden_layers: int = 1
     dtype: Dtype = jnp.float32
     initializer: Any = nn.initializers.xavier_uniform()
 
     @nn.compact
     def __call__(self, x, action, eval_mode=False, key=None):
-        sizes = [self.latent_dim, self.latent_dim]
-        kernel_sizes = [3, 3]
-        stride_sizes = [1, 1]
-
         action_onehot = jax.nn.one_hot(action, self.num_actions)
         action_onehot = jax.lax.broadcast(action_onehot,
                                           (x.shape[-3], x.shape[-2]))
         x = jnp.concatenate([x, action_onehot], -1)
-        for layer in range(1):
+        for _ in range(self.hidden_layers):
             x = nn.Conv(
-                features=sizes[layer],
-                kernel_size=(kernel_sizes[layer], kernel_sizes[layer]),
-                strides=(stride_sizes[layer], stride_sizes[layer]),
+                features=self.latent_dim,
+                kernel_size=(3, 3),
+                strides=(1, 1),
                 kernel_init=self.initializer,
                 dtype=self.dtype,
             )(x)
             x = nn.relu(x)
         x = nn.Conv(
-            features=sizes[-1],
-            kernel_size=(kernel_sizes[-1], kernel_sizes[-1]),
-            strides=(stride_sizes[-1], stride_sizes[-1]),
+            features=self.latent_dim,
+            kernel_size=(3, 3),
+            strides=(1, 1),
             kernel_init=self.initializer,
             dtype=self.dtype,
         )(x)
@@ -373,6 +374,7 @@ class TransitionModel(nn.Module):
     num_actions: int
     latent_dim: int
     renormalize: bool
+    hidden_layers: int = 1
     dtype: Dtype = jnp.float32
     initializer: Any = nn.initializers.xavier_uniform()
 
@@ -388,6 +390,7 @@ class TransitionModel(nn.Module):
             latent_dim=self.latent_dim,
             num_actions=self.num_actions,
             renormalize=self.renormalize,
+            hidden_layers=self.hidden_layers,
             dtype=self.dtype,
             initializer=self.initializer,
         )
@@ -413,6 +416,7 @@ class RainbowDQNNetwork(nn.Module):
     padding: Any = 'SAME'
     hidden_dim: int = 512
     width_scale: float = 1.0
+    transition_hidden_layers: int = 1
     dtype: Dtype = jnp.float32
 
     def setup(self):
@@ -436,6 +440,7 @@ class RainbowDQNNetwork(nn.Module):
             num_actions=self.num_actions,
             latent_dim=int(latent_dim),
             renormalize=self.renormalize,
+            hidden_layers=self.transition_hidden_layers,
             dtype=self.dtype,
             initializer=initializer,
         )
