@@ -721,67 +721,39 @@ class DataEfficientAtariRunner(Runner):
     def _run_eval_phase(self,):
         """Run evaluation phase.
 
-    The trained weights are evaluated three times: with the training-time
-    stochastic policy (categorical sampling, 'sample') for continuity with
-    earlier runs; near-greedy (argmax with epsilon = epsilon_eval, 'greedy')
-    for comparability with published Atari-100k numbers; and pure greedy
-    (argmax with epsilon = 0, 'argmax'). The sample-vs-greedy gap measures how
-    much residual policy entropy costs at eval; the greedy-vs-argmax gap shows
-    whether the small epsilon is rescuing the deterministic policy from action
-    loops. The near-greedy pass is the primary metric and its tuple is returned.
+    Actions are drawn from the training-time stochastic policy (categorical
+    sampling). Near-greedy and pure-argmax evaluation were tried and removed --
+    both tended to score worse than sampling on this setup.
 
     Returns:
-        num_episodes: int, episodes in the primary (greedy) pass.
-        average_reward: float, undiscounted return of the primary pass.
-        human_norm_return: float, normalized return of the primary pass.
+        num_episodes: int, The number of episodes run in this phase.
+        average_reward: float, The average reward generated in this phase.
     """
-        # No learning in any pass.
+        # No learning; sample actions from the policy.
         self._agent.eval_mode = True
-
-        primary = None
-        for label, greedy, epsilon in (
-            ('sample', False, 0.0),
-            ('greedy', True, self._agent.epsilon_eval),
-            ('argmax', True, 0.0),
-        ):
-            # eval_mode stays True (skips training/storing); greedy_action and
-            # action_epsilon pick the action rule and hold for the whole pass,
-            # since the per-episode reset of greedy_action only fires outside
-            # eval_mode. 'greedy' is near-greedy (eps=epsilon_eval) and is the
-            # primary metric; 'argmax' is pure greedy (eps=0).
-            self._agent.greedy_action = greedy
-            self._agent.action_epsilon = epsilon
-            eval_envs = [
-                self.create_environment_fn()
-                for i in range(self.num_eval_envs)
-            ]
-            _, sum_returns, num_episodes, _, _ = self._run_one_phase(
-                eval_envs,
-                steps=None,
-                max_episodes=self._num_eval_episodes,
-                needs_reset=True,
-                resume_state=None,
-                one_to_one=self.eval_one_to_one,
-                run_mode_str='eval',
-            )
-            average_return = (sum_returns /
-                              num_episodes if num_episodes > 0 else 0.0)
-            human_norm_return = normalize_score(average_return, self.game_name)
-            logging.info(
-                'eval[%s] Average undiscounted return per evaluation '
-                'episode: %.2f',
-                label,
-                average_return,
-            )
-            logging.info(
-                'eval[%s] Average normalized return per evaluation '
-                'episode: %.2f',
-                label,
-                human_norm_return,
-            )
-            if label == 'greedy':
-                primary = (num_episodes, average_return, human_norm_return)
-        return primary
+        eval_envs = [
+            self.create_environment_fn() for i in range(self.num_eval_envs)
+        ]
+        _, sum_returns, num_episodes, _, _ = self._run_one_phase(
+            eval_envs,
+            steps=None,
+            max_episodes=self._num_eval_episodes,
+            needs_reset=True,
+            resume_state=None,
+            one_to_one=self.eval_one_to_one,
+            run_mode_str='eval',
+        )
+        average_return = sum_returns / num_episodes if num_episodes > 0 else 0.0
+        logging.info(
+            'Average undiscounted return per evaluation episode: %.2f',
+            average_return,
+        )
+        human_norm_return = normalize_score(average_return, self.game_name)
+        logging.info(
+            'Average normalized return per evaluation episode: %.2f',
+            human_norm_return,
+        )
+        return num_episodes, average_return, human_norm_return
 
     def _run_one_iteration(self,):
         """Runs one iteration of agent/environment interaction."""

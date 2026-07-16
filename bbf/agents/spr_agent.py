@@ -378,16 +378,12 @@ def exponential_decay_scheduler(decay_period,
 
 @functools.partial(jax.jit, static_argnames=[
     "network_def",
-    "eval_mode",
 ])
 def select_action(
     network_def,
     params,
     state,
     rng,
-    num_actions,
-    eval_mode,
-    epsilon,
 ):
     rng, key = jax.random.split(rng)
     state = spr_networks.process_inputs(state,
@@ -407,21 +403,8 @@ def select_action(
     key = jax.random.split(key, state.shape[0])
     logits, samples = jax.vmap(logits_w_samples, in_axes=0,
                                axis_name="batch")(state, key)
-    # eval_mode is static, so only one branch is traced/compiled per mode.
-    if eval_mode:
-        # Evaluation: near-greedy. Take the policy argmax, but with a small
-        # epsilon of uniform-random actions so a deterministic environment
-        # (sticky_actions=False) cannot lock the greedy policy into a loop.
-        best_actions = jnp.argmax(logits, axis=-1)
-        rng, key0, key1 = jax.random.split(rng, num=3)
-        explore = jax.random.uniform(key0, shape=(state.shape[0],)) < epsilon
-        random_actions = jax.random.randint(key1, (state.shape[0],), 0,
-                                            num_actions)
-        new_actions = jnp.where(explore, random_actions, best_actions)
-    else:
-        # Training: on-policy categorical sample (the agent's only explorer).
-        new_actions = samples
-    return rng, new_actions, jax.nn.softmax(logits)
+    # On-policy categorical sampling for both training and evaluation.
+    return rng, samples, jax.nn.softmax(logits)
 
 
 train_static_argnames = [
@@ -1053,11 +1036,6 @@ class JaxDQNAgent(object):
         self.target_update_period = target_update_period
         self.update_period = update_period
         self.eval_mode = eval_mode
-        self.epsilon_eval = epsilon_eval
-        # Mutable per-pass action epsilon for evaluation; the eval phase sets it
-        # (0 for pure argmax, epsilon_eval for near-greedy). Unused in training
-        # (greedy_action is False there, so select_action samples).
-        self.action_epsilon = epsilon_eval
         self.training_steps = 0
         self.allow_partial_reload = allow_partial_reload
         self._loss_type = loss_type
@@ -1810,19 +1788,11 @@ class BBFAgent(JaxDQNAgent):
                 0,
                 self.num_actions,
             )
-        # greedy_action is False throughout training (greedy_frac == 0), so env
-        # interaction samples; the eval phase toggles it to run the near-greedy
-        # and pure-argmax passes. greedy_action is static under jit (one compile
-        # per branch); action_epsilon is traced, so eps=0 and eps=eval share the
-        # same compiled greedy branch.
         self._rng, action, probs = select_action(
             self.network_def,
             select_params,
             state,
             self._rng,
-            self.num_actions,
-            self.greedy_action,
-            self.action_epsilon,
         )
         #print(probs.shape)
         #if not self.eval_mode:
