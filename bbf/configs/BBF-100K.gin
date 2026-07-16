@@ -45,10 +45,20 @@ BBFAgent.jumps = %MODEL_HORIZON
 BBFAgent.reward_weight = 1.0
 BBFAgent.continue_weight = 1.0
 BBFAgent.imag_horizon = %MODEL_HORIZON
-BBFAgent.imag_actor_weight = 1.0
-BBFAgent.imag_value_weight = 0.0
+BBFAgent.imag_actor_weight = .1
+# Model-generated lambda-return targets into the online critic: keep small.
+# ~2% of the critic objective after PER weighting; raise only if the gate
+# games (Kangaroo/Hero/Jamesbond + ChopperCommand) stay healthy.
+BBFAgent.imag_value_weight = 0.05
 BBFAgent.imag_lambda = 0.95
 BBFAgent.imag_warmup = 2000
+# Fixed entropy coefficient for the imagined actor loss (DreamerV3's eta,
+# calibrated for the percentile-EMA-normalized advantages this loss uses).
+# Replaces x_ent_coef there, which anneals 0.01 -> exactly 0 over the first
+# 80k env steps and stays 0 for the last 20k (~the last two reset cycles),
+# leaving imagination unregularized exactly when the policy is sharpest.
+# None restores the old coupled behavior.
+BBFAgent.imag_entropy_weight = 3e-4
 
 BBFAgent.data_augmentation = True
 BBFAgent.half_precision = False
