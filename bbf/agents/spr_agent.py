@@ -1054,6 +1054,10 @@ class JaxDQNAgent(object):
         self.update_period = update_period
         self.eval_mode = eval_mode
         self.epsilon_eval = epsilon_eval
+        # Mutable per-pass action epsilon for evaluation; the eval phase sets it
+        # (0 for pure argmax, epsilon_eval for near-greedy). Unused in training
+        # (greedy_action is False there, so select_action samples).
+        self.action_epsilon = epsilon_eval
         self.training_steps = 0
         self.allow_partial_reload = allow_partial_reload
         self._loss_type = loss_type
@@ -1807,8 +1811,10 @@ class BBFAgent(JaxDQNAgent):
                 self.num_actions,
             )
         # greedy_action is False throughout training (greedy_frac == 0), so env
-        # interaction samples; the eval phase toggles it to run one near-greedy
-        # pass. eval_mode here is static under jit -> at most one recompile.
+        # interaction samples; the eval phase toggles it to run the near-greedy
+        # and pure-argmax passes. greedy_action is static under jit (one compile
+        # per branch); action_epsilon is traced, so eps=0 and eps=eval share the
+        # same compiled greedy branch.
         self._rng, action, probs = select_action(
             self.network_def,
             select_params,
@@ -1816,7 +1822,7 @@ class BBFAgent(JaxDQNAgent):
             self._rng,
             self.num_actions,
             self.greedy_action,
-            self.epsilon_eval,
+            self.action_epsilon,
         )
         #print(probs.shape)
         #if not self.eval_mode:

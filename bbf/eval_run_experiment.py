@@ -721,27 +721,36 @@ class DataEfficientAtariRunner(Runner):
     def _run_eval_phase(self,):
         """Run evaluation phase.
 
-    The trained weights are evaluated twice: once with the training-time
+    The trained weights are evaluated three times: with the training-time
     stochastic policy (categorical sampling, 'sample') for continuity with
-    earlier runs, and once near-greedy (argmax with epsilon = epsilon_eval,
-    'greedy') for comparability with published Atari-100k numbers. The gap
-    between the two measures how much residual policy entropy costs at eval.
-    The near-greedy pass is the primary metric and its tuple is returned.
+    earlier runs; near-greedy (argmax with epsilon = epsilon_eval, 'greedy')
+    for comparability with published Atari-100k numbers; and pure greedy
+    (argmax with epsilon = 0, 'argmax'). The sample-vs-greedy gap measures how
+    much residual policy entropy costs at eval; the greedy-vs-argmax gap shows
+    whether the small epsilon is rescuing the deterministic policy from action
+    loops. The near-greedy pass is the primary metric and its tuple is returned.
 
     Returns:
         num_episodes: int, episodes in the primary (greedy) pass.
         average_reward: float, undiscounted return of the primary pass.
         human_norm_return: float, normalized return of the primary pass.
     """
-        # No learning in either pass.
+        # No learning in any pass.
         self._agent.eval_mode = True
 
         primary = None
-        for label, greedy in (('sample', False), ('greedy', True)):
-            # eval_mode stays True (skips training/storing); greedy_action alone
-            # picks the action rule and holds for the whole pass, since the
-            # per-episode reset of greedy_action only fires outside eval_mode.
+        for label, greedy, epsilon in (
+            ('sample', False, 0.0),
+            ('greedy', True, self._agent.epsilon_eval),
+            ('argmax', True, 0.0),
+        ):
+            # eval_mode stays True (skips training/storing); greedy_action and
+            # action_epsilon pick the action rule and hold for the whole pass,
+            # since the per-episode reset of greedy_action only fires outside
+            # eval_mode. 'greedy' is near-greedy (eps=epsilon_eval) and is the
+            # primary metric; 'argmax' is pure greedy (eps=0).
             self._agent.greedy_action = greedy
+            self._agent.action_epsilon = epsilon
             eval_envs = [
                 self.create_environment_fn()
                 for i in range(self.num_eval_envs)
@@ -770,7 +779,7 @@ class DataEfficientAtariRunner(Runner):
                 label,
                 human_norm_return,
             )
-            if greedy:
+            if label == 'greedy':
                 primary = (num_episodes, average_return, human_norm_return)
         return primary
 
