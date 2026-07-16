@@ -421,6 +421,7 @@ train_static_argnames = [
     'target_eval_mode',
     'reward_weight',
     'continue_weight',
+    'reward_readout',
     'imag_horizon',
 ]
 
@@ -458,11 +459,13 @@ def train(
     per_step_rewards,
     reward_weight,  # static
     continue_weight,  # static
+    reward_readout,  # static
     imag_horizon,  # static
     imag_actor_mult,
     imag_value_mult,
     imag_discount,
     imag_lambda,
+    imag_entropy_coef,
     return_ema,
 ):
 
@@ -634,10 +637,14 @@ def train(
             aux_model = {}
             model_loss = jnp.asarray(0.0, dtype=jnp.float32)
             if reward_weight > 0 or continue_weight > 0:
-                # Rollout features keep gradients so reward errors also shape
-                # the encoder/transition model; the real-frame features come
-                # from the target encoder and only train the heads.
-                rollout_reps = x.rollout_reps
+                # By default rollout features keep gradients so reward errors
+                # also shape the encoder/transition model (r2dreamer-style
+                # grounding). reward_readout makes the heads strict readouts:
+                # SPR becomes the transition model's sole supervisor. The
+                # real-frame features come from the target encoder and only
+                # train the heads either way.
+                rollout_reps = (jax.lax.stop_gradient(x.rollout_reps)
+                                if reward_readout else x.rollout_reps)
                 real_reps = jax.lax.stop_gradient(future_latents)
 
                 def reward_fn(feature):
@@ -744,7 +751,7 @@ def train(
                 imag_actor_loss = jnp.mean(
                     loss_multipliers[:, None] * weight[:, :-1] *
                     -(imagined['log_probs'][:, :-1] * adv +
-                      x_ent_coef * imagined['entropies'][:, :-1]))
+                      imag_entropy_coef * imagined['entropies'][:, :-1]))
 
                 def q_logits_fn(feature):
                     return network_def.apply(
@@ -764,8 +771,10 @@ def train(
                 imag_target_dist = jax.vmap(
                     jax.vmap(lambda r: project_distribution(
                         r[None], jnp.ones(1), support)))(ret)
+                # Same PER weights as the replay critic loss -- the imagined
+                # targets train the same Q head from the same start states.
                 imag_value_loss = jnp.mean(
-                    weight[:, :-1] * -jnp.sum(
+                    loss_multipliers[:, None] * weight[:, :-1] * -jnp.sum(
                         imag_target_dist *
                         jax.nn.log_softmax(chosen_imag_logits), -1))
 
@@ -1100,12 +1109,14 @@ class BBFAgent(JaxDQNAgent):
         offline_update_frac=0,
         reward_weight=1.0,
         continue_weight=1.0,
+        reward_readout=False,
         imag_horizon=0,
         imag_actor_weight=0.0,
         imag_value_weight=0.0,
         imag_discount=None,
         imag_lambda=0.95,
         imag_warmup=2000,
+        imag_entropy_weight=None,
         half_precision=False,
         seed=None,
         log_every=None,
@@ -1164,6 +1175,7 @@ class BBFAgent(JaxDQNAgent):
 
         self.reward_weight = float(reward_weight)
         self.continue_weight = float(continue_weight)
+        self.reward_readout = bool(reward_readout)
         self.imag_horizon = int(imag_horizon)
         self.imag_actor_weight = float(imag_actor_weight)
         self.imag_value_weight = float(imag_value_weight)
@@ -1173,6 +1185,12 @@ class BBFAgent(JaxDQNAgent):
                               float(imag_discount))
         self.imag_lambda = float(imag_lambda)
         self.imag_warmup = int(imag_warmup)
+        # None -> imagination entropy follows the decaying x_ent_coef
+        # schedule (original behavior); a float decouples it. 3e-4 is
+        # DreamerV3's eta, calibrated for advantages normalized by the same
+        # 5th-95th percentile return EMA this loss uses.
+        self.imag_entropy_weight = (None if imag_entropy_weight is None else
+                                    float(imag_entropy_weight))
         self.imag_return_ema = np.zeros((2,), dtype=np.float32)
         self.use_world_model = (self.spr_weight > 0 or self.reward_weight > 0
                                 or self.continue_weight > 0 or
@@ -1576,11 +1594,14 @@ class BBFAgent(JaxDQNAgent):
             self.replay_elements["reward"],
             self.reward_weight,
             self.continue_weight,
+            self.reward_readout,
             self.imag_horizon,
             imag_actor_mult,
             imag_value_mult,
             imag_discount,
             self.imag_lambda,
+            (self.x_ent_coef if self.imag_entropy_weight is None else
+             self.imag_entropy_weight),
             self.imag_return_ema,
         )
         self.imag_return_ema = np.asarray(new_return_ema)
