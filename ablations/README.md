@@ -54,10 +54,13 @@ reference clusters (Pong 17.41-20.41 ×5, Gopher 1533-1808 ×4).
 RESULT 2026-07-17: Pong 11.54 FAIL, Gopher 1554 weak pass — replacement
 semantics withdrawn as default (it also strips the early 1e-2 entropy).
 
-**`06` (entropy true floor)** — the salvage variant: max(x_ent_coef, 3e-4)
-via the new imag_entropy_floor flag; late protection only. Same games, pins,
-and bands as 03; Pong recovering to ≥17 would also confirm early-stripping
-was the replacement variant's harm mechanism.
+**`06` (entropy true floor) — tested and removed.** The salvage variant,
+max(x_ent_coef, 3e-4) late-only protection, also failed: Pong 14.11
+(refs 17.41-20.41), Gopher 582.8 (below the baseline minimum). Pong's
+dose-response (coupled 17.4-20.4 > floor 14.11 > replacement 11.54) says
+the anneal-to-zero is load-bearing in imagination, not an oversight. The
+imag_entropy_floor flag and this script were removed; the entropy line of
+work is closed.
 
 **`05` (seed fill-ins)** — 8 runs to make the 26-game table citable: Seaquest
 ×2, UpNDown ×2 (zero clean seeds), Frostbite +1 (the +113% is n=1), Freeway,

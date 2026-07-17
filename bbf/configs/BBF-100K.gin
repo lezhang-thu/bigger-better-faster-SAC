@@ -52,16 +52,14 @@ BBFAgent.imag_actor_weight = .1
 BBFAgent.imag_value_weight = 0.05
 BBFAgent.imag_lambda = 0.95
 BBFAgent.imag_warmup = 2000
-# Imagination entropy. x_ent_coef anneals 0.01 -> exactly 0 over the first
-# 80k env steps, leaving imagination unregularized for the last ~two reset
-# cycles. imag_entropy_weight replaces the coefficient outright (DreamerV3
-# style) -- its 3e-4 default was withdrawn after failing the Pong check
-# (11.54 vs 17.41+ references): replacement also strips the early 1e-2
-# entropy, it does not only add late protection. imag_entropy_floor instead
-# lower-bounds the coefficient via max(x_ent_coef, floor) -- late protection
-# only; validate with ablations/06-entropy-true-floor.sh before defaulting.
+# Imagination entropy: keep it coupled to the annealed x_ent_coef
+# (0.01 -> 0 over the first 80k env steps). Decoupling was tried twice and
+# failed with a clean dose-response on Pong (refs 17.41-20.41): fixed 3e-4
+# replacement -> 11.54; max(x_ent_coef, 3e-4) late-only floor -> 14.11
+# (Gopher 582.8, below baseline min). The anneal-to-zero is load-bearing in
+# imagination as well as replay; a float here overrides it as an ablation
+# only.
 BBFAgent.imag_entropy_weight = None
-BBFAgent.imag_entropy_floor = None
 
 BBFAgent.data_augmentation = True
 BBFAgent.half_precision = False
