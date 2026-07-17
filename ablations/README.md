@@ -48,9 +48,16 @@ re-run the value gate on top of it later.
 
 ## Step 3 — cheap validations, fill spare box time anytime
 
-**`03` (entropy-floor check)** — Pong + Gopher with the new 3e-4 floor as the
-only delta. One seed each suffices against their tight reference clusters
-(Pong 17.41-20.41 ×5, Gopher 1533-1808 ×4).
+**`03` (entropy replacement check)** — Pong + Gopher with the fixed 3e-4
+coefficient as the only delta. One seed each suffices against their tight
+reference clusters (Pong 17.41-20.41 ×5, Gopher 1533-1808 ×4).
+RESULT 2026-07-17: Pong 11.54 FAIL, Gopher 1554 weak pass — replacement
+semantics withdrawn as default (it also strips the early 1e-2 entropy).
+
+**`06` (entropy true floor)** — the salvage variant: max(x_ent_coef, 3e-4)
+via the new imag_entropy_floor flag; late protection only. Same games, pins,
+and bands as 03; Pong recovering to ≥17 would also confirm early-stripping
+was the replacement variant's harm mechanism.
 
 **`05` (seed fill-ins)** — 8 runs to make the 26-game table citable: Seaquest
 ×2, UpNDown ×2 (zero clean seeds), Frostbite +1 (the +113% is n=1), Freeway,

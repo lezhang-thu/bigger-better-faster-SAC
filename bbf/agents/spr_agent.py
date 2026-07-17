@@ -1117,6 +1117,7 @@ class BBFAgent(JaxDQNAgent):
         imag_lambda=0.95,
         imag_warmup=2000,
         imag_entropy_weight=None,
+        imag_entropy_floor=None,
         half_precision=False,
         seed=None,
         log_every=None,
@@ -1191,6 +1192,12 @@ class BBFAgent(JaxDQNAgent):
         # 5th-95th percentile return EMA this loss uses.
         self.imag_entropy_weight = (None if imag_entropy_weight is None else
                                     float(imag_entropy_weight))
+        # None -> no floor; a float lower-bounds the imagination entropy
+        # coefficient via max(x_ent_coef, floor) -- late protection without
+        # touching the early schedule. Ignored when imag_entropy_weight is
+        # set.
+        self.imag_entropy_floor = (None if imag_entropy_floor is None else
+                                   float(imag_entropy_floor))
         self.imag_return_ema = np.zeros((2,), dtype=np.float32)
         self.use_world_model = (self.spr_weight > 0 or self.reward_weight > 0
                                 or self.continue_weight > 0 or
@@ -1554,6 +1561,15 @@ class BBFAgent(JaxDQNAgent):
         imag_discount = (self.gamma_scheduler(self.cycle_grad_steps)
                          if self.imag_discount is None else self.imag_discount)
 
+        # Imagination entropy coefficient: a fixed replacement wins if set;
+        # otherwise an optional floor lower-bounds the annealed x_ent_coef.
+        if self.imag_entropy_weight is not None:
+            imag_entropy_coef = self.imag_entropy_weight
+        elif self.imag_entropy_floor is not None:
+            imag_entropy_coef = max(self.x_ent_coef, self.imag_entropy_floor)
+        else:
+            imag_entropy_coef = self.x_ent_coef
+
         self._rng, train_rng = jax.random.split(self._rng)
         (
             new_online_params,
@@ -1600,8 +1616,7 @@ class BBFAgent(JaxDQNAgent):
             imag_value_mult,
             imag_discount,
             self.imag_lambda,
-            (self.x_ent_coef if self.imag_entropy_weight is None else
-             self.imag_entropy_weight),
+            imag_entropy_coef,
             self.imag_return_ema,
         )
         self.imag_return_ema = np.asarray(new_return_ema)

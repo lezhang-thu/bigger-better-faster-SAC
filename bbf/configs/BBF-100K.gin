@@ -52,13 +52,16 @@ BBFAgent.imag_actor_weight = .1
 BBFAgent.imag_value_weight = 0.05
 BBFAgent.imag_lambda = 0.95
 BBFAgent.imag_warmup = 2000
-# Fixed entropy coefficient for the imagined actor loss (DreamerV3's eta,
-# calibrated for the percentile-EMA-normalized advantages this loss uses).
-# Replaces x_ent_coef there, which anneals 0.01 -> exactly 0 over the first
-# 80k env steps and stays 0 for the last 20k (~the last two reset cycles),
-# leaving imagination unregularized exactly when the policy is sharpest.
-# None restores the old coupled behavior.
-BBFAgent.imag_entropy_weight = 3e-4
+# Imagination entropy. x_ent_coef anneals 0.01 -> exactly 0 over the first
+# 80k env steps, leaving imagination unregularized for the last ~two reset
+# cycles. imag_entropy_weight replaces the coefficient outright (DreamerV3
+# style) -- its 3e-4 default was withdrawn after failing the Pong check
+# (11.54 vs 17.41+ references): replacement also strips the early 1e-2
+# entropy, it does not only add late protection. imag_entropy_floor instead
+# lower-bounds the coefficient via max(x_ent_coef, floor) -- late protection
+# only; validate with ablations/06-entropy-true-floor.sh before defaulting.
+BBFAgent.imag_entropy_weight = None
+BBFAgent.imag_entropy_floor = None
 
 BBFAgent.data_augmentation = True
 BBFAgent.half_precision = False
