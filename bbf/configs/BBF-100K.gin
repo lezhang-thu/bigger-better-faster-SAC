@@ -44,12 +44,24 @@ BBFAgent.jumps = %MODEL_HORIZON
 # World-model heads and imagination (r2dreamer-style, on the SPR model).
 BBFAgent.reward_weight = 1.0
 BBFAgent.continue_weight = 1.0
+# Grounding-gradient surgery (PCGrad on one loss): project out the component
+# of the reward/continue gradient that conflicts with the TD+SPR direction
+# at the shared encoder/TM -- the soft alternative to the all-or-nothing
+# reward_readout (only meaningful when reward_readout=False). Costs a second
+# backward pass when enabled. Logs GroundCos (conflict cosine).
+BBFAgent.reward_grad_surgery = False
 BBFAgent.imag_horizon = %MODEL_HORIZON
 BBFAgent.imag_actor_weight = .1
 # Model-generated lambda-return targets into the online critic: keep small.
 # ~2% of the critic objective after PER weighting; raise only if the gate
 # games (Kangaroo/Hero/Jamesbond + ChopperCommand) stay healthy.
 BBFAgent.imag_value_weight = 0.05
+# Trust region for the imagined critic targets: bound the lambda-return
+# within imag_value_trust * return-scale of the target critic's estimate for
+# the taken action (None = off, unbounded). Actor advantages are untouched.
+# Aimed at the model-confident-but-wrong target class (Gopher/Jamesbond).
+# Logs ImagTrustClip (fraction of targets hitting the bound).
+BBFAgent.imag_value_trust = None
 BBFAgent.imag_lambda = 0.95
 BBFAgent.imag_warmup = 2000
 # Imagination entropy: keep it coupled to the annealed x_ent_coef

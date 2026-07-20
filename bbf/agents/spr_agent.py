@@ -422,6 +422,7 @@ train_static_argnames = [
     'reward_weight',
     'continue_weight',
     'reward_readout',
+    'reward_grad_surgery',
     'imag_horizon',
 ]
 
@@ -460,12 +461,14 @@ def train(
     reward_weight,  # static
     continue_weight,  # static
     reward_readout,  # static
+    reward_grad_surgery,  # static
     imag_horizon,  # static
     imag_actor_mult,
     imag_value_mult,
     imag_discount,
     imag_lambda,
     imag_entropy_coef,
+    imag_value_trust,
     return_ema,
 ):
 
@@ -768,9 +771,30 @@ def train(
                             jnp.int32),
                         axis=2,
                     ), 2)
+                # Trust region for the imagined critic targets: bound the
+                # lambda-return within imag_value_trust * scale of the target
+                # critic's estimate for the taken action (inf = off). The
+                # actor's advantages keep the raw return.
+                q_choice = jnp.squeeze(
+                    jnp.take_along_axis(
+                        imag_q_target[:, :-1],
+                        imagined['actions'][:, :-1, None].astype(jnp.int32),
+                        axis=2), 2)
+                trust_band = imag_value_trust * scale
+                value_ret = jnp.where(
+                    jnp.isfinite(trust_band),
+                    q_choice + jnp.clip(ret - q_choice, -trust_band,
+                                        trust_band),
+                    ret)
+                trust_clip_frac = jnp.mean(
+                    jnp.where(
+                        jnp.isfinite(trust_band),
+                        (jnp.abs(ret - q_choice) >= trust_band).astype(
+                            jnp.float32), 0.0))
+
                 imag_target_dist = jax.vmap(
                     jax.vmap(lambda r: project_distribution(
-                        r[None], jnp.ones(1), support)))(ret)
+                        r[None], jnp.ones(1), support)))(value_ret)
                 # Same PER weights as the replay critic loss -- the imagined
                 # targets train the same Q head from the same start states.
                 imag_value_loss = jnp.mean(
@@ -786,6 +810,7 @@ def train(
                     "ImagReward": jnp.mean(imag_rewards),
                     "ImagContinue": jnp.mean(imag_continues),
                     "ImagEntropy": jnp.mean(imagined['entropies']),
+                    "ImagTrustClip": trust_clip_frac,
                 })
 
             policy_out = jax.vmap(policy_loss, in_axes=0,
@@ -796,6 +821,7 @@ def train(
                           imag_value_mult * imag_value_loss)
             aux_losses = {
                 "TotalLoss": total_loss,
+                "ModelLoss": model_loss,
                 "DQNLoss": jnp.mean(dqn_loss),
                 "TD Error": jnp.mean(td_error),
                 "SPRLoss": jnp.mean(spr_loss),
@@ -828,22 +854,46 @@ def train(
                                                axis_name="batch")(future_states)
         spr_targets = spr_targets.transpose(1, 0, 2)
 
-        # Get the unweighted loss without taking its mean for updating priorities.
-        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
         n_samples = current_state.shape[0]
         splits = jax.random.split(rng2, 2 * n_samples + 1)
         rng2 = splits[0]
         key = splits[1:n_samples + 1]
         imag_keys = splits[n_samples + 1:]
-        (_, aux_losses), grad = grad_fn(
-            online_params,
-            target,
-            spr_targets,
-            future_latents,
-            loss_weights,
-            key,
-            imag_keys,
-        )
+        loss_args = (target, spr_targets, future_latents, loss_weights, key,
+                     imag_keys)
+        if reward_grad_surgery:
+            # Two backward passes: main = everything except the grounding
+            # losses, model = reward/continue only. The component of the
+            # grounding gradient that conflicts with the main direction is
+            # projected out (PCGrad applied to one loss), so grounding acts
+            # where it agrees with TD+SPR and is disarmed where it fights.
+            def main_loss_fn(params, *args):
+                total, aux = loss_fn(params, *args)
+                return total - aux["ModelLoss"], aux
+
+            def model_loss_fn(params, *args):
+                total, aux = loss_fn(params, *args)
+                return aux["ModelLoss"], aux
+
+            (_, aux_losses), g_main = jax.value_and_grad(
+                main_loss_fn, has_aux=True)(online_params, *loss_args)
+            (_, _), g_model = jax.value_and_grad(
+                model_loss_fn, has_aux=True)(online_params, *loss_args)
+            tsum = lambda t: jax.tree_util.tree_reduce(lambda a, b: a + b, t)
+            dot = tsum(jax.tree_util.tree_map(jnp.vdot, g_model, g_main))
+            nm = tsum(
+                jax.tree_util.tree_map(lambda a: jnp.vdot(a, a), g_main))
+            mm = tsum(
+                jax.tree_util.tree_map(lambda a: jnp.vdot(a, a), g_model))
+            coef = jnp.where(dot < 0, dot / (nm + 1e-12), 0.0)
+            grad = jax.tree_util.tree_map(
+                lambda gm, gd: gm + gd - coef * gm, g_main, g_model)
+            aux_losses["GroundCos"] = dot * jax.lax.rsqrt(nm * mm + 1e-12)
+        else:
+            # Get the unweighted loss without taking its mean for updating
+            # priorities.
+            grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+            (_, aux_losses), grad = grad_fn(online_params, *loss_args)
         new_return_ema = aux_losses.pop("ReturnEMAState")
 
         updates, new_optimizer_state = optimizer.update(grad,
@@ -1110,9 +1160,11 @@ class BBFAgent(JaxDQNAgent):
         reward_weight=1.0,
         continue_weight=1.0,
         reward_readout=False,
+        reward_grad_surgery=False,
         imag_horizon=0,
         imag_actor_weight=0.0,
         imag_value_weight=0.0,
+        imag_value_trust=None,
         imag_discount=None,
         imag_lambda=0.95,
         imag_warmup=2000,
@@ -1176,9 +1228,18 @@ class BBFAgent(JaxDQNAgent):
         self.reward_weight = float(reward_weight)
         self.continue_weight = float(continue_weight)
         self.reward_readout = bool(reward_readout)
+        # PCGrad on one loss: project the conflicting component out of the
+        # reward/continue gradient at the shared encoder/TM. Costs a second
+        # backward pass; only meaningful with reward_readout=False.
+        self.reward_grad_surgery = bool(reward_grad_surgery)
         self.imag_horizon = int(imag_horizon)
         self.imag_actor_weight = float(imag_actor_weight)
         self.imag_value_weight = float(imag_value_weight)
+        # None -> unbounded (original behavior); a float bounds the imagined
+        # critic targets within imag_value_trust * return-scale of the
+        # target critic's estimate for the taken action.
+        self.imag_value_trust = (None if imag_value_trust is None else
+                                 float(imag_value_trust))
         # None tracks the annealed TD discount (resolved per gradient step in
         # _training_step_update); a float pins it to that value instead.
         self.imag_discount = (None if imag_discount is None else
@@ -1595,6 +1656,7 @@ class BBFAgent(JaxDQNAgent):
             self.reward_weight,
             self.continue_weight,
             self.reward_readout,
+            self.reward_grad_surgery,
             self.imag_horizon,
             imag_actor_mult,
             imag_value_mult,
@@ -1602,6 +1664,8 @@ class BBFAgent(JaxDQNAgent):
             self.imag_lambda,
             (self.x_ent_coef if self.imag_entropy_weight is None else
              self.imag_entropy_weight),
+            (float('inf')
+             if self.imag_value_trust is None else self.imag_value_trust),
             self.imag_return_ema,
         )
         self.imag_return_ema = np.asarray(new_return_ema)
@@ -1631,8 +1695,9 @@ class BBFAgent(JaxDQNAgent):
 
         if self.grad_steps % 500 < self._batches_to_group:
             log_keys = ("RewardLoss", "ContinueLoss", "RewardCorr",
-                        "ImagActorLoss", "ImagValueLoss", "ImagRet",
-                        "ImagReward", "ImagContinue", "ImagEntropy")
+                        "GroundCos", "ImagActorLoss", "ImagValueLoss",
+                        "ImagRet", "ImagReward", "ImagContinue",
+                        "ImagEntropy", "ImagTrustClip")
             msgs = ["grad_step {}".format(self.grad_steps)]
             for k in log_keys:
                 if k in aux_losses:
