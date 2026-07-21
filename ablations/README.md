@@ -80,3 +80,34 @@ SPR, so it gates on Pong/Gopher/Hero first; only then try it on loser games.
 - Residual, unbindable delta vs true c6e22ae in all current-code runs: commit
   272a784 PER-weights the imagined actor loss (effective actor weight ~half of
   the unweighted 0.1). Note it when comparing decimal-for-decimal.
+
+## Suite-scale rows added after the 2026-07-16 plan
+
+The scripts numbered 07 and up postdate the plan above and run at full 26-game
+suite scale; each carries a self-documenting header, so only the two newest are
+catalogued here. Their common reference is the combo `07-suite-combo.sh`
+(RUN=50: `reward_readout=True` + `imag_value_weight=0.05` + actor 0.1 + coupled
+entropy + annealed discount); both below are single-delta variants of it.
+
+**`15-suite-combo-rr4.sh` (RUN=80)** — the combo at replay ratio 4
+(`replay_ratio=128`) instead of 2. `reset_every=10_000` ships with it and is
+*not* optional: it is counted in env steps but encodes a gradient-step schedule
+(`20_000 x RR2 = 5_000 x RR8 = 40_000` grad steps per reset cycle, per the
+BBF-100K.gin note), so RR=4 needs resets twice as often; leaving it at 20_000
+would double the cycle. `cycle_steps`/`imag_warmup` key on gradient steps and
+adapt on their own, so they are deliberately untouched. Caveat: the
+bbf-raw-scores.txt anchors are RR=2, so attributing anything to the combo *at*
+RR=4 needs a base@RR4 control arm (not written yet); budget ~2x 07's box-time.
+
+**`16-suite-readout-only.sh` (RUN=62)** — the combo minus the imagined value
+loss (`imag_value_weight=0.0`, annealed discount kept). Arm R of the
+DA-attribution design and the direct mirror of `12-suite-value-only.sh` (arm V,
+RUN=60, the "-readout" row). Use `0.0`, never `None`: the weight is `float()`'d
+unconditionally (spr_agent.py:1237) so `None` crashes the constructor before
+training. The imagined actor (0.1) stays live, so only the model-generated
+critic targets are removed. Pre-registered: value-only already convicted the
+readout for DemonAttack (value-only DA 38923), so readout-only DA should stay
+low (<=~18500, like combo's {13562, 18283}); >=~22000 would mean it takes both
+ingredients. Prior readout+value-0 data (Asterix 8213, Gopher 1608, Breakout
+324, BankHeist 46.2, CC {11161, 2329}) is all fixed-discount arm-D; this is its
+annealed-discount, suite-scale counterpart.
