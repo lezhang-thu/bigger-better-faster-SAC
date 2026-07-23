@@ -99,6 +99,174 @@ def masked_correlation(x, y, mask, eps=1e-6):
     return cov / jnp.sqrt(x_var * y_var + 1e-12)
 
 
+GROUNDING_SHARED_KEYS = ("encoder", "transition_model")
+
+
+def _tree_inner_product(left, right):
+    """Returns the inner product of two identically structured pytrees."""
+    products = jax.tree_util.tree_leaves(
+        jax.tree_util.tree_map(jnp.vdot, left, right))
+    return functools.reduce(lambda x, y: x + y, products)
+
+
+def _tree_squared_norm(tree):
+    """Returns the squared L2 norm of all leaves in a pytree."""
+    squares = jax.tree_util.tree_leaves(
+        jax.tree_util.tree_map(lambda x: jnp.vdot(x, x), tree))
+    return functools.reduce(lambda x, y: x + y, squares)
+
+
+def _replace_param_blocks(tree, replacements):
+    """Returns a pytree with selected top-level parameter blocks replaced."""
+    params = tree["params"]
+    if isinstance(params, FrozenDict):
+        params = params.copy(add_or_replace=replacements)
+    else:
+        params = dict(params)
+        params.update(replacements)
+    if isinstance(tree, FrozenDict):
+        return tree.copy(add_or_replace={"params": params})
+    result = dict(tree)
+    result["params"] = params
+    return result
+
+
+def _model_rollout_features(rollout_reps, reward_readout, continue_readout):
+    """Selects independently detached features for reward and continue heads."""
+    reward_reps = (jax.lax.stop_gradient(rollout_reps)
+                   if reward_readout else rollout_reps)
+    # reward_readout historically made both heads strict readouts. Preserve
+    # that behavior while allowing continuation alone to be detached.
+    continue_reps = (jax.lax.stop_gradient(rollout_reps)
+                     if reward_readout or continue_readout else rollout_reps)
+    return reward_reps, continue_reps
+
+
+def _gradient_block_stats(g_main, g_model, key):
+    """Returns dot product and squared norms for one parameter block."""
+    main_block = g_main["params"][key]
+    model_block = g_model["params"][key]
+    return (
+        _tree_inner_product(model_block, main_block),
+        _tree_squared_norm(main_block),
+        _tree_squared_norm(model_block),
+    )
+
+
+def _safe_cosine(dot, main_squared_norm, model_squared_norm):
+    return dot * jax.lax.rsqrt(
+        main_squared_norm * model_squared_norm + 1e-12)
+
+
+def _apply_shared_grounding_surgery(
+    g_main,
+    g_model,
+    grounding_grad_norm_ratio,
+):
+    """Projects and caps grounding only on encoder/transition-model blocks.
+
+  The model gradient is first PCGrad-projected against the non-grounding
+  gradient in the joint encoder+transition-model subspace. The projected model
+  gradient is then capped to `grounding_grad_norm_ratio` times the main
+  gradient norm in that same subspace. Non-shared blocks are left as the
+  ordinary sum of their task gradients.
+
+  Args:
+    g_main: Gradient of every loss except reward/continue prediction.
+    g_model: Gradient of reward/continue prediction only.
+    grounding_grad_norm_ratio: Finite nonnegative cap ratio, or inf for no cap.
+
+  Returns:
+    Tuple of the combined gradient and scalar diagnostic metrics.
+  """
+    block_stats = {
+        key: _gradient_block_stats(g_main, g_model, key)
+        for key in GROUNDING_SHARED_KEYS
+    }
+    dot = sum(stats[0] for stats in block_stats.values())
+    main_squared_norm = sum(stats[1] for stats in block_stats.values())
+    model_squared_norm = sum(stats[2] for stats in block_stats.values())
+
+    projection_coef = jnp.where(
+        dot < 0, dot / (main_squared_norm + 1e-12), 0.0)
+    projected_model = {
+        key: jax.tree_util.tree_map(
+            lambda gd, gm: gd - projection_coef * gm,
+            g_model["params"][key],
+            g_main["params"][key],
+        )
+        for key in GROUNDING_SHARED_KEYS
+    }
+    projected_squared_norm = sum(
+        _tree_squared_norm(projected_model[key])
+        for key in GROUNDING_SHARED_KEYS)
+
+    cap_is_finite = jnp.isfinite(grounding_grad_norm_ratio)
+    finite_ratio = jnp.where(cap_is_finite, grounding_grad_norm_ratio, 0.0)
+    max_model_norm = finite_ratio * jnp.sqrt(main_squared_norm)
+    finite_cap_scale = jnp.where(
+        projected_squared_norm > 0,
+        jnp.minimum(
+            1.0,
+            max_model_norm / (jnp.sqrt(projected_squared_norm) + 1e-12),
+        ),
+        1.0,
+    )
+    cap_scale = jnp.where(cap_is_finite, finite_cap_scale, 1.0)
+    accepted_model = {
+        key: jax.tree_util.tree_map(lambda gd: cap_scale * gd,
+                                    projected_model[key])
+        for key in GROUNDING_SHARED_KEYS
+    }
+
+    grad = jax.tree_util.tree_map(lambda gm, gd: gm + gd, g_main, g_model)
+    shared_updates = {
+        key: jax.tree_util.tree_map(
+            lambda gm, gd: gm + gd,
+            g_main["params"][key],
+            accepted_model[key],
+        )
+        for key in GROUNDING_SHARED_KEYS
+    }
+    grad = _replace_param_blocks(grad, shared_updates)
+
+    metrics = {
+        "GroundCos":
+            _safe_cosine(dot, main_squared_norm, model_squared_norm),
+        "GroundSharedMainNorm":
+            jnp.sqrt(main_squared_norm),
+        "GroundSharedModelNorm":
+            jnp.sqrt(model_squared_norm),
+        "GroundSharedProjectedNorm":
+            jnp.sqrt(projected_squared_norm),
+        "GroundSharedAcceptedNorm":
+            cap_scale * jnp.sqrt(projected_squared_norm),
+        "GroundCapScale":
+            cap_scale,
+    }
+    metric_prefixes = {
+        "encoder": "GroundEncoder",
+        "transition_model": "GroundTM",
+    }
+    for key, prefix in metric_prefixes.items():
+        block_dot, block_main_squared_norm, block_model_squared_norm = (
+            block_stats[key])
+        metrics.update({
+            prefix + "Cos":
+                _safe_cosine(block_dot, block_main_squared_norm,
+                             block_model_squared_norm),
+            prefix + "MainNorm":
+                jnp.sqrt(block_main_squared_norm),
+            prefix + "ModelNorm":
+                jnp.sqrt(block_model_squared_norm),
+            prefix + "ProjectedNorm":
+                jnp.sqrt(_tree_squared_norm(projected_model[key])),
+            prefix + "AcceptedNorm":
+                jnp.sqrt(_tree_squared_norm(accepted_model[key])),
+        })
+    return grad, metrics
+
+
 def imagined_lambda_return(rewards, continues, values, discount, lamb):
     """Lambda returns over imagined trajectories.
 
@@ -422,7 +590,9 @@ train_static_argnames = [
     'reward_weight',
     'continue_weight',
     'reward_readout',
+    'continue_readout',
     'reward_grad_surgery',
+    'reward_grad_surgery_shared',
     'imag_horizon',
 ]
 
@@ -461,7 +631,10 @@ def train(
     reward_weight,  # static
     continue_weight,  # static
     reward_readout,  # static
+    continue_readout,  # static
     reward_grad_surgery,  # static
+    reward_grad_surgery_shared,  # static
+    grounding_grad_norm_ratio,
     imag_horizon,  # static
     imag_actor_mult,
     imag_value_mult,
@@ -640,14 +813,17 @@ def train(
             aux_model = {}
             model_loss = jnp.asarray(0.0, dtype=jnp.float32)
             if reward_weight > 0 or continue_weight > 0:
-                # By default rollout features keep gradients so reward errors
-                # also shape the encoder/transition model (r2dreamer-style
-                # grounding). reward_readout makes the heads strict readouts:
-                # SPR becomes the transition model's sole supervisor. The
-                # real-frame features come from the target encoder and only
-                # train the heads either way.
-                rollout_reps = (jax.lax.stop_gradient(x.rollout_reps)
-                                if reward_readout else x.rollout_reps)
+                # By default both prediction losses shape the encoder and
+                # transition model. reward_readout preserves the historical
+                # strict-readout behavior for both heads; continue_readout
+                # independently detaches only the dense continuation loss so
+                # reward can remain grounded.
+                reward_rollout_reps, continue_rollout_reps = (
+                    _model_rollout_features(
+                        x.rollout_reps,
+                        reward_readout,
+                        continue_readout,
+                    ))
                 real_reps = jax.lax.stop_gradient(future_latents)
 
                 def reward_fn(feature):
@@ -662,7 +838,8 @@ def train(
                         feature,
                         method=network_def.continue_from_feature)
 
-                pred_reward_roll = jax.vmap(jax.vmap(reward_fn))(rollout_reps)
+                pred_reward_roll = jax.vmap(jax.vmap(reward_fn))(
+                    reward_rollout_reps)
                 pred_reward_real = jax.vmap(jax.vmap(reward_fn))(real_reps)
                 # Real frames past a terminal belong to the next episode.
                 real_mask = model_mask * continue_targets
@@ -672,7 +849,7 @@ def train(
                         jnp.square(pred_reward_real - model_rewards),
                         real_mask))
                 continue_logits = jax.vmap(
-                    jax.vmap(continue_fn))(rollout_reps)
+                    jax.vmap(continue_fn))(continue_rollout_reps)
                 continue_loss = masked_mean(
                     sigmoid_binary_cross_entropy(continue_logits,
                                                  continue_targets),
@@ -862,11 +1039,10 @@ def train(
         loss_args = (target, spr_targets, future_latents, loss_weights, key,
                      imag_keys)
         if reward_grad_surgery:
-            # Two backward passes: main = everything except the grounding
-            # losses, model = reward/continue only. The component of the
-            # grounding gradient that conflicts with the main direction is
-            # projected out (PCGrad applied to one loss), so grounding acts
-            # where it agrees with TD+SPR and is disarmed where it fights.
+            # Two backward passes: main = everything except reward/continue
+            # prediction, model = reward/continue only. Legacy surgery applies
+            # PCGrad globally. The v2 path restricts projection and norm
+            # control to the shared encoder/transition-model blocks.
             def main_loss_fn(params, *args):
                 total, aux = loss_fn(params, *args)
                 return total - aux["ModelLoss"], aux
@@ -879,16 +1055,26 @@ def train(
                 main_loss_fn, has_aux=True)(online_params, *loss_args)
             (_, _), g_model = jax.value_and_grad(
                 model_loss_fn, has_aux=True)(online_params, *loss_args)
-            tsum = lambda t: jax.tree_util.tree_reduce(lambda a, b: a + b, t)
-            dot = tsum(jax.tree_util.tree_map(jnp.vdot, g_model, g_main))
-            nm = tsum(
-                jax.tree_util.tree_map(lambda a: jnp.vdot(a, a), g_main))
-            mm = tsum(
-                jax.tree_util.tree_map(lambda a: jnp.vdot(a, a), g_model))
-            coef = jnp.where(dot < 0, dot / (nm + 1e-12), 0.0)
-            grad = jax.tree_util.tree_map(
-                lambda gm, gd: gm + gd - coef * gm, g_main, g_model)
-            aux_losses["GroundCos"] = dot * jax.lax.rsqrt(nm * mm + 1e-12)
+            if reward_grad_surgery_shared:
+                grad, ground_metrics = _apply_shared_grounding_surgery(
+                    g_main,
+                    g_model,
+                    grounding_grad_norm_ratio,
+                )
+                aux_losses.update(ground_metrics)
+            else:
+                tsum = lambda t: jax.tree_util.tree_reduce(
+                    lambda a, b: a + b, t)
+                dot = tsum(jax.tree_util.tree_map(jnp.vdot, g_model, g_main))
+                nm = tsum(
+                    jax.tree_util.tree_map(lambda a: jnp.vdot(a, a), g_main))
+                mm = tsum(
+                    jax.tree_util.tree_map(lambda a: jnp.vdot(a, a), g_model))
+                coef = jnp.where(dot < 0, dot / (nm + 1e-12), 0.0)
+                grad = jax.tree_util.tree_map(
+                    lambda gm, gd: gm + gd - coef * gm, g_main, g_model)
+                aux_losses["GroundCos"] = (
+                    dot * jax.lax.rsqrt(nm * mm + 1e-12))
         else:
             # Get the unweighted loss without taking its mean for updating
             # priorities.
@@ -1160,7 +1346,10 @@ class BBFAgent(JaxDQNAgent):
         reward_weight=1.0,
         continue_weight=1.0,
         reward_readout=False,
+        continue_readout=False,
         reward_grad_surgery=False,
+        reward_grad_surgery_shared=False,
+        grounding_grad_norm_ratio=None,
         imag_horizon=0,
         imag_actor_weight=0.0,
         imag_value_weight=0.0,
@@ -1228,10 +1417,30 @@ class BBFAgent(JaxDQNAgent):
         self.reward_weight = float(reward_weight)
         self.continue_weight = float(continue_weight)
         self.reward_readout = bool(reward_readout)
-        # PCGrad on one loss: project the conflicting component out of the
-        # reward/continue gradient at the shared encoder/TM. Costs a second
-        # backward pass; only meaningful with reward_readout=False.
+        # Detach the dense continuation objective independently while leaving
+        # reward grounding active. reward_readout=True still detaches both.
+        self.continue_readout = bool(continue_readout)
+        # Legacy surgery projects over the full tree. The shared variant
+        # restricts PCGrad and optional norm control to encoder/TM, leaving all
+        # non-shared leaves as the ordinary sum of task gradients.
         self.reward_grad_surgery = bool(reward_grad_surgery)
+        self.reward_grad_surgery_shared = bool(reward_grad_surgery_shared)
+        if self.reward_grad_surgery_shared and not self.reward_grad_surgery:
+            raise ValueError(
+                "reward_grad_surgery_shared requires reward_grad_surgery")
+        if grounding_grad_norm_ratio is not None:
+            grounding_grad_norm_ratio = float(grounding_grad_norm_ratio)
+            if math.isnan(grounding_grad_norm_ratio):
+                raise ValueError("grounding_grad_norm_ratio cannot be NaN")
+            if grounding_grad_norm_ratio < 0:
+                raise ValueError(
+                    "grounding_grad_norm_ratio must be nonnegative")
+            if not self.reward_grad_surgery_shared:
+                raise ValueError(
+                    "grounding_grad_norm_ratio requires shared surgery")
+        self.grounding_grad_norm_ratio = (
+            None if grounding_grad_norm_ratio is None else
+            grounding_grad_norm_ratio)
         self.imag_horizon = int(imag_horizon)
         self.imag_actor_weight = float(imag_actor_weight)
         self.imag_value_weight = float(imag_value_weight)
@@ -1656,7 +1865,11 @@ class BBFAgent(JaxDQNAgent):
             self.reward_weight,
             self.continue_weight,
             self.reward_readout,
+            self.continue_readout,
             self.reward_grad_surgery,
+            self.reward_grad_surgery_shared,
+            (float('inf') if self.grounding_grad_norm_ratio is None else
+             self.grounding_grad_norm_ratio),
             self.imag_horizon,
             imag_actor_mult,
             imag_value_mult,
@@ -1694,10 +1907,34 @@ class BBFAgent(JaxDQNAgent):
         self._replay.set_priority(indices, priorities)
 
         if self.grad_steps % 500 < self._batches_to_group:
-            log_keys = ("RewardLoss", "ContinueLoss", "RewardCorr",
-                        "GroundCos", "ImagActorLoss", "ImagValueLoss",
-                        "ImagRet", "ImagReward", "ImagContinue",
-                        "ImagEntropy", "ImagTrustClip")
+            log_keys = (
+                "RewardLoss",
+                "ContinueLoss",
+                "RewardCorr",
+                "GroundCos",
+                "GroundEncoderCos",
+                "GroundEncoderMainNorm",
+                "GroundEncoderModelNorm",
+                "GroundEncoderProjectedNorm",
+                "GroundEncoderAcceptedNorm",
+                "GroundTMCos",
+                "GroundTMMainNorm",
+                "GroundTMModelNorm",
+                "GroundTMProjectedNorm",
+                "GroundTMAcceptedNorm",
+                "GroundSharedMainNorm",
+                "GroundSharedModelNorm",
+                "GroundSharedProjectedNorm",
+                "GroundSharedAcceptedNorm",
+                "GroundCapScale",
+                "ImagActorLoss",
+                "ImagValueLoss",
+                "ImagRet",
+                "ImagReward",
+                "ImagContinue",
+                "ImagEntropy",
+                "ImagTrustClip",
+            )
             msgs = ["grad_step {}".format(self.grad_steps)]
             for k in log_keys:
                 if k in aux_losses:

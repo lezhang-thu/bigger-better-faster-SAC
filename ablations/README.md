@@ -7,7 +7,7 @@ HNS IQM 1.09 vs 1.17, mean 2.60 vs 2.62) — big wins on sparse-reward games
 (ChopperCommand −55%, BankHeist −42%, Asterix −41%, Breakout −25%). RewardCorr
 *inverts* across the two columns (winners 0.25-0.73, losers 0.91-0.95), which
 killed the RewardCorr-gating idea and points at the reward/continue grounding
-gradients (they deliberately flow into encoder+TM; ~spr_agent.py line 640) as
+gradients (they deliberately flow into encoder+TM in the world-model loss) as
 the prime suspect for the dense-game losses.
 
 Every script pins its imagination knobs as explicit `--gin_bindings`, so logs
@@ -84,8 +84,9 @@ SPR, so it gates on Pong/Gopher/Hero first; only then try it on loser games.
 ## Suite-scale rows added after the 2026-07-16 plan
 
 The scripts numbered 07 and up postdate the plan above and run at full 26-game
-suite scale; each carries a self-documenting header, so only the two newest are
-catalogued here. Their common reference is the combo `07-suite-combo.sh`
+suite scale or gate candidate variants; each carries a self-documenting header,
+so only selected newer rows are catalogued here. Their common reference is the
+combo `07-suite-combo.sh`
 (RUN=50: `reward_readout=True` + `imag_value_weight=0.05` + actor 0.1 + coupled
 entropy + annealed discount); both below are single-delta variants of it.
 
@@ -103,7 +104,7 @@ RR=4 needs a base@RR4 control arm (not written yet); budget ~2x 07's box-time.
 loss (`imag_value_weight=0.0`, annealed discount kept). Arm R of the
 DA-attribution design and the direct mirror of `12-suite-value-only.sh` (arm V,
 RUN=60, the "-readout" row). Use `0.0`, never `None`: the weight is `float()`'d
-unconditionally (spr_agent.py:1237) so `None` crashes the constructor before
+unconditionally in the BBFAgent constructor, so `None` crashes before
 training. The imagined actor (0.1) stays live, so only the model-generated
 critic targets are removed. Pre-registered: value-only already convicted the
 readout for DemonAttack (value-only DA 38923), so readout-only DA should stay
@@ -111,3 +112,15 @@ low (<=~18500, like combo's {13562, 18283}); >=~22000 would mean it takes both
 ingredients. Prior readout+value-0 data (Asterix 8213, Gopher 1608, Breakout
 324, BankHeist 46.2, CC {11161, 2329}) is all fixed-discount arm-D; this is its
 annealed-discount, suite-scale counterpart.
+
+**`18-surgery-v2-gate.sh` (RUN=110-112)** — paired five-game gate for scoped
+surgery. `ARM=combo` reproduces 07's strict readouts, `ARM=surgery` preserves
+17's legacy full-tree PCGrad, and `ARM=v2` changes only the grounding route:
+continuation is a detached readout, PCGrad operates in the joint
+encoder+transition-model subspace, and the post-projection grounding gradient
+is capped at `CAP=0.25` times the main shared-gradient norm. V2 logs encoder/TM
+cosines and raw/projected/accepted norms separately. Unlike the older scripts,
+this gate requires a fixed positive `SEED` and passes it through
+`--agent_seed` with random seeding disabled; run all arms with the same seeds.
+Default games are Asterix/DemonAttack (preserve gains) and
+BankHeist/Frostbite/Pong (detect suite regressions).

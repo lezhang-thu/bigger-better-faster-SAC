@@ -8,7 +8,7 @@ set -ex
 # base; 256 = RR=8.
 #
 # reset_every=10_000 is REQUIRED here, not cosmetic. It is measured in env
-# steps (training_steps ticks once per env step, spr_agent.py:1785/1795)
+# steps (`_train_step` increments training_steps once per env step)
 # while the schedule it encodes is a gradient-step one. BBF-100K.gin says so
 # outright ("Change if you change the replay ratio") and pins the invariant
 # with two points: 20_000 x RR2 = 5_000 x RR8 = 40_000 grad steps per reset
@@ -20,7 +20,7 @@ set -ex
 # no_resets_after=100_000 needs no change.
 #
 # Deliberately NOT overridden: cycle_steps (10_000) and imag_warmup (2000)
-# key on cycle_grad_steps (spr_agent.py:1673), which is already in gradient
+# key on cycle_grad_steps in `_training_step_update`, already in gradient
 # steps and so adapts to RR on its own.
 #
 # RUN=80, distinct per script per the README convention (07=50, 08=51,

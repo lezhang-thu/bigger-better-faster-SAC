@@ -44,12 +44,18 @@ BBFAgent.jumps = %MODEL_HORIZON
 # World-model heads and imagination (r2dreamer-style, on the SPR model).
 BBFAgent.reward_weight = 1.0
 BBFAgent.continue_weight = 1.0
-# Grounding-gradient surgery (PCGrad on one loss): project out the component
-# of the reward/continue gradient that conflicts with the TD+SPR direction
-# at the shared encoder/TM -- the soft alternative to the all-or-nothing
-# reward_readout (only meaningful when reward_readout=False). Costs a second
-# backward pass when enabled. Logs GroundCos (conflict cosine).
+# Detach continuation from the shared representation independently of reward.
+# reward_readout=True remains the strict-readout switch for both heads.
+BBFAgent.continue_readout = False
+# Grounding-gradient surgery (PCGrad on one loss). The legacy implementation
+# projects over the entire parameter tree. reward_grad_surgery_shared=True
+# restricts projection to encoder+transition_model, leaves all other blocks as
+# an ordinary gradient sum, and enables per-block diagnostics. A finite norm
+# ratio caps the post-projection grounding norm relative to the main gradient
+# in the joint shared subspace. Surgery costs a second backward pass.
 BBFAgent.reward_grad_surgery = False
+BBFAgent.reward_grad_surgery_shared = False
+BBFAgent.grounding_grad_norm_ratio = None
 BBFAgent.imag_horizon = %MODEL_HORIZON
 BBFAgent.imag_actor_weight = .1
 # Model-generated lambda-return targets into the online critic: keep small.

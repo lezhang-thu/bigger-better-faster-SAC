@@ -1,8 +1,8 @@
 set -ex
-# Surgery gate. Thesis: conflict-gated grounding (reward_grad_surgery)
-# gets the readout's fixes AND grounding's benefits simultaneously --
-# grounded where gradients agree, disarmed where they fight, decided
-# per gradient step instead of per config.
+# Legacy surgery gate. This preserves the original full-parameter-tree PCGrad
+# implementation for comparison with the scoped surgery-v2 gate in script 18.
+# It was intended to arbitrate grounding at the shared encoder/TM, but the
+# historical implementation also projects/rescales non-shared leaves.
 #
 # Games are the three battlegrounds of the grounded-vs-readout split:
 #   Breakout  >=340  (readout fixed it: {324, 352}; grounded broke it: ~271)
@@ -24,7 +24,10 @@ for game_name in $GAMES; do
 		--gin_files=bbf/configs/BBF-100K.gin \
 		--gin_bindings="DataEfficientAtariRunner.game_name=\"$game_name\"" \
 		--gin_bindings="BBFAgent.reward_readout=False" \
+		--gin_bindings="BBFAgent.continue_readout=False" \
 		--gin_bindings="BBFAgent.reward_grad_surgery=True" \
+		--gin_bindings="BBFAgent.reward_grad_surgery_shared=False" \
+		--gin_bindings="BBFAgent.grounding_grad_norm_ratio=None" \
 		--gin_bindings="BBFAgent.imag_value_weight=0.05" \
 		--gin_bindings="BBFAgent.imag_value_trust=None" \
 		--gin_bindings="BBFAgent.imag_actor_weight=0.1" \

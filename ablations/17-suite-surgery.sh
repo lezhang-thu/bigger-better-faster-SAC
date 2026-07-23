@@ -1,10 +1,10 @@
 set -ex
 # FINAL-CONFIG CANDIDATE SUITE: the surgery variant at full 26-game scale.
 # Config = 13-surgery-gate.sh exactly: grounded heads (reward_readout=False)
-# + conflict-gated grounding (reward_grad_surgery=True, PCGrad projects the
-# reward/continue gradient component that conflicts with TD+SPR out at the
-# shared encoder/TM) + value 0.05, actor 0.1, coupled entropy, annealed
-# discount, RR=2. Single delta vs the combo row (RUN=50/51): readout->surgery.
+# + legacy full-tree conflict-gated grounding (reward_grad_surgery=True)
+# + value 0.05, actor 0.1, coupled entropy, annealed discount, RR=2. The
+# implementation was intended to act only at shared encoder/TM parameters but
+# also projects/rescales non-shared leaves; script 18 is the scoped v2.
 #
 # Why surgery (gate ledger, RUN=70, n=1 each):
 #   DemonAttack 49493.9  best ever; erases the combo's -7.1 HNS sacrifice
@@ -59,7 +59,10 @@ for game_name in $GAMES; do
 		--gin_files=bbf/configs/BBF-100K.gin \
 		--gin_bindings="DataEfficientAtariRunner.game_name=\"$game_name\"" \
 		--gin_bindings="BBFAgent.reward_readout=False" \
+		--gin_bindings="BBFAgent.continue_readout=False" \
 		--gin_bindings="BBFAgent.reward_grad_surgery=True" \
+		--gin_bindings="BBFAgent.reward_grad_surgery_shared=False" \
+		--gin_bindings="BBFAgent.grounding_grad_norm_ratio=None" \
 		--gin_bindings="BBFAgent.imag_value_weight=0.05" \
 		--gin_bindings="BBFAgent.imag_value_trust=None" \
 		--gin_bindings="BBFAgent.imag_actor_weight=0.1" \

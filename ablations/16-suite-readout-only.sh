@@ -6,10 +6,10 @@ set -ex
 # 12-suite-value-only.sh (arm V, the "-readout" row); together they are the
 # two single-delta-from-combo rows of the DA-attribution design.
 #
-# WHY 0.0, NOT None: imag_value_weight is float()'d unconditionally at
-# spr_agent.py:1237, so a None binding dies in the constructor (TypeError)
+# WHY 0.0, NOT None: imag_value_weight is float()'d unconditionally in the
+# BBFAgent constructor, so a None binding dies there (TypeError)
 # before a single env step. 0.0 is the off switch -- imag_value_mult =
-# imag_value_weight * ramp -> 0 at the use site (spr_agent.py:1610); precedent
+# imag_value_weight * ramp -> 0 in `_training_step_update`; precedent
 # is run-valuegate.sh's VW=0 control arm. Only the model-generated critic
 # targets are removed: the imagined ACTOR loss (0.1) and its return-EMA stay
 # live, so imagination is still on, just actor-only. imag_value_trust is moot
