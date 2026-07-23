@@ -422,6 +422,7 @@ train_static_argnames = [
     'reward_weight',
     'continue_weight',
     'reward_readout',
+    'continue_readout',
     'reward_grad_surgery',
     'imag_horizon',
 ]
@@ -461,6 +462,7 @@ def train(
     reward_weight,  # static
     continue_weight,  # static
     reward_readout,  # static
+    continue_readout,  # static
     reward_grad_surgery,  # static
     imag_horizon,  # static
     imag_actor_mult,
@@ -646,8 +648,15 @@ def train(
                 # SPR becomes the transition model's sole supervisor. The
                 # real-frame features come from the target encoder and only
                 # train the heads either way.
-                rollout_reps = (jax.lax.stop_gradient(x.rollout_reps)
-                                if reward_readout else x.rollout_reps)
+                reward_reps = (jax.lax.stop_gradient(x.rollout_reps)
+                               if reward_readout else x.rollout_reps)
+                # continue_readout detaches ONLY the continue head: its BCE
+                # is dense on every game (life-loss terminals), so it grounds
+                # the trunk everywhere even when rewards are sparse. reward
+                # stays per reward_readout.
+                continue_reps = (jax.lax.stop_gradient(x.rollout_reps)
+                                 if (reward_readout or continue_readout) else
+                                 x.rollout_reps)
                 real_reps = jax.lax.stop_gradient(future_latents)
 
                 def reward_fn(feature):
@@ -662,7 +671,7 @@ def train(
                         feature,
                         method=network_def.continue_from_feature)
 
-                pred_reward_roll = jax.vmap(jax.vmap(reward_fn))(rollout_reps)
+                pred_reward_roll = jax.vmap(jax.vmap(reward_fn))(reward_reps)
                 pred_reward_real = jax.vmap(jax.vmap(reward_fn))(real_reps)
                 # Real frames past a terminal belong to the next episode.
                 real_mask = model_mask * continue_targets
@@ -672,7 +681,7 @@ def train(
                         jnp.square(pred_reward_real - model_rewards),
                         real_mask))
                 continue_logits = jax.vmap(
-                    jax.vmap(continue_fn))(rollout_reps)
+                    jax.vmap(continue_fn))(continue_reps)
                 continue_loss = masked_mean(
                     sigmoid_binary_cross_entropy(continue_logits,
                                                  continue_targets),
@@ -879,16 +888,47 @@ def train(
                 main_loss_fn, has_aux=True)(online_params, *loss_args)
             (_, _), g_model = jax.value_and_grad(
                 model_loss_fn, has_aux=True)(online_params, *loss_args)
-            tsum = lambda t: jax.tree_util.tree_reduce(lambda a, b: a + b, t)
-            dot = tsum(jax.tree_util.tree_map(jnp.vdot, g_model, g_main))
-            nm = tsum(
-                jax.tree_util.tree_map(lambda a: jnp.vdot(a, a), g_main))
-            mm = tsum(
-                jax.tree_util.tree_map(lambda a: jnp.vdot(a, a), g_model))
+            # v2 (2026-07-23): reductions AND the correction are restricted
+            # to the shared trunk (encoder + transition_model) -- the module
+            # set the intervention was always meant to act on. v1 flattened
+            # the entire tree, which (a) diluted the cosine and undersized
+            # the trunk correction with Q/policy/head gradient mass that
+            # carries no model-loss gradient, and (b) leaked the correction
+            # into those modules as a (1+|coef|) rescale of the main
+            # gradient on conflict steps. Pre-v2 GroundCos logs are the
+            # diluted global quantity; do not compare across the change.
+            trunk = ("encoder", "transition_model")
+            tdot = lambda a, b: jax.tree_util.tree_reduce(
+                lambda u, v: u + v, jax.tree_util.tree_map(jnp.vdot, a, b))
+            stats = {
+                m: (tdot(g_model["params"][m], g_main["params"][m]),
+                    tdot(g_main["params"][m], g_main["params"][m]),
+                    tdot(g_model["params"][m], g_model["params"][m]))
+                for m in trunk
+            }
+            dot = sum(s[0] for s in stats.values())
+            nm = sum(s[1] for s in stats.values())
+            mm = sum(s[2] for s in stats.values())
             coef = jnp.where(dot < 0, dot / (nm + 1e-12), 0.0)
-            grad = jax.tree_util.tree_map(
+            # Corrected combination on trunk leaves, plain sum elsewhere;
+            # copy_params grafts the corrected trunk subtrees over the
+            # plain-sum tree, preserving structure.
+            corrected = jax.tree_util.tree_map(
                 lambda gm, gd: gm + gd - coef * gm, g_main, g_model)
-            aux_losses["GroundCos"] = dot * jax.lax.rsqrt(nm * mm + 1e-12)
+            plain = jax.tree_util.tree_map(lambda gm, gd: gm + gd, g_main,
+                                           g_model)
+            grad = copy_params(corrected, plain, keys=trunk)
+            if isinstance(g_main, FrozenDict):
+                grad = FrozenDict(grad)
+            eps = 1e-12
+            aux_losses["GroundCos"] = dot * jax.lax.rsqrt(nm * mm + eps)
+            aux_losses["GroundCosEnc"] = stats["encoder"][0] * jax.lax.rsqrt(
+                stats["encoder"][1] * stats["encoder"][2] + eps)
+            aux_losses["GroundCosTM"] = (
+                stats["transition_model"][0] *
+                jax.lax.rsqrt(stats["transition_model"][1] *
+                              stats["transition_model"][2] + eps))
+            aux_losses["GroundNormRatio"] = jnp.sqrt(mm / (nm + eps))
         else:
             # Get the unweighted loss without taking its mean for updating
             # priorities.
@@ -1160,6 +1200,7 @@ class BBFAgent(JaxDQNAgent):
         reward_weight=1.0,
         continue_weight=1.0,
         reward_readout=False,
+        continue_readout=False,
         reward_grad_surgery=False,
         imag_horizon=0,
         imag_actor_weight=0.0,
@@ -1228,6 +1269,11 @@ class BBFAgent(JaxDQNAgent):
         self.reward_weight = float(reward_weight)
         self.continue_weight = float(continue_weight)
         self.reward_readout = bool(reward_readout)
+        # Detach ONLY the continue head from the trunk (its BCE is dense on
+        # every game via life-loss terminals, so it grounds the trunk even
+        # when rewards are sparse); reward stays per reward_readout. Only
+        # meaningful with reward_readout=False.
+        self.continue_readout = bool(continue_readout)
         # PCGrad on one loss: project the conflicting component out of the
         # reward/continue gradient at the shared encoder/TM. Costs a second
         # backward pass; only meaningful with reward_readout=False.
@@ -1656,6 +1702,7 @@ class BBFAgent(JaxDQNAgent):
             self.reward_weight,
             self.continue_weight,
             self.reward_readout,
+            self.continue_readout,
             self.reward_grad_surgery,
             self.imag_horizon,
             imag_actor_mult,
@@ -1695,7 +1742,8 @@ class BBFAgent(JaxDQNAgent):
 
         if self.grad_steps % 500 < self._batches_to_group:
             log_keys = ("RewardLoss", "ContinueLoss", "RewardCorr",
-                        "GroundCos", "ImagActorLoss", "ImagValueLoss",
+                        "GroundCos", "GroundCosEnc", "GroundCosTM",
+                        "GroundNormRatio", "ImagActorLoss", "ImagValueLoss",
                         "ImagRet", "ImagReward", "ImagContinue",
                         "ImagEntropy", "ImagTrustClip")
             msgs = ["grad_step {}".format(self.grad_steps)]
