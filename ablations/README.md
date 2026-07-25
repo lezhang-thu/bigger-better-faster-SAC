@@ -99,6 +99,49 @@ adapt on their own, so they are deliberately untouched. Caveat: the
 bbf-raw-scores.txt anchors are RR=2, so attributing anything to the combo *at*
 RR=4 needs a base@RR4 control arm (not written yet); budget ~2x 07's box-time.
 
+**`20-suite-combo-skip-60k-reset.sh` (RUN=130) — the strongest row so far.**
+Scored in HNS against the 10-seed anchors (`bbf-raw-scores.txt`, git object
+654cabc), the full 26-game row gives **canonical pooled IQM 1.326 / mean 2.839
+/ median 0.975** — top of the ladder: combo 1.271, published SAC-BBF 1.088,
+BBF@RR8 1.045, baseline 1.012. Combo's mean deficit is gone (DemonAttack +3.15
+and Breakout +0.45 vs baseline, where combo was −6.4 and −3.5). It is n=1 per
+game, where pooled and game-level coincide, and **the null at that granularity
+is not 1.012**: resampling the baseline at one seed per game gives IQM 1.082,
+95% range [0.788, 1.427], putting 1.326 at one-sided p ≈ 0.08. A second full
+seed (~56 h) is the obvious next spend.
+
+**OptGap is the one canonical metric it loses on**: 0.345 vs combo 0.327
+(baseline 0.372). OptGap is linear in HNS so it carries no n=1 premium (null
+mean exactly 0.372, 95% [0.317, 0.435] → p ≈ 0.20, weaker than IQM's 0.08),
+and it counts only sub-human games — precisely the near-zero games IQM trims.
+The deficit vs combo is two coin-game draws: Frostbite (+0.027 alone; combo
+3226.6 vs this row's 257.6) and Hero (+0.011). Worst shortfall regressions vs
+baseline: Frostbite +0.314, Kangaroo +0.236, Hero +0.201; best gains
+KungFuMaster −0.248 (reaches human), Freeway −0.106, Qbert −0.100.
+
+Two traps in reading its table by raw points: Hero's
+1436-vs-7517 is only **−0.20 HNS** (denominator 29799) and lands in IQM's
+trimmed bottom tail; DemonAttack's +3.51 HNS is inside both its anchor spread
+(10200–62184) and combo's own DA n=5 spread. Neither supports the "restore
+the reset, buy DA more updates" reading — though OptGap is where the Hero
+concern legitimately lands, worth ~+0.008 there.
+
+**`21-late-updates-gate.sh` (RUN=140 arm A / 141 arm B)** — keep the 60k reset,
+double the gradient updates in the tail, via the new `late_update_after` /
+`late_update_multiplier` knobs (env-step threshold, ×N update phases per env
+step; default off, so every other row is unaffected). Motivated by how the two
+rows split once RUN=130 reached 46 runs: skipping the reset buys **mean** in
+IQM's trimmed tail (DemonAttack +7.79, UpNDown +6.02, Breakout +3.18 vs combo)
+and gives back **mid-mass IQM** (Jamesbond −4.11, Krull −2.10,
+ChopperCommand −1.32, RoadRunner −0.90, Asterix −0.46) — so the lever targets
+combo's IQM and RUN=130's mean at once. Panel splits the two questions:
+DemonAttack/UpNDown/Breakout ask whether extra updates deliver what the skipped
+reset delivered, Asterix/RoadRunner whether the restored reset holds them at
+combo level; bands in the header. Arm A is the stated design (tail = 160k grad
+steps in one un-reset stretch); arm B adds `no_resets_after=110_000` so the 80k
+reset stops being skipped, holding the cycle at the control's 80k grad.
+~15 h/arm/seed; suite version ~78 h.
+
 **`16-suite-readout-only.sh` (RUN=62)** — the combo minus the imagined value
 loss (`imag_value_weight=0.0`, annealed discount kept). Arm R of the
 DA-attribution design and the direct mirror of `12-suite-value-only.sh` (arm V,

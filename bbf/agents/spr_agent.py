@@ -1211,6 +1211,8 @@ class BBFAgent(JaxDQNAgent):
         imag_warmup=2000,
         imag_entropy_weight=None,
         half_precision=False,
+        late_update_after=-1,
+        late_update_multiplier=1,
         seed=None,
         log_every=None,
         explore_end_steps=None,
@@ -1250,6 +1252,21 @@ class BBFAgent(JaxDQNAgent):
         self.reset_interval_scaling = reset_interval_scaling
         self.reset_offset = int(reset_offset)
         self.next_reset = self.reset_every + self.reset_offset
+
+        # Late-phase update multiplier: from env step late_update_after
+        # onwards, do late_update_multiplier x the usual number of update
+        # phases per env step (-1 / 1 = off). Counted in env steps, like
+        # reset_every, because that is the unit the schedule is specified in;
+        # what it actually changes is the gradient-step rate, so it moves the
+        # post-reset recovery budget the same way replay_ratio does. Anything
+        # keyed on cycle_grad_steps (update horizon, gamma, imag_warmup)
+        # therefore anneals proportionally faster in the multiplied phase, as
+        # it does under a higher replay_ratio; reset_every does NOT adapt on
+        # its own (it is in env steps), so multiplying without shortening it
+        # lengthens the final un-reset stretch in gradient steps.
+        self.late_update_after = int(late_update_after)
+        self.late_update_multiplier = int(late_update_multiplier)
+        self.late_updates_logged = False
 
         self.learning_rate = learning_rate
         self.encoder_learning_rate = encoder_learning_rate
@@ -1828,7 +1845,17 @@ class BBFAgent(JaxDQNAgent):
 
         if self._replay.add_count > self.min_replay_history:
             if self.training_steps % self.update_period == 0:
-                for i in range(self._num_updates_per_train_step):
+                num_updates = self._num_updates_per_train_step
+                if (self.late_update_after >= 0
+                        and self.training_steps >= self.late_update_after):
+                    num_updates *= self.late_update_multiplier
+                    if not self.late_updates_logged:
+                        self.late_updates_logged = True
+                        logging.info(
+                            "\t Late-phase updates: %s update phases per env"
+                            " step from step %s (x%s).", num_updates,
+                            self.training_steps, self.late_update_multiplier)
+                for i in range(num_updates):
                     self._training_step_update(i, offline=False)
         if self.reset_every > 0 and self.training_steps > self.next_reset:
             self.reset_weights()
