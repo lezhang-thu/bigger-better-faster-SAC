@@ -83,6 +83,18 @@ BBFAgent.imag_warmup = 2000
 # imagination as well as replay; a float here overrides it as an ablation
 # only.
 BBFAgent.imag_entropy_weight = None
+# Decay period of x_ent_coef, the only live actor entropy coefficient
+# (the SAC learned-alpha form in policy_loss is behind `if False`): 1e-2 -> 0
+# linearly over this many env steps, then clipped at exactly 0. At the shipped
+# 80_000 the last 20k env steps of a 100k run carry no entropy term in either
+# actor loss (imagination is coupled via imag_entropy_weight=None). 100_000
+# instead makes it reach zero only at the end of training -- but it also raises
+# the coefficient at every earlier step (0.006 vs 0.005 at 40k), so it is not a
+# tail-only change, and in the imagination channel it is a stronger dose of the
+# direction that already failed as a decoupled floor (Pong 14.11 at 3e-4 flat).
+# What it does keep intact is the coupling itself, which is the part the entropy
+# line actually validated. Ablation only; 80_000 stays the default.
+BBFAgent.x_ent_decay_steps = 80_000
 
 BBFAgent.data_augmentation = True
 BBFAgent.half_precision = False

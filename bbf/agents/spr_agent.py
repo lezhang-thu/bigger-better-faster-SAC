@@ -1210,6 +1210,7 @@ class BBFAgent(JaxDQNAgent):
         imag_lambda=0.95,
         imag_warmup=2000,
         imag_entropy_weight=None,
+        x_ent_decay_steps=80_000,
         half_precision=False,
         late_update_after=-1,
         late_update_multiplier=1,
@@ -1315,6 +1316,16 @@ class BBFAgent(JaxDQNAgent):
         # 5th-95th percentile return EMA this loss uses.
         self.imag_entropy_weight = (None if imag_entropy_weight is None else
                                     float(imag_entropy_weight))
+        # Decay period of x_ent_coef, the (only live) actor entropy
+        # coefficient: 1e-2 -> 0 linearly over this many env steps, then
+        # clipped at exactly 0. 80_000 is the shipped schedule, so the last
+        # 20k env steps of a 100k run train with no entropy term at all --
+        # in the imagined actor loss too, since imag_entropy_weight=None
+        # couples it to this same value. Setting it to 100_000 makes the
+        # coefficient reach zero only at the end of training; note that it
+        # also raises the coefficient at every earlier step, so it is not a
+        # tail-only change.
+        self.x_ent_decay_steps = int(x_ent_decay_steps)
         self.imag_return_ema = np.zeros((2,), dtype=np.float32)
         self.use_world_model = (self.spr_weight > 0 or self.reward_weight > 0
                                 or self.continue_weight > 0 or
@@ -1834,7 +1845,7 @@ class BBFAgent(JaxDQNAgent):
         ##exit(0)
         # linearly decay target entropy - end
 
-        self.x_ent_coef = linearly_decaying_epsilon(int(80e3),
+        self.x_ent_coef = linearly_decaying_epsilon(self.x_ent_decay_steps,
                                                     self.training_steps, 0, .0)
         if random.uniform(0, 1) < 1e-3:
             logging.info("step: {}, x_ent_coef: {}".format(

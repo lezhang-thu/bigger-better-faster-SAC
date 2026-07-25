@@ -48,10 +48,19 @@ set -ex
 # 65004 in both) -- the ONLY thing that changes is the number of gradient
 # updates. Arm A doubles from 60k and so also compresses those anneals into
 # 2_500 env steps (completes at 62504), bundling two deltas.
-# Note also that x_ent_coef hits exactly 0 at 80k, so arm C's doubled window is
-# precisely the entropy-free phase: 80k grad steps of pure exploitation. That
-# is consistent with the closed entropy line (anneal-to-zero is load-bearing),
-# but over-exploitation is the failure mode to watch for if the bands miss.
+# Note also that x_ent_coef is EXACTLY 0 from step 80_000 on (the clip in
+# linearly_decaying_epsilon pins it), and it is the only entropy regularization
+# live -- the SAC learned-alpha form is behind `if False` and _log_alpha is
+# inert -- and imagination shares the same coefficient at imag_entropy_weight=
+# None. So arm C's doubled window is precisely the entropy-free phase, in both
+# actor channels, with no re-randomized head coming either (last reset 60k).
+# Watch ImagEntropy (already logged every 500 grad steps). RUN=130 baseline,
+# median over 46 runs: 1.452 (40-60k) -> 1.301 (60-80k) -> 1.131 (80-90k) ->
+# 1.109 (90-100k) -- a gentle, decelerating drift, no collapse at RR2. Doubling
+# should roughly double the per-env-step drift; ~1.1 nats is the headroom.
+# If it DOES collapse, the fix is a shorter or later window, NOT an entropy
+# floor: max(x_ent_coef, 3e-4) is a measured failure (Pong 14.11, Gopher 582.8
+# vs a coupled reference of 17.4-20.4) and that line is closed.
 #
 # PRE-REGISTERED BANDS. Two questions, one panel. Tail games ask "do the extra
 # updates deliver what skipping the reset delivered?"; mid-mass games ask "does
