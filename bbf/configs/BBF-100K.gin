@@ -38,6 +38,7 @@ BBFAgent.replay_ratio = 64
 # updates there without also shortening reset_every makes it 160k grad steps
 # in one un-reset stretch.
 BBFAgent.late_update_after = -1
+BBFAgent.late_update_until = -1
 BBFAgent.late_update_multiplier = 1
 BBFAgent.batches_to_group = 2
 BBFAgent.batch_size = 32

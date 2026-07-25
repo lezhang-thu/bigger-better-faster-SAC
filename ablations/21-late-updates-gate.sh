@@ -27,27 +27,43 @@ set -ex
 # anneal proportionally faster in the tail, exactly as under a global
 # replay_ratio=128, per the BBF-100K.gin note and 15-suite-combo-rr4.sh.
 #
-# ARM C (default, cheapest, and the cleanest delta) = resets at 20k/40k/60k
-# unchanged, 60k-80k at the ordinary RR2, only 80k-100k doubled. ARM A doubles
-# the whole 60k-100k tail. ARM B is A with the reset cadence held (adds
-# no_resets_after=110_000 so the 80k reset stops being skipped by the
-# recovery-horizon rule, next_reset 100_001 > 100_000, rather than by design).
+# ARMS. All keep the 20k/40k/60k resets except B. C and D cost the same +20%
+# and differ ONLY in where the doubled window sits, so they are a direct
+# head-to-head on which phase wants the compute; A doubles the whole tail at
+# +40%; B is A with the reset cadence held (no_resets_after=110_000 stops the
+# 80k reset being skipped by the recovery-horizon rule, next_reset 100_001 >
+# 100_000, rather than by design).
 #
-#                    resets              total grad  final un-reset stretch  h/game
-#   combo (RUN=50)   20k/40k/60k            200k      80k grad               2.14
-#   RUN=130          20k/40k                200k     120k grad               2.14
-#   arm C            20k/40k/60k            240k     120k grad (40k+80k)     2.56
-#   arm A            20k/40k/60k            280k     160k grad               2.99
-#   arm B            20k/40k/60k/80k        280k     2 x 80k grad            2.99
+#                x2 window     resets            total grad  anneal done  h/game
+#   combo         --           20k/40k/60k          200k        65004      2.14
+#   RUN=130       --           20k/40k              200k        45003      2.14
+#   arm C        [80k,100k)    20k/40k/60k          240k        65004      2.56
+#   arm D        [60k, 80k)    20k/40k/60k          240k        62504      2.56
+#   arm A        [60k,100k)    20k/40k/60k          280k        62504      2.99
+#   arm B        [60k,100k)    20k/40k/60k/80k      280k        62504      2.99
+# Final un-reset stretch is 120k grad for C and D alike (D front-loads it:
+# 80k+40k vs C's 40k+80k), 160k for A, 2 x 80k for B.
 #
-# WHY C IS THE CLEAN ONE, not just the cheap one. cycle_grad_steps drives the
-# update-horizon (10->3) and gamma (0.97->0.997) anneals over cycle_steps=10_000
-# GRAD steps, i.e. 5_000 env steps at RR2, so after the 60k reset they finish
-# at ~65k env; imag_warmup finishes at ~62k. Doubling from 80k therefore leaves
-# every schedule identical to the control (traced: anneal completes at env
-# 65004 in both) -- the ONLY thing that changes is the number of gradient
-# updates. Arm A doubles from 60k and so also compresses those anneals into
-# 2_500 env steps (completes at 62504), bundling two deltas.
+# WHAT SEPARATES C FROM D -- the two confounds, one each.
+# C is the clean single delta. cycle_grad_steps drives the update-horizon
+# (10->3) and gamma (0.97->0.997) anneals over cycle_steps=10_000 GRAD steps
+# = 5_000 env steps at RR2, so after the 60k reset they finish at ~65k env and
+# imag_warmup at ~62k; doubling from 80k leaves all of that bit-identical to
+# the control. Its cost is that x_ent_coef is exactly 0 over its whole window.
+# D is the reverse trade. Its window is where the reset damage actually sits
+# (measured over the 46 RUN=130 runs at their 40k reset: median drop to 49% of
+# pre-reset return and 5_500 env steps to recover, with UpNDown at 10-11% and
+# 11-12k steps, DemonAttack 18% and 6-14k, RoadRunner 22%/7% and 6-8k), and
+# recovery is a learning process, so it is exactly what extra gradient steps
+# should shorten. Entropy is also still live throughout it (x_ent_coef 0.0025
+# at 60k decaying to 0 at 80k), so D has no zero-entropy exploitation phase at
+# doubled rate. Its cost is that doubling from 60k compresses the post-reset
+# anneals into 2_500 env steps (completes at 62504 vs 65004) and imag_warmup to
+# 61004 -- so D bundles "more updates" with "faster annealing".
+# To get D's window without that confound: LATE_AFTER_OVERRIDE=65000
+# LATE_UNTIL_OVERRIDE=85000, which traces to anneal@65002, i.e. the anneal
+# completes as in the control, at the price of missing the first 5k of recovery
+# and putting 5k of the window past the entropy zero.
 # Note also that x_ent_coef is EXACTLY 0 from step 80_000 on (the clip in
 # linearly_decaying_epsilon pins it), and it is the only entropy regularization
 # live -- the SAC learned-alpha form is behind `if False` and _log_alpha is
@@ -114,9 +130,12 @@ set -ex
 # is ~10.3 h per arm per seed; add Breakout for ~12.8 h; 26-game suite ~66.7 h
 # (vs ~55.6 h at plain RR2).
 #
-# Usage: [ARM=C|A|B] [GAMES=...] [GPU=0] [REPS=1] bash ablations/21-late-updates-gate.sh
+# Usage: [ARM=C|D|A|B] [GAMES=...] [GPU=0] [REPS=1] bash ablations/21-late-updates-gate.sh
+#        optional: [LATE_AFTER_OVERRIDE=] [LATE_UNTIL_OVERRIDE=] [NO_RESETS_AFTER=]
 # RUN is the row id, not the seed (train.py --no_seeding defaults True, so
-# every repetition draws a fresh time-based seed): C=142, A=140, B=141.
+# every repetition draws a fresh time-based seed): C=142, D=143, A=140, B=141.
+# C and D share the panel and the bands on purpose -- run both and the pair
+# answers "which phase wants the compute" at 2 x 10.3 h.
 cd "$(dirname "$0")/.."
 GAMES=${GAMES:-"DemonAttack UpNDown Asterix RoadRunner"}
 GPU=${GPU:-0}
@@ -124,11 +143,17 @@ ARM=${ARM:-C}
 REPS=${REPS:-1}
 
 case "$ARM" in
-C) RUN=${RUN:-142}; LATE_AFTER=80000; RESET_BINDING="BBFAgent.no_resets_after=100000" ;;
-A) RUN=${RUN:-140}; LATE_AFTER=60000; RESET_BINDING="BBFAgent.no_resets_after=100000" ;;
-B) RUN=${RUN:-141}; LATE_AFTER=60000; RESET_BINDING="BBFAgent.no_resets_after=110000" ;;
-*) echo "ARM must be C, A or B" >&2; exit 1 ;;
+C) RUN=${RUN:-142}; LATE_AFTER=80000; LATE_UNTIL=-1;    NRA=100000 ;;
+D) RUN=${RUN:-143}; LATE_AFTER=60000; LATE_UNTIL=80000; NRA=100000 ;;
+A) RUN=${RUN:-140}; LATE_AFTER=60000; LATE_UNTIL=-1;    NRA=100000 ;;
+B) RUN=${RUN:-141}; LATE_AFTER=60000; LATE_UNTIL=-1;    NRA=110000 ;;
+*) echo "ARM must be C, D, A or B" >&2; exit 1 ;;
 esac
+# Overridable so arm D's window can be shifted without a new arm, e.g.
+# LATE_AFTER=65000 LATE_UNTIL=85000 to clear the post-reset anneal entirely.
+LATE_AFTER=${LATE_AFTER_OVERRIDE:-$LATE_AFTER}
+LATE_UNTIL=${LATE_UNTIL_OVERRIDE:-$LATE_UNTIL}
+NO_RESETS_AFTER=${NO_RESETS_AFTER:-$NRA}
 
 for ((rep = 1; rep <= REPS; rep++)); do
 	for game_name in $GAMES; do
@@ -142,8 +167,9 @@ for ((rep = 1; rep <= REPS; rep++)); do
 			--gin_bindings="BBFAgent.imag_entropy_weight=None" \
 			--gin_bindings="BBFAgent.imag_discount=None" \
 			--gin_bindings="BBFAgent.late_update_after=$LATE_AFTER" \
+			--gin_bindings="BBFAgent.late_update_until=$LATE_UNTIL" \
 			--gin_bindings="BBFAgent.late_update_multiplier=2" \
-			--gin_bindings="$RESET_BINDING" \
+			--gin_bindings="BBFAgent.no_resets_after=$NO_RESETS_AFTER" \
 			--run_number=$RUN
 	done
 done

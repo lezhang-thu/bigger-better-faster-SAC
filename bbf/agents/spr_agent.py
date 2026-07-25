@@ -1213,6 +1213,7 @@ class BBFAgent(JaxDQNAgent):
         x_ent_decay_steps=80_000,
         half_precision=False,
         late_update_after=-1,
+        late_update_until=-1,
         late_update_multiplier=1,
         seed=None,
         log_every=None,
@@ -1265,9 +1266,14 @@ class BBFAgent(JaxDQNAgent):
         # it does under a higher replay_ratio; reset_every does NOT adapt on
         # its own (it is in env steps), so multiplying without shortening it
         # lengthens the final un-reset stretch in gradient steps.
+        # late_update_until bounds the window on the right (-1 = run to the end
+        # of training). A bounded window is what lets the multiplier target the
+        # post-reset recovery phase specifically, rather than everything after
+        # a threshold.
         self.late_update_after = int(late_update_after)
+        self.late_update_until = int(late_update_until)
         self.late_update_multiplier = int(late_update_multiplier)
-        self.late_updates_logged = False
+        self.late_updates_active = False
 
         self.learning_rate = learning_rate
         self.encoder_learning_rate = encoder_learning_rate
@@ -1857,15 +1863,20 @@ class BBFAgent(JaxDQNAgent):
         if self._replay.add_count > self.min_replay_history:
             if self.training_steps % self.update_period == 0:
                 num_updates = self._num_updates_per_train_step
-                if (self.late_update_after >= 0
-                        and self.training_steps >= self.late_update_after):
+                late_on = (self.late_update_after >= 0
+                           and self.training_steps >= self.late_update_after
+                           and (self.late_update_until < 0 or
+                                self.training_steps < self.late_update_until))
+                if late_on:
                     num_updates *= self.late_update_multiplier
-                    if not self.late_updates_logged:
-                        self.late_updates_logged = True
-                        logging.info(
-                            "\t Late-phase updates: %s update phases per env"
-                            " step from step %s (x%s).", num_updates,
-                            self.training_steps, self.late_update_multiplier)
+                if late_on != self.late_updates_active:
+                    self.late_updates_active = late_on
+                    logging.info(
+                        "\t Late-phase updates %s at step %s: %s update phase(s)"
+                        " per env step (x%s over [%s, %s)).",
+                        "ON" if late_on else "OFF", self.training_steps,
+                        num_updates, self.late_update_multiplier,
+                        self.late_update_after, self.late_update_until)
                 for i in range(num_updates):
                     self._training_step_update(i, offline=False)
         if self.reset_every > 0 and self.training_steps > self.next_reset:
