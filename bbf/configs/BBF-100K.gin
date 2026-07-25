@@ -96,6 +96,14 @@ BBFAgent.imag_entropy_weight = None
 # What it does keep intact is the coupling itself, which is the part the entropy
 # line actually validated. Ablation only; 80_000 stays the default.
 BBFAgent.x_ent_decay_steps = 80_000
+# Lower bound on x_ent_coef, applied after the schedule (0.0 = off = the
+# shipped anneal to exactly zero). Unlike x_ent_decay_steps this is a tail-only
+# change: the ramp is untouched and the floor only bites where the line crosses
+# it, so 1e-3 takes effect from 72_000 env steps on. Note the shape (decay,
+# then flat at a floor) is the shape that already failed at 3e-4 on the
+# imagination weight alone (Pong 14.11, Gopher 582.8) -- what is untested is
+# applying it to x_ent_coef itself, i.e. to both actor losses coupled.
+BBFAgent.x_ent_floor = 0.0
 
 BBFAgent.data_augmentation = True
 BBFAgent.half_precision = False

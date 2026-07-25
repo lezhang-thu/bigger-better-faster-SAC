@@ -1211,6 +1211,7 @@ class BBFAgent(JaxDQNAgent):
         imag_warmup=2000,
         imag_entropy_weight=None,
         x_ent_decay_steps=80_000,
+        x_ent_floor=0.0,
         half_precision=False,
         late_update_after=-1,
         late_update_until=-1,
@@ -1332,6 +1333,12 @@ class BBFAgent(JaxDQNAgent):
         # also raises the coefficient at every earlier step, so it is not a
         # tail-only change.
         self.x_ent_decay_steps = int(x_ent_decay_steps)
+        # Lower bound on x_ent_coef, applied AFTER the schedule, so the ramp
+        # itself is untouched and the floor only bites once the line crosses
+        # it: at the default 80_000 decay, a 1e-3 floor takes effect from
+        # 72_000 env steps on (1e-2 * (80000-s)/80000 = 1e-3). 0.0 = off =
+        # the shipped anneal-to-exactly-zero.
+        self.x_ent_floor = float(x_ent_floor)
         self.imag_return_ema = np.zeros((2,), dtype=np.float32)
         self.use_world_model = (self.spr_weight > 0 or self.reward_weight > 0
                                 or self.continue_weight > 0 or
@@ -1853,6 +1860,8 @@ class BBFAgent(JaxDQNAgent):
 
         self.x_ent_coef = linearly_decaying_epsilon(self.x_ent_decay_steps,
                                                     self.training_steps, 0, .0)
+        if self.x_ent_floor > 0.0:
+            self.x_ent_coef = jnp.maximum(self.x_ent_coef, self.x_ent_floor)
         if random.uniform(0, 1) < 1e-3:
             logging.info("step: {}, x_ent_coef: {}".format(
                 self.training_steps, self.x_ent_coef))
