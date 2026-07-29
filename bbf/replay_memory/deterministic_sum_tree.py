@@ -79,7 +79,8 @@ class DeterministicSumTree(sum_tree.SumTree):
         self.nodes = np.zeros(2**(self.depth + 1) - 1)  # Double precision.
         self.capacity = capacity
 
-        self.highest_set = 0
+        # -1 distinguishes an empty tree from a tree whose leaf zero is set.
+        self.highest_set = -1
 
         self.max_recorded_priority = 1.0
 
@@ -125,7 +126,7 @@ class DeterministicSumTree(sum_tree.SumTree):
         return self.nodes[node_index + self.low_idx]
 
     def reset_priorities(self):
-        for i in range(self.highest_set):
+        for i in range(self.highest_set + 1):
             self.set(i, self.max_recorded_priority)
 
     def set(self, node_index, value):

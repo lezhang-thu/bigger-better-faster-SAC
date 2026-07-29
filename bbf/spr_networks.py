@@ -35,10 +35,24 @@ SPROutputType = collections.namedtuple(
         'spatial_latent', 'rollout_reps'
     ],
 )
+SPR_BRANCH_NAMES = ('q', 'policy')
 PRNGKey = Any
 Array = Any
 Shape = Tuple[int]
 Dtype = Any
+
+
+def split_spr_branches(features, branch_dim):
+    """Splits concatenated Q/policy SPR features along their final axis."""
+    branch_dim = int(branch_dim)
+    num_branches = len(SPR_BRANCH_NAMES)
+    expected_dim = num_branches * branch_dim
+    if features.shape[-1] != expected_dim:
+        raise ValueError(
+            'SPR feature width must equal '
+            f'{num_branches} * branch_dim ({expected_dim}), got '
+            f'{features.shape[-1]}.')
+    return features.reshape(*features.shape[:-1], num_branches, branch_dim)
 
 
 def _absolute_dims(rank, dims):

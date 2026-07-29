@@ -172,6 +172,114 @@ def copy_params(source, target, keys=("encoder", "transition_model")):
         return target
 
 
+def copy_optimizer_state(source, target, keys=("encoder", "transition_model")):
+    """Copies selected per-module optimizer state through Optax containers.
+
+    Optax wraps Adam state in nested ``MaskedState`` and namedtuple/tuple
+    containers.  ``copy_params`` intentionally treats those containers as
+    leaves, which meant the reset path silently reinitialized *all* optimizer
+    state.  This routine descends through the full container structure while
+    retaining the mapping-key semantics used for parameter modules.
+
+    Scalar transform state (for example Adam's bias-correction counter) is
+    copied when its containing transform has state for at least one selected
+    module.  A transform may share that scalar across preserved and freshly
+    reset modules; preserving it is the only consistent choice for the copied
+    first and second moments.
+    """
+    keys = frozenset(keys)
+
+    def contains_selected_module(tree):
+        if isinstance(tree, (dict, collections.OrderedDict, FrozenDict)):
+            return any((k in keys and not isinstance(v, optax.MaskedNode)) or
+                       contains_selected_module(v)
+                       for k, v in tree.items())
+        if isinstance(tree, tuple):
+            return any(contains_selected_module(v) for v in tree)
+        if isinstance(tree, list):
+            return any(contains_selected_module(v) for v in tree)
+        return False
+
+    def merge(old, fresh, preserve_scalar=False):
+        if isinstance(old, (dict, collections.OrderedDict, FrozenDict)):
+            merged = {}
+            for k, old_value in old.items():
+                if k in keys:
+                    merged[k] = old_value
+                else:
+                    # Scalar transform state lives in tuple/namedtuple fields;
+                    # mapping leaves are parameter-shaped moments and must stay
+                    # fresh unless their module key was explicitly selected.
+                    merged[k] = merge(old_value, fresh[k], False)
+            if isinstance(fresh, FrozenDict):
+                return FrozenDict(merged)
+            if isinstance(fresh, collections.OrderedDict):
+                return collections.OrderedDict(merged)
+            return merged
+
+        if isinstance(old, tuple):
+            is_namedtuple = hasattr(old, "_fields")
+            # A plain tuple at the root is the Optax chain: its transforms
+            # must decide independently whether they own selected modules.
+            # Tuples nested inside a selected MaskedState inherit that choice.
+            keep_scalar = (preserve_scalar or contains_selected_module(old)
+                           if is_namedtuple else preserve_scalar)
+            values = [
+                merge(old_value, fresh_value, keep_scalar)
+                for old_value, fresh_value in zip(old, fresh)
+            ]
+            if is_namedtuple:
+                return type(fresh)(*values)
+            return type(fresh)(values)
+
+        if isinstance(old, list):
+            keep_scalar = preserve_scalar or contains_selected_module(old)
+            return [
+                merge(old_value, fresh_value, keep_scalar)
+                for old_value, fresh_value in zip(old, fresh)
+            ]
+
+        return old if preserve_scalar else fresh
+
+    return merge(source, target)
+
+
+def imagined_reach_weights(continues, discount):
+    """Returns reach weights for imagined states, with weight(state 0) = 1."""
+    transition_discounts = continues[:, 1:] * discount
+    return jnp.concatenate(
+        [
+            jnp.ones_like(continues[:, :1]),
+            jnp.cumprod(transition_discounts, axis=1),
+        ],
+        axis=1,
+    )
+
+
+def validate_priority_cardinality(indices, priority_losses):
+    """Raises if a replay sample does not have one loss per sampled index."""
+    num_indices = int(np.size(indices))
+    num_losses = int(np.size(priority_losses))
+    if num_indices != num_losses:
+        raise AssertionError(
+            "Replay priority cardinality mismatch: "
+            f"{num_indices} indices but {num_losses} per-example losses.")
+
+
+def td_backup_parameter_sets(online_params, target_params, use_target_backups,
+                             double_dqn):
+    """Selects value-evaluation and action-selection params for TD backups."""
+    value_params = target_params if use_target_backups else online_params
+    policy_params = online_params if double_dqn else value_params
+    return value_params, policy_params
+
+
+def behavior_parameter_set(online_params, target_params,
+                           target_action_selection):
+    """Selects the network used to sample environment actions."""
+    return target_params if target_action_selection else online_params
+
+
 @functools.partial(jax.jit, static_argnames=("keys", "strip_params_layer"))
 def interpolate_weights(
     old_params,
@@ -301,17 +409,10 @@ def jit_reset(
     online_params = FrozenDict(
         copy_params(online_params, random_params, keys=keys_to_copy))
 
-    updated_optim_state = []
-    optim_state = optimizer.init(online_params)
-    for i in range(len(optim_state)):
-        optim_to_copy = copy_params(
-            dict(optimizer_state[i]._asdict()),
-            dict(optim_state[i]._asdict()),
-            keys=keys_to_copy,
-        )
-        optim_to_copy = FrozenDict(optim_to_copy)
-        updated_optim_state.append(optim_state[i]._replace(**optim_to_copy))
-    optimizer_state = tuple(updated_optim_state)
+    fresh_optimizer_state = optimizer.init(online_params)
+    optimizer_state = copy_optimizer_state(optimizer_state,
+                                           fresh_optimizer_state,
+                                           keys=keys_to_copy)
 
     if reset_target:
         if shrink_perturb_keys:
@@ -543,17 +644,23 @@ def train(
         use_spr = (spr_weight > 0 or reward_weight > 0 or continue_weight > 0
                    or imag_horizon > 0)
 
-        def policy_online(state, action_sample_key):
+        # Double DQN uses online parameters for action selection and the
+        # configured backup network for value evaluation.  With Double DQN
+        # disabled, both sides use the configured value-backup parameters.
+        backup_params, action_selection_params = td_backup_parameter_sets(
+            online_params, target_params, use_target_backups, double_dqn)
+
+        def policy_backup(state, action_sample_key):
             return network_def.apply(
-                online_params,
+                action_selection_params,
                 state,
                 rngs={"action_sample": action_sample_key},
                 method=network_def.get_policy,
             )
 
-        def q_target(state):
+        def q_backup(state):
             return network_def.apply(
-                target_params,
+                backup_params,
                 state,
                 support=support,
                 eval_mode=target_eval_mode,
@@ -618,13 +725,14 @@ def train(
                 target * jnp.log(target)).sum(-1)
 
             spr_predictions = spr_predictions.transpose(1, 0, 2)
-            spr_predictions = spr_predictions.reshape(
-                *spr_predictions.shape[:2], 2, 2048)
+            spr_predictions = spr_networks.split_spr_branches(
+                spr_predictions, network_def.hidden_dim)
 
             spr_predictions = spr_predictions / jnp.linalg.norm(
                 spr_predictions, 2, -1, keepdims=True)
 
-            spr_targets = spr_targets.reshape(*spr_targets.shape[:2], 2, 2048)
+            spr_targets = spr_networks.split_spr_branches(
+                spr_targets, network_def.hidden_dim)
             spr_targets = spr_targets / jnp.linalg.norm(
                 spr_targets, 2, -1, keepdims=True)
             spr_loss = jnp.power(spr_predictions - spr_targets,
@@ -718,7 +826,7 @@ def train(
 
                 def value_fn(feature):
                     return network_def.apply(
-                        target_params,
+                        backup_params,
                         feature,
                         support,
                         method=network_def.q_values_from_feature)
@@ -744,7 +852,7 @@ def train(
                                            imag_values, imag_discount,
                                            imag_lambda))
                 weight = jax.lax.stop_gradient(
-                    jnp.cumprod(imag_continues * imag_discount, axis=1))
+                    imagined_reach_weights(imag_continues, imag_discount))
 
                 percentiles = jnp.percentile(ret, jnp.asarray([5.0, 95.0]))
                 new_return_ema = jnp.where(
@@ -832,6 +940,11 @@ def train(
                 "TotalLoss": total_loss,
                 "ModelLoss": model_loss,
                 "DQNLoss": jnp.mean(dqn_loss),
+                # Keep the per-example cross entropy until after the grouped
+                # minibatch scan so every sampled replay index receives a
+                # corresponding priority update.  DQNLoss remains the scalar
+                # logging metric above.
+                "PriorityLoss": dqn_loss,
                 "TD Error": jnp.mean(td_error),
                 "SPRLoss": jnp.mean(spr_loss),
                 "ent": jnp.mean(policy_out[1]),
@@ -845,8 +958,8 @@ def train(
         target = jax.vmap(target_output,
                           in_axes=(None, None, 0, 0, 0, None, 0, 0),
                           axis_name="batch")(
-                              policy_online,
-                              q_target,
+                              policy_backup,
+                              q_backup,
                               next_states,
                               rewards,
                               terminals,
@@ -1286,8 +1399,11 @@ class BBFAgent(JaxDQNAgent):
         self.shrink_factor = shrink_factor
         self.perturb_factor = perturb_factor
 
-        self.target_action_selection = target_action_selection
-        self.use_target_network = use_target_network
+        # Select which slowly/rapidly changing policy collects environment
+        # actions.  TD action selection is controlled separately by double_dqn.
+        self.target_action_selection = bool(target_action_selection)
+        # Controls value-evaluation parameters for TD and imagined bootstraps.
+        self.use_target_network = bool(use_target_network)
         self.match_online_target_rngs = match_online_target_rngs
         self.target_eval_mode = target_eval_mode
 
@@ -1604,7 +1720,7 @@ class BBFAgent(JaxDQNAgent):
 
     def initialize_prefetcher(self):
         self.prefetcher = prefetch_to_device(self._replay_sampler_generator(),
-                                             2)
+                                             1)
 
     def _sample_from_replay_buffer(self):
         self.replay_elements = next(self.prefetcher)
@@ -1652,6 +1768,13 @@ class BBFAgent(JaxDQNAgent):
         )
 
         self.cycle_grad_steps = 0
+        # Returns/discounts are materialized by the replay sampler using the
+        # cycle schedule at sampling time.  Discard the pre-reset sample and
+        # generator so the first post-reset update is sampled at cycle step 0.
+        if hasattr(self, "prefetcher"):
+            self.initialize_prefetcher()
+        if hasattr(self, "replay_elements"):
+            del self.replay_elements
 
     def _training_step_update(self, step_index, offline=False):
         """Gradient update during every training step."""
@@ -1770,7 +1893,9 @@ class BBFAgent(JaxDQNAgent):
         # technically this may be okay, setting all items to 0 priority will
         # cause troubles, and also result in 1.0 / 0.0 = NaN correction terms.
         indices = np.reshape(np.asarray(indices), (-1,))
-        dqn_loss = np.reshape(np.asarray(aux_losses["DQNLoss"]), (-1))
+        priority_loss = np.reshape(
+            np.asarray(aux_losses["PriorityLoss"]), (-1))
+        validate_priority_cardinality(indices, priority_loss)
 
         # debug - start
         #if random.uniform(0, 1) < 1e-3:
@@ -1778,7 +1903,8 @@ class BBFAgent(JaxDQNAgent):
             logging.info("ent: {}".format(aux_losses["ent"]))
         # debug - end
 
-        priorities = np.sqrt(dqn_loss + 1e-10)
+        priorities = np.sqrt(priority_loss + 1e-10)
+        validate_priority_cardinality(indices, priorities)
         self._replay.set_priority(indices, priorities)
 
         if self.grad_steps % 500 < self._batches_to_group:
@@ -2002,8 +2128,9 @@ class BBFAgent(JaxDQNAgent):
         if not self.eval_mode:
             self._train_step()
         state = self.state
-        select_params = self.target_network_params
-        #select_params = self.online_params
+        select_params = behavior_parameter_set(
+            self.online_params, self.target_network_params,
+            self.target_action_selection)
         ## time inference - start
         #self.eval_mode = True
         #import time
