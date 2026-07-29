@@ -26,6 +26,18 @@ NATURE_DQN_OBSERVATION_SHAPE = (84, 84)  # Size of downscaled Atari 2600 frame.
 NATURE_DQN_DTYPE = np.uint8  # DType of Atari 2600 observations.
 NATURE_DQN_STACK_SIZE = 4  # Number of frames in the state stack.
 
+# Parameters kept through shrink-and-perturb resets. Optimizer state is more
+# selective: reward/continue share an Adam transform (and scalar count) with
+# freshly reset Q/SPR heads, so that complete transform must restart together.
+RESET_PARAMETER_KEYS_TO_COPY = (
+    "encoder",
+    "transition_model",
+    "reward_head",
+    "continue_head",
+    "_log_alpha",
+)
+RESET_OPTIMIZER_KEYS_TO_COPY = ("encoder", "transition_model")
+
 
 def project_distribution(supports, weights, target_support):
     """Projects a batch of (support, weights) onto target_support.
@@ -185,7 +197,9 @@ def copy_optimizer_state(source, target, keys=("encoder", "transition_model")):
     copied when its containing transform has state for at least one selected
     module.  A transform may share that scalar across preserved and freshly
     reset modules; preserving it is the only consistent choice for the copied
-    first and second moments.
+    first and second moments. Callers should therefore select complete
+    optimizer transforms. The reset path does this by preserving only the
+    encoder/transition-model transform and restarting the mixed head transform.
     """
     keys = frozenset(keys)
 
@@ -332,6 +346,7 @@ def interpolate_weights(
         "do_rollout",
         "state_shape",
         "keys_to_copy",
+        "optimizer_keys_to_copy",
         "shrink_perturb_keys",
         "reset_target",
         "network_def",
@@ -353,6 +368,7 @@ def jit_reset(
     shrink_factor,
     perturb_factor,
     keys_to_copy,
+    optimizer_keys_to_copy,
 ):
     """A jittable function to reset network parameters.
 
@@ -371,7 +387,8 @@ def jit_reset(
     shrink_perturb_keys: Parameter keys to apply shrink-and-perturb to.
     shrink_factor: Factor to rescale current weights by (1 keeps , 0 deletes).
     perturb_factor: Factor to scale random noise by in [0, 1].
-    keys_to_copy: Keys to copy over without resetting.
+    keys_to_copy: Parameter keys to copy over without resetting.
+    optimizer_keys_to_copy: Module keys whose optimizer state is retained.
 
   Returns:
   """
@@ -412,7 +429,7 @@ def jit_reset(
     fresh_optimizer_state = optimizer.init(online_params)
     optimizer_state = copy_optimizer_state(optimizer_state,
                                            fresh_optimizer_state,
-                                           keys=keys_to_copy)
+                                           keys=optimizer_keys_to_copy)
 
     if reset_target:
         if shrink_perturb_keys:
@@ -1742,9 +1759,6 @@ class BBFAgent(JaxDQNAgent):
 
         self._rng, reset_rng = jax.random.split(self._rng, 2)
 
-        #keys_to_copy = ("encoder", "transition_model")
-        keys_to_copy = ("encoder", "transition_model", "reward_head",
-                        "continue_head", "_log_alpha")
         (
             self.online_params,
             self.target_network_params,
@@ -1764,7 +1778,8 @@ class BBFAgent(JaxDQNAgent):
             self.shrink_perturb_keys,
             self.shrink_factor,
             self.perturb_factor,
-            keys_to_copy,
+            RESET_PARAMETER_KEYS_TO_COPY,
+            RESET_OPTIMIZER_KEYS_TO_COPY,
         )
 
         self.cycle_grad_steps = 0
