@@ -26,9 +26,9 @@ NATURE_DQN_OBSERVATION_SHAPE = (84, 84)  # Size of downscaled Atari 2600 frame.
 NATURE_DQN_DTYPE = np.uint8  # DType of Atari 2600 observations.
 NATURE_DQN_STACK_SIZE = 4  # Number of frames in the state stack.
 
-# Parameters kept through shrink-and-perturb resets. Optimizer state is more
-# selective: reward/continue share an Adam transform (and scalar count) with
-# freshly reset Q/SPR heads, so that complete transform must restart together.
+# Parameters kept through shrink-and-perturb resets. Retained trunk and
+# grounding modules have separate optimizer transforms from freshly reset
+# Q/SPR and policy heads, so their moments and Adam counts can also survive.
 RESET_PARAMETER_KEYS_TO_COPY = (
     "encoder",
     "transition_model",
@@ -36,7 +36,12 @@ RESET_PARAMETER_KEYS_TO_COPY = (
     "continue_head",
     "_log_alpha",
 )
-RESET_OPTIMIZER_KEYS_TO_COPY = ("encoder", "transition_model")
+RESET_OPTIMIZER_KEYS_TO_COPY = (
+    "encoder",
+    "transition_model",
+    "reward_head",
+    "continue_head",
+)
 
 
 def project_distribution(supports, weights, target_support):
@@ -198,8 +203,9 @@ def copy_optimizer_state(source, target, keys=("encoder", "transition_model")):
     module.  A transform may share that scalar across preserved and freshly
     reset modules; preserving it is the only consistent choice for the copied
     first and second moments. Callers should therefore select complete
-    optimizer transforms. The reset path does this by preserving only the
-    encoder/transition-model transform and restarting the mixed head transform.
+    optimizer transforms. The reset path does this by preserving the complete
+    encoder/transition-model and reward/continue transforms while restarting
+    the Q/SPR and policy transforms.
     """
     keys = frozenset(keys)
 
@@ -1584,11 +1590,16 @@ class BBFAgent(JaxDQNAgent):
             }
         })
 
-        head_keys = {
-            "projection", "head", "predictor", "reward_head", "continue_head"
-        }
+        head_keys = {"projection", "head", "predictor"}
         head_mask = FrozenDict({
             "params": {k: k in head_keys for k in self.online_params["params"]}
+        })
+
+        grounding_keys = {"reward_head", "continue_head"}
+        grounding_mask = FrozenDict({
+            "params": {
+                k: k in grounding_keys for k in self.online_params["params"]
+            }
         })
 
         policy_key = {"policy_projection", "policy", "predict_policy"}
@@ -1603,6 +1614,33 @@ class BBFAgent(JaxDQNAgent):
         alpha_mask = FrozenDict({
             "params": {k: k in alpha_key for k in self.online_params["params"]}
         })
+        optimizer_key_groups = (
+            encoder_keys,
+            head_keys,
+            grounding_keys,
+            policy_key,
+            alpha_key,
+        )
+        parameter_keys = set(self.online_params["params"])
+        optimizer_membership = {
+            key: sum(key in group for group in optimizer_key_groups)
+            for key in parameter_keys
+        }
+        invalid_membership = {
+            key: count
+            for key, count in optimizer_membership.items() if count != 1
+        }
+        if invalid_membership:
+            raise ValueError(
+                "Optimizer masks must be disjoint and cover every parameter "
+                "module exactly once; invalid memberships: {}".format(
+                    invalid_membership))
+        retained_optimizer_keys = encoder_keys | grounding_keys
+        if set(RESET_OPTIMIZER_KEYS_TO_COPY) != retained_optimizer_keys:
+            raise ValueError(
+                "RESET_OPTIMIZER_KEYS_TO_COPY must exactly match the complete "
+                "optimizer transforms retained across reset: {}".format(
+                    sorted(retained_optimizer_keys)))
         #print(" alpha_mask:\n{}".format(alpha_mask))
         #print(" policy_mask:\n{}".format(policy_mask))
         #exit(0)
@@ -1634,6 +1672,7 @@ class BBFAgent(JaxDQNAgent):
         self.optimizer = optax.chain(
             optax.masked(encoder_optimizer, encoder_mask),
             optax.masked(optimizer, head_mask),
+            optax.masked(optimizer, grounding_mask),
             optax.masked(policy_optim, policy_mask),
             optax.masked(alpha_optim, alpha_mask),
         )
