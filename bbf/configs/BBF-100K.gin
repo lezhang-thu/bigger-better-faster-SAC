@@ -17,6 +17,12 @@ BBFAgent.distributional = True
 BBFAgent.num_atoms = 51
 BBFAgent.update_horizon = 3
 BBFAgent.max_update_horizon = 10
+# Off by default so historical BBF/combo rows retain their 10->3 replay-TD
+# schedule. New one-step rows enable this together with both horizons set to 1;
+# the agent rejects inconsistent bindings. When enabled, the C51 bootstrap is
+# the exact online-policy mixture of target-critic distributions rather than
+# one sampled action (under the default Double-DQN parameter routing).
+BBFAgent.expected_one_step_backup = False
 BBFAgent.min_gamma = 0.97
 BBFAgent.cycle_steps = 10_000
 BBFAgent.reset_every = 20_000 # Change if you change the replay ratio
@@ -140,5 +146,6 @@ Runner.max_steps_per_episode = 27000    # agent steps
 
 bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.replay_capacity = 200000
 bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.n_envs = 1    # agent episodes
+bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.prioritized_sampling = True
 bbf.replay_memory.subsequence_replay_buffer.JaxSubsequenceParallelEnvReplayBuffer.replay_capacity = 10000
 bbf.replay_memory.subsequence_replay_buffer.JaxSubsequenceParallelEnvReplayBuffer.n_envs = 1    # agent episodes

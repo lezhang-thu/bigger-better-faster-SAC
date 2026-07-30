@@ -286,6 +286,23 @@ def validate_priority_cardinality(indices, priority_losses):
             f"{num_indices} indices but {num_losses} per-example losses.")
 
 
+def validate_expected_one_step_backup(enabled, update_horizon,
+                                      max_update_horizon):
+    """Requires a genuinely one-step replay target when the option is on."""
+    if not enabled:
+        return
+
+    update_horizon = int(update_horizon)
+    max_update_horizon = (update_horizon if max_update_horizon is None else
+                          int(max_update_horizon))
+    if update_horizon != 1 or max_update_horizon != 1:
+        raise ValueError(
+            "expected_one_step_backup requires update_horizon=1 and "
+            "max_update_horizon=1 (or None), got update_horizon={} and "
+            "max_update_horizon={}.".format(update_horizon,
+                                            max_update_horizon))
+
+
 def td_backup_parameter_sets(online_params, target_params, use_target_backups,
                              double_dqn):
     """Selects value-evaluation and action-selection params for TD backups."""
@@ -541,6 +558,7 @@ train_static_argnames = [
     'dtype',
     'batch_size',
     'use_target_backups',
+    'expected_one_step_backup',
     'match_online_target_rngs',
     'target_eval_mode',
     'reward_weight',
@@ -575,6 +593,7 @@ def train(
     dtype,  # static
     batch_size,  # static
     use_target_backups,  # static
+    expected_one_step_backup,  # static
     target_update_tau,
     target_update_every,
     step,
@@ -979,7 +998,7 @@ def train(
 
         # Use the weighted mean loss for gradient computation.
         target = jax.vmap(target_output,
-                          in_axes=(None, None, 0, 0, 0, None, 0, 0),
+                          in_axes=(None, None, 0, 0, 0, None, 0, 0, None),
                           axis_name="batch")(
                               policy_backup,
                               q_backup,
@@ -989,6 +1008,7 @@ def train(
                               support,
                               cumulative_gamma,
                               target_rng,
+                              expected_one_step_backup,
                           )
 
         future_states = states[:, 1:]
@@ -1169,15 +1189,25 @@ def target_output(
     support,
     cumulative_gamma,
     rng,
+    expected_one_step_backup=False,
 ):
     gamma_with_terminal = (cumulative_gamma *
                            (1.0 - terminals.astype(jnp.float32)))
     target_dist = target_network(next_states)
-    _, next_qt_argmax = policy_info(next_states, rng)
+    policy_logits, sampled_action = policy_info(next_states, rng)
 
     # Compute the target Q-value distribution
     probabilities = jnp.squeeze(target_dist.probabilities)
-    next_probabilities = probabilities[next_qt_argmax]
+    if expected_one_step_backup:
+        # For the finite Atari action set, form the target-policy mixture
+        # exactly instead of drawing one bootstrap action.  Mixing the full
+        # categorical distributions preserves C51; reducing each action to
+        # its scalar expectation here would discard distributional structure.
+        policy_probabilities = jax.nn.softmax(policy_logits)
+        next_probabilities = jnp.einsum("a,az->z", policy_probabilities,
+                                        probabilities)
+    else:
+        next_probabilities = probabilities[sampled_action]
     target_support = rewards + gamma_with_terminal * support
     target = project_distribution(target_support, next_probabilities, support)
 
@@ -1310,6 +1340,7 @@ class BBFAgent(JaxDQNAgent):
         batches_to_group=1,
         update_horizon=10,
         max_update_horizon=None,
+        expected_one_step_backup=False,
         min_gamma=None,
         reset_every=-1,
         no_resets_after=-1,
@@ -1377,6 +1408,10 @@ class BBFAgent(JaxDQNAgent):
         self._batch_size = int(batch_size)
         self._batches_to_group = int(batches_to_group)
         self.update_horizon = int(update_horizon)
+        self.expected_one_step_backup = bool(expected_one_step_backup)
+        validate_expected_one_step_backup(self.expected_one_step_backup,
+                                          self.update_horizon,
+                                          max_update_horizon)
         self._jumps = int(jumps)
         self.spr_weight = spr_weight
 
@@ -1488,6 +1523,8 @@ class BBFAgent(JaxDQNAgent):
         print(' self.target_eval_mode: {}'.format(self.target_eval_mode))
         print(' self.target_action_selection: {}'.format(
             self.target_action_selection))
+        print(' self.expected_one_step_backup: {}'.format(
+            self.expected_one_step_backup))
         print(" num_actions: {}".format(num_actions))
         print(" self.reset_target: {}".format(self.reset_target))
         # debug - end
@@ -1909,6 +1946,7 @@ class BBFAgent(JaxDQNAgent):
             self.dtype,
             self._batch_size,
             self.use_target_network,
+            self.expected_one_step_backup,
             self.target_update_tau_scheduler(self.cycle_grad_steps),
             self.target_update_period,
             self.grad_steps,

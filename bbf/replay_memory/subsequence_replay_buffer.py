@@ -819,7 +819,7 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
 @gin.configurable
 class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
         JaxSubsequenceParallelEnvReplayBuffer):
-    """Deterministic version of prioritized replay buffer."""
+    """Replay buffer with selectable prioritized or uniform anchor sampling."""
 
     def __init__(self,
                  observation_shape,
@@ -837,7 +837,8 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
                  action_shape=(),
                  action_dtype=np.int32,
                  reward_shape=(),
-                 reward_dtype=np.float32):
+                 reward_dtype=np.float32,
+                 prioritized_sampling=True):
         super().__init__(observation_shape=observation_shape,
                          stack_size=stack_size,
                          replay_capacity=int(replay_capacity),
@@ -855,6 +856,9 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
                          reward_shape=reward_shape,
                          reward_dtype=reward_dtype)
 
+        self._prioritized_sampling = bool(prioritized_sampling)
+        logging.info('Using prioritized replay sampling: %s',
+                     self._prioritized_sampling)
         self.sum_tree = sum_tree.DeterministicSumTree(self._replay_capacity)
 
     def get_add_args_signature(self):
@@ -894,6 +898,12 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
                            subseq_len=None,
                            update_horizon=None):
         """Returns a batch of valid indices sampled as in Schaul et al. (2015)."""
+        if not self._prioritized_sampling:
+            return super().sample_index_batch(
+                batch_size,
+                subseq_len=subseq_len,
+                update_horizon=update_horizon)
+
         subseq_len = self._subseq_len if subseq_len is None else subseq_len
         update_horizon = (self._update_horizon if update_horizon is None else
                           update_horizon)
@@ -975,6 +985,8 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
             raise ValueError(
                 'Priority count must match index count: got {} priorities '
                 'for {} indices.'.format(priorities.size, indices.size))
+        if not self._prioritized_sampling:
+            return
         for index, priority in zip(indices, priorities):
             self.sum_tree.set(index, priority)
 
@@ -987,6 +999,8 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
             raise TypeError('Indices must be integers, given: {}'.format(
                 indices.dtype))
         indices = indices.astype(np.int32, copy=False)
+        if not self._prioritized_sampling:
+            return np.ones(indices.shape, dtype=np.float32)
         return np.asarray(self.sum_tree.get(indices), dtype=np.float32)
 
     def get_transition_elements(self, batch_size=None, subseq_len=None):
@@ -1000,4 +1014,5 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
         return parent_transition_type + probablilities_type
 
     def reset_priorities(self):
-        self.sum_tree.reset_priorities()
+        if self._prioritized_sampling:
+            self.sum_tree.reset_priorities()
