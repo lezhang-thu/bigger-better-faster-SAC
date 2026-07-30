@@ -563,30 +563,47 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
         censor_before = censor_before[:, None].repeat(
             subseq_len, axis=1).reshape(batch_size * subseq_len)
 
-        # shape: horizon X batch_size*subseq_len
-        # Offset by one; a `d
-        trajectory_indices = (np.arange(-1, update_horizon - 1)[:, None] +
-                              state_indices[None, :]) % self._replay_length
-        trajectory_b_indices = b_indices[None,].repeat(update_horizon, axis=0)
-        trajectory_terminals = self._store['terminal'][trajectory_indices,
-                                                       trajectory_b_indices]
-        trajectory_terminals[0, :] = 0
-        is_terminal_transition = trajectory_terminals.any(0)
-        valid_mask = (1 - trajectory_terminals).cumprod(0)
-        trajectory_discount_vector = valid_mask * (
-            cumulative_discount_vector[:update_horizon, None])
-        trajectory_rewards = self._store['reward'][(trajectory_indices + 1) %
-                                                   self._replay_length,
-                                                   trajectory_b_indices]
+        if update_horizon == 1:
+            # Rows store (s_t, a_t, r_{t+1}, done_{t+1}). The legacy
+            # multi-step indexing below treats a horizon of one as an empty
+            # offset, which bootstraps from s_t and suppresses done_{t+1}.
+            # Keep that path untouched for historical rows, but make the new
+            # expected-one-step mode a true transition to s_{t+1}.
+            returns = self._store['reward'][state_indices, b_indices]
+            is_terminal_transition = self._store['terminal'][state_indices,
+                                                              b_indices]
+            update_horizons = np.zeros(batch_size * subseq_len,
+                                       dtype=np.int32)
+            next_indices = (state_indices + 1) % self._replay_length
+        else:
+            # shape: horizon X batch_size*subseq_len
+            trajectory_indices = (
+                np.arange(-1, update_horizon - 1)[:, None] +
+                state_indices[None, :]) % self._replay_length
+            trajectory_b_indices = b_indices[None,].repeat(update_horizon,
+                                                           axis=0)
+            trajectory_terminals = self._store['terminal'][
+                trajectory_indices, trajectory_b_indices]
+            trajectory_terminals[0, :] = 0
+            is_terminal_transition = trajectory_terminals.any(0)
+            valid_mask = (1 - trajectory_terminals).cumprod(0)
+            trajectory_discount_vector = valid_mask * (
+                cumulative_discount_vector[:update_horizon, None])
+            trajectory_rewards = self._store['reward'][
+                (trajectory_indices + 1) % self._replay_length,
+                trajectory_b_indices]
 
-        returns = np.cumsum(trajectory_discount_vector * trajectory_rewards,
-                            axis=0)
+            returns = np.cumsum(
+                trajectory_discount_vector * trajectory_rewards, axis=0)
 
-        update_horizons = jnp.ones(batch_size * subseq_len,
-                                   dtype=jnp.int32) * (update_horizon - 1)
-        returns = returns[update_horizons, np.arange(batch_size * subseq_len)]
+            update_horizons = jnp.ones(
+                batch_size * subseq_len,
+                dtype=jnp.int32) * (update_horizon - 1)
+            returns = returns[update_horizons,
+                              np.arange(batch_size * subseq_len)]
 
-        next_indices = (state_indices + update_horizons) % self._replay_length
+            next_indices = ((state_indices + update_horizons) %
+                            self._replay_length)
         outputs = []
         for element in transition_elements:
             name = element.name
