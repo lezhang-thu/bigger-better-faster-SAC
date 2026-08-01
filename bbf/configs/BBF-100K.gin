@@ -22,6 +22,12 @@ BBFAgent.max_update_horizon = 10
 # agent construction. Under the default routing, online-policy probabilities
 # mix the target critic's complete C51 action distributions.
 BBFAgent.expected_one_step_backup = False
+# Distributional Tree Backup is an opt-in alternative to the historical
+# sampled/multi-step target and to expected_one_step_backup.  Its own horizon
+# controls how many real replay rewards can enter the root target; it is kept
+# independent of MODEL_HORIZON, which still controls SPR and imagination.
+BBFAgent.tree_backup = False
+BBFAgent.tree_backup_horizon = 10
 BBFAgent.min_gamma = 0.97
 BBFAgent.cycle_steps = 10_000
 BBFAgent.reset_every = 20_000 # Change if you change the replay ratio

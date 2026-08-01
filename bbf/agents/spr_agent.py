@@ -189,6 +189,33 @@ def validate_expected_one_step_backup(enabled, update_horizon,
                                             max_update_horizon))
 
 
+def validate_tree_backup(enabled, expected_one_step_backup, update_horizon,
+                         max_update_horizon, tree_backup_horizon,
+                         distributional):
+    """Validates the raw-transition contract used by Tree Backup."""
+    if not enabled:
+        return
+
+    update_horizon = int(update_horizon)
+    max_update_horizon = (update_horizon if max_update_horizon is None else
+                          int(max_update_horizon))
+    tree_backup_horizon = int(tree_backup_horizon)
+    if expected_one_step_backup:
+        raise ValueError(
+            "tree_backup and expected_one_step_backup are mutually exclusive.")
+    if update_horizon != 1 or max_update_horizon != 1:
+        raise ValueError(
+            "tree_backup reads raw one-step replay rows and therefore requires "
+            "update_horizon=max_update_horizon=1, got {} and {}.".format(
+                update_horizon, max_update_horizon))
+    if tree_backup_horizon < 1:
+        raise ValueError(
+            "tree_backup_horizon must be positive, got {}.".format(
+                tree_backup_horizon))
+    if not distributional:
+        raise ValueError("tree_backup currently requires distributional C51.")
+
+
 @functools.partial(jax.jit, static_argnames=("keys", "strip_params_layer"))
 def interpolate_weights(
     old_params,
@@ -435,6 +462,9 @@ train_static_argnames = [
     'batch_size',
     'use_target_backups',
     'expected_one_step_backup',
+    'tree_backup',
+    'spr_horizon',
+    'tree_backup_horizon',
     'match_online_target_rngs',
     'target_eval_mode',
     'reward_weight',
@@ -470,6 +500,9 @@ def train(
     batch_size,  # static
     use_target_backups,  # static
     expected_one_step_backup,  # static
+    tree_backup,  # static
+    spr_horizon,  # static
+    tree_backup_horizon,  # static
     target_update_tau,
     target_update_every,
     step,
@@ -519,10 +552,16 @@ def train(
             cumulative_gamma,
             per_step_rewards,
         ) = inputs
+        # Tree Backup may request a longer replay sequence than SPR. Keep the
+        # representation/world-model objective at its configured horizon.
+        model_actions = actions[:, :spr_horizon]
+        model_same_traj = same_traj_mask[:, :spr_horizon + 1]
+        model_step_rewards = per_step_rewards[:, :spr_horizon]
+
         # World-model targets, aligned to arrival semantics: the feature of
         # state s_{k+1} (column k below) predicts reward r_k and whether the
         # episode continues at s_{k+1}.
-        continue_targets = same_traj_mask[:, 1:].astype(jnp.float32)
+        continue_targets = model_same_traj[:, 1:].astype(jnp.float32)
         model_mask = jnp.concatenate(
             [
                 jnp.ones_like(continue_targets[:, :1]),
@@ -530,12 +569,12 @@ def train(
             ],
             axis=1,
         )
-        model_rewards = per_step_rewards[:, :-1].astype(jnp.float32)
+        model_rewards = model_step_rewards.astype(jnp.float32)
 
-        same_traj_mask = same_traj_mask[:, 1:]
-        rewards = rewards[:, 0]
-        terminals = terminals[:, 0]
-        cumulative_gamma = cumulative_gamma[:, 0]
+        same_traj_mask = model_same_traj[:, 1:]
+        root_rewards = rewards[:, 0]
+        root_terminals = terminals[:, 0]
+        root_discount = cumulative_gamma[:, 0]
 
         rng, rng1, rng2 = jax.random.split(rng, num=3)
         states = spr_networks.process_inputs(
@@ -626,7 +665,7 @@ def train(
             x, logits = jax.vmap(all_results,
                                  in_axes=(0, 0, None),
                                  axis_name="batch")(current_state,
-                                                    actions[:, :-1], use_spr)
+                                                    model_actions, use_spr)
             spr_predictions = x.latent
             q_logits = jnp.squeeze(x.logits)
             chosen_action_logits = q_logits[jnp.arange(q_logits.shape[0]),
@@ -850,6 +889,9 @@ def train(
             aux_losses = {
                 "TotalLoss": total_loss,
                 "ModelLoss": model_loss,
+                # Preserve the branch's historical grouped-priority behavior;
+                # changing it only for Tree Backup would confound this ablation
+                # with the separate PER-cardinality correction.
                 "DQNLoss": jnp.mean(dqn_loss),
                 "TD Error": jnp.mean(td_error),
                 "SPRLoss": jnp.mean(spr_loss),
@@ -861,21 +903,52 @@ def train(
             return total_loss, (aux_losses)
 
         # Use the weighted mean loss for gradient computation.
-        target = jax.vmap(target_output,
-                          in_axes=(None, None, 0, 0, 0, None, 0, 0, None),
-                          axis_name="batch")(
-                              policy_online,
-                              q_target,
-                              next_states,
-                              rewards,
-                              terminals,
-                              support,
-                              cumulative_gamma,
-                              target_rng,
-                              expected_one_step_backup,
-                          )
+        if tree_backup:
+            tree_states = states[:, 1:tree_backup_horizon + 1]
+            tree_rewards = per_step_rewards[:, :tree_backup_horizon]
+            tree_terminals = terminals[:, :tree_backup_horizon]
+            tree_actions = actions[:, :tree_backup_horizon]
+            tree_keys = jax.random.split(
+                rng1, states.shape[0] * tree_backup_horizon).reshape(
+                    states.shape[0], tree_backup_horizon, 2)
 
-        future_states = states[:, 1:]
+            policy_logits, _ = jax.vmap(
+                jax.vmap(policy_online, in_axes=(0, 0), axis_name="time"),
+                in_axes=(0, 0), axis_name="batch")(tree_states, tree_keys)
+            tree_policy_probabilities = jax.nn.softmax(policy_logits, axis=-1)
+            tree_target_output = jax.vmap(
+                jax.vmap(q_target, in_axes=0, axis_name="time"),
+                in_axes=0, axis_name="batch")(tree_states)
+            tree_target_probabilities = tree_target_output.probabilities
+            target = jax.vmap(
+                categorical_tree_backup,
+                in_axes=(0, 0, 0, 0, 0, None, 0),
+                axis_name="batch")(
+                    tree_policy_probabilities,
+                    tree_target_probabilities,
+                    tree_actions,
+                    tree_rewards,
+                    tree_terminals,
+                    support,
+                    root_discount,
+                )
+        else:
+            target = jax.vmap(
+                target_output,
+                in_axes=(None, None, 0, 0, 0, None, 0, 0, None),
+                axis_name="batch")(
+                    policy_online,
+                    q_target,
+                    next_states,
+                    root_rewards,
+                    root_terminals,
+                    support,
+                    root_discount,
+                    target_rng,
+                    expected_one_step_backup,
+                )
+
+        future_states = states[:, 1:spr_horizon + 1]
         spr_targets, future_latents = jax.vmap(jax.vmap(encode_project,
                                                         in_axes=0,
                                                         axis_name="time"),
@@ -1044,6 +1117,78 @@ def train(
     )
 
 
+def categorical_tree_backup(policy_probabilities, target_probabilities,
+                            replay_actions, rewards, terminals, support,
+                            gamma):
+    """Builds a finite-horizon distributional Tree Backup target.
+
+    Replay row k is ``(s_k, a_k, r_{k+1}, d_{k+1})``. Policy and target
+    probabilities are evaluated at states ``s_1..s_H``. At each intermediate
+    state, non-replayed actions terminate in the target critic while the
+    replayed action is the sole branch expanded to the next real reward.
+
+    The complete branch mixture is accumulated before the root C51 loss. Each
+    affine branch is projected only once; this avoids adding an extra C51
+    approximation at every recursive Tree Backup step.
+    """
+    horizon = rewards.shape[0]
+    if horizon < 1:
+        raise ValueError("Tree Backup requires at least one transition.")
+    if policy_probabilities.shape[0] != horizon:
+        raise ValueError("Policy sequence length must match reward horizon.")
+    if target_probabilities.shape[0] != horizon:
+        raise ValueError("Target sequence length must match reward horizon.")
+    if terminals.shape[0] != horizon:
+        raise ValueError("Terminal sequence length must match reward horizon.")
+    if replay_actions.shape[0] < horizon:
+        raise ValueError("Replay action sequence is shorter than the horizon.")
+
+    dtype = target_probabilities.dtype
+    target = jnp.zeros_like(support, dtype=dtype)
+    path_weight = jnp.asarray(1.0, dtype=dtype)
+    cumulative_reward = jnp.asarray(0.0, dtype=dtype)
+    discount = jnp.asarray(1.0, dtype=dtype)
+    gamma = jnp.asarray(gamma, dtype=dtype)
+    num_actions = target_probabilities.shape[1]
+
+    for depth in range(1, horizon + 1):
+        index = depth - 1
+        cumulative_reward = cumulative_reward + discount * rewards[index]
+        done = terminals[index].astype(dtype)
+
+        # If the replayed path terminates here, its residual probability mass
+        # becomes a point mass at the accumulated real return.
+        terminal_weight = path_weight * done
+        target = target + project_distribution(
+            jnp.asarray([cumulative_reward]),
+            jnp.asarray([terminal_weight]), support)
+
+        live_weight = path_weight * (1.0 - done)
+        policy = policy_probabilities[index]
+        q_distributions = target_probabilities[index]
+        transformed_support = cumulative_reward + discount * gamma * support
+
+        if depth == horizon:
+            # The final state is an ordinary expected-policy bootstrap.
+            branch_weights = live_weight * jnp.einsum(
+                "a,az->z", policy, q_distributions)
+        else:
+            replay_action = replay_actions[depth].astype(jnp.int32)
+            side_action_mask = 1.0 - jax.nn.one_hot(
+                replay_action, num_actions, dtype=dtype)
+            branch_weights = live_weight * jnp.einsum(
+                "a,a,az->z", policy, side_action_mask, q_distributions)
+            # Only the replayed-action branch continues to the next real
+            # reward; all other current-policy branches ended above.
+            path_weight = live_weight * policy[replay_action]
+
+        target = target + project_distribution(transformed_support,
+                                               branch_weights, support)
+        discount = discount * gamma
+
+    return jax.lax.stop_gradient(target)
+
+
 def target_output(
     policy_info,
     target_network,
@@ -1204,6 +1349,8 @@ class BBFAgent(JaxDQNAgent):
         update_horizon=10,
         max_update_horizon=None,
         expected_one_step_backup=False,
+        tree_backup=False,
+        tree_backup_horizon=10,
         min_gamma=None,
         reset_every=-1,
         no_resets_after=-1,
@@ -1275,6 +1422,14 @@ class BBFAgent(JaxDQNAgent):
         validate_expected_one_step_backup(self.expected_one_step_backup,
                                           self.update_horizon,
                                           max_update_horizon)
+        self.tree_backup = bool(tree_backup)
+        self.tree_backup_horizon = int(tree_backup_horizon)
+        validate_tree_backup(self.tree_backup,
+                             self.expected_one_step_backup,
+                             self.update_horizon,
+                             max_update_horizon,
+                             self.tree_backup_horizon,
+                             self._distributional)
         self._jumps = int(jumps)
         self.spr_weight = spr_weight
 
@@ -1385,6 +1540,9 @@ class BBFAgent(JaxDQNAgent):
             self.target_action_selection))
         print(' self.expected_one_step_backup: {}'.format(
             self.expected_one_step_backup))
+        print(' self.tree_backup: {}'.format(self.tree_backup))
+        print(' self.tree_backup_horizon: {}'.format(
+            self.tree_backup_horizon))
         print(" num_actions: {}".format(num_actions))
         print(" self.reset_target: {}".format(self.reset_target))
         # debug - end
@@ -1549,12 +1707,25 @@ class BBFAgent(JaxDQNAgent):
         #exit(0)
 
     def _build_replay_buffer(self):
+        # Tree Backup consumes H raw replay transitions while SPR/imagination
+        # retain their independently configured model horizon.  The replay
+        # buffer's construction horizon is only a sampling-validity bound;
+        # _replay_sampler_generator still requests update_horizon=1 so reward
+        # and terminal remain the raw row values needed by Tree Backup.
+        validation_horizon = max(
+            self.max_update_horizon,
+            self.tree_backup_horizon if self.tree_backup else 1,
+        )
+        subseq_len = max(
+            self._jumps,
+            self.tree_backup_horizon if self.tree_backup else 0,
+        ) + 1
         prioritized_buffer = subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
             observation_shape=self.observation_shape,
             stack_size=self.stack_size,
-            update_horizon=self.max_update_horizon,
+            update_horizon=validation_horizon,
             gamma=self.gamma,
-            subseq_len=self._jumps + 1,
+            subseq_len=subseq_len,
             batch_size=self._batch_size,
             observation_dtype=self.observation_dtype,
         )
@@ -1613,11 +1784,14 @@ class BBFAgent(JaxDQNAgent):
         while True:
             self._rng, rng = jax.random.split(self._rng)
 
+            replay_horizon = (1 if self.tree_backup else
+                              self.update_horizon_scheduler(
+                                  self.cycle_grad_steps))
+
             samples = self._replay.sample_transition_batch(
                 rng,
                 batch_size=self._batch_size * self._batches_to_group,
-                update_horizon=self.update_horizon_scheduler(
-                    self.cycle_grad_steps),
+                update_horizon=replay_horizon,
                 gamma=self.gamma_scheduler(self.cycle_grad_steps),
             )
             replay_elements = collections.OrderedDict()
@@ -1769,6 +1943,9 @@ class BBFAgent(JaxDQNAgent):
             self._batch_size,
             self.use_target_network,
             self.expected_one_step_backup,
+            self.tree_backup,
+            self._jumps,
+            self.tree_backup_horizon,
             self.target_update_tau_scheduler(self.cycle_grad_steps),
             self.target_update_period,
             self.grad_steps,
