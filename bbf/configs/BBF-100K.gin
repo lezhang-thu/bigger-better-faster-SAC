@@ -23,6 +23,15 @@ BBFAgent.max_update_horizon = 10
 # the exact online-policy mixture of target-critic distributions rather than
 # one sampled action (under the default Double-DQN parameter routing).
 BBFAgent.expected_one_step_backup = False
+# Distributional Retrace is opt-in so historical rows retain their original
+# replay-TD target. When enabled it requires raw replay rows
+# (update_horizon=max_update_horizon=1), a fixed gamma (min_gamma=None), and
+# uses this separate fixed real-trajectory horizon. MODEL_HORIZON remains the
+# independent SPR/imagination depth. Lambda 1 maximizes sparse-reward
+# propagation while clipped pi/mu coefficients control off-policy traces.
+BBFAgent.retrace = False
+BBFAgent.retrace_horizon = 10
+BBFAgent.retrace_lambda = 1.0
 BBFAgent.min_gamma = 0.97
 BBFAgent.cycle_steps = 10_000
 BBFAgent.reset_every = 20_000 # Change if you change the replay ratio

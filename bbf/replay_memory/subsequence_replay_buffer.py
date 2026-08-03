@@ -970,7 +970,16 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
             update_horizon=update_horizon,
             gamma=gamma,
         )
-        transition.append(self.get_priority(transition[-1]))
+        # Extra replay fields are appended after `indices`, so indices are not
+        # necessarily the final parent output (Retrace stores a behavior
+        # probability this way). Resolve the field by name rather than relying
+        # on its historical position.
+        parent_elements = super().get_transition_elements(
+            batch_size=batch_size, subseq_len=subseq_len)
+        indices_position = next(
+            i for i, element in enumerate(parent_elements)
+            if element.name == 'indices')
+        transition.append(self.get_priority(transition[indices_position]))
         return transition
 
     def set_priority(self, indices, priorities):
@@ -1002,6 +1011,22 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
         if not self._prioritized_sampling:
             return np.ones(indices.shape, dtype=np.float32)
         return np.asarray(self.sum_tree.get(indices), dtype=np.float32)
+
+    def mean_priority(self):
+        """Returns the replay-wide mean over populated priority leaves.
+
+        This supplies a sample-independent scale for full importance
+        correction.  Normalizing inverse priorities by a sampled batch maximum
+        would instead make the common scale depend on the sampled trajectories.
+        Rejection sampling and prefetch can change the exact common scale, but
+        not the inverse-priority relative weights.
+        """
+        if not self._prioritized_sampling:
+            return np.float32(1.0)
+        populated = self.sum_tree.highest_set + 1
+        if populated <= 0:
+            return np.float32(1.0)
+        return np.float32(self.sum_tree._total_priority() / populated)
 
     def get_transition_elements(self, batch_size=None, subseq_len=None):
         """Returns a 'type signature' for sample_transition_batch."""
