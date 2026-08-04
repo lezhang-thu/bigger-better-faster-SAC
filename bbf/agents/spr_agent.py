@@ -202,6 +202,62 @@ def categorical_retrace_priority(target, predicted_probabilities):
     return jnp.square(jnp.clip(total_variation, 0.0, 1.0))
 
 
+def n_step_lower_bound_target(rewards, terminals, bootstrap_value, gamma):
+    """Returns a terminal-truncated scalar n-step target.
+
+    Replay rows follow ``(S_t, A_t, R_{t+1}, D_{t+1})``. The terminal reward
+    is included, while all later rewards and the bootstrap are masked. This
+    helper is also used to reconstruct the reward prefix for the projected
+    C51 lower-bound target from raw one-step replay rows.
+    """
+    if rewards.ndim != 1 or terminals.ndim != 1:
+        raise ValueError("n-step rewards and terminals must be rank one.")
+    if rewards.shape != terminals.shape:
+        raise ValueError("n-step rewards and terminals must have equal shape.")
+    if rewards.shape[0] < 1:
+        raise ValueError("n-step lower-bound horizon must be positive.")
+
+    dtype = rewards.dtype
+    gamma = jnp.asarray(gamma, dtype=dtype)
+    value = jnp.asarray(0.0, dtype=dtype)
+    discount = jnp.asarray(1.0, dtype=dtype)
+    alive = jnp.asarray(1.0, dtype=dtype)
+    for step_index in range(rewards.shape[0]):
+        value = value + discount * alive * rewards[step_index]
+        alive = alive * (1.0 - terminals[step_index].astype(dtype))
+        discount = discount * gamma
+    return value + discount * alive * jnp.asarray(bootstrap_value, dtype=dtype)
+
+
+def lower_bound_td_signals(q_value, one_step_target, n_step_target,
+                           priority_eta=0.5, priority_epsilon=1e-6):
+    """Builds the one-step error, upward-only gap, and proposal priority u_t.
+
+    Target values are frozen, but the positive gap retains its derivative with
+    respect to ``q_value`` so minimizing a loss of that gap can only raise the
+    predicted root value. The priority is fully stopped and is never itself an
+    optimization objective.
+    """
+    one_step_target = jax.lax.stop_gradient(jnp.asarray(one_step_target))
+    n_step_target = jax.lax.stop_gradient(jnp.asarray(n_step_target))
+    q_value = jnp.asarray(q_value)
+    delta_one_step = one_step_target - q_value
+    positive_lower_bound = jax.nn.relu(n_step_target - q_value)
+    priority_score = jax.lax.stop_gradient(
+        jnp.abs(delta_one_step) +
+        jnp.asarray(priority_eta, dtype=q_value.dtype) * positive_lower_bound +
+        jnp.asarray(priority_epsilon, dtype=q_value.dtype))
+    return delta_one_step, positive_lower_bound, priority_score
+
+
+def one_sided_huber_loss(positive_gap, delta=1.0):
+    """Huber penalty for a nonnegative lower-bound gap."""
+    delta = jnp.asarray(delta, dtype=positive_gap.dtype)
+    quadratic = jnp.minimum(positive_gap, delta)
+    linear = positive_gap - quadratic
+    return 0.5 * jnp.square(quadratic) + delta * linear
+
+
 def softmax_cross_entropy_loss_with_logits(labels: jnp.array,
                                            logits: jnp.array) -> jnp.ndarray:
     """Implementation of the softmax cross entropy loss."""
@@ -480,6 +536,48 @@ def validate_retrace(enabled, expected_one_step_backup, update_horizon,
         raise ValueError("retrace currently requires distributional C51.")
 
 
+def validate_td_lower_bound(weight, horizon, priority_eta, priority_epsilon,
+                            retrace, update_horizon, max_update_horizon,
+                            distributional):
+    """Validates the raw-row contract for one-step TD plus an n-step floor."""
+    weight = float(weight)
+    if not np.isfinite(weight) or weight < 0.0:
+        raise ValueError(
+            "td_lower_bound_weight must be finite and nonnegative, got {}."
+            .format(weight))
+    if weight == 0.0:
+        return
+
+    horizon = int(horizon)
+    priority_eta = float(priority_eta)
+    priority_epsilon = float(priority_epsilon)
+    update_horizon = int(update_horizon)
+    max_update_horizon = (update_horizon if max_update_horizon is None else
+                          int(max_update_horizon))
+    if retrace:
+        raise ValueError("td_lower_bound and retrace are mutually exclusive.")
+    if update_horizon != 1 or max_update_horizon != 1:
+        raise ValueError(
+            "td_lower_bound reconstructs its n-step signal from raw replay "
+            "rows and requires update_horizon=max_update_horizon=1, got {} "
+            "and {}.".format(update_horizon, max_update_horizon))
+    if horizon < 2:
+        raise ValueError(
+            "td_lower_bound_horizon must be at least 2, got {}.".format(
+                horizon))
+    if not np.isfinite(priority_eta) or priority_eta < 0.0:
+        raise ValueError(
+            "td_lower_bound_priority_eta must be finite and nonnegative, got "
+            "{}.".format(priority_eta))
+    if not np.isfinite(priority_epsilon) or priority_epsilon <= 0.0:
+        raise ValueError(
+            "td_lower_bound_priority_epsilon must be finite and positive, got "
+            "{}.".format(priority_epsilon))
+    if not distributional:
+        raise ValueError(
+            "td_lower_bound currently requires the distributional C51 critic.")
+
+
 def td_backup_parameter_sets(online_params, target_params, use_target_backups,
                              double_dqn):
     """Selects value-evaluation and action-selection params for TD backups."""
@@ -739,6 +837,8 @@ train_static_argnames = [
     'retrace',
     'spr_horizon',
     'retrace_horizon',
+    'td_lower_bound',
+    'td_lower_bound_horizon',
     'match_online_target_rngs',
     'target_eval_mode',
     'reward_weight',
@@ -779,6 +879,11 @@ def train(
     spr_horizon,  # static
     retrace_horizon,  # static
     retrace_lambda,
+    td_lower_bound,  # static
+    td_lower_bound_horizon,  # static
+    td_lower_bound_weight,
+    td_lower_bound_priority_eta,
+    td_lower_bound_priority_epsilon,
     target_update_tau,
     target_update_every,
     step,
@@ -831,8 +936,9 @@ def train(
             per_step_rewards,
             behavior_probabilities,
         ) = inputs
-        # Retrace can request a longer real sequence than SPR/imagination. Keep
-        # representation and world-model learning at the configured SPR depth.
+        # Multi-step replay targets can request a longer real sequence than
+        # SPR/imagination. Keep representation and world-model learning at the
+        # configured SPR depth.
         model_raw_states = raw_states[:, :spr_horizon + 1]
         model_actions = actions[:, :spr_horizon]
         model_same_traj = same_traj_mask[:, :spr_horizon + 1]
@@ -878,6 +984,22 @@ def train(
                 dtype=dtype,
             )
             next_states = retrace_value_states[:, 0]
+        elif td_lower_bound:
+            # The primary target stays exactly one-step. The lower-bound
+            # endpoint is the H-th raw one-step next state and gets an
+            # independent augmentation without changing the root target crop.
+            next_states = spr_networks.process_inputs(
+                raw_next_states[:, 0],
+                rng=rng2,
+                data_augmentation=data_augmentation,
+                dtype=dtype,
+            )
+            lower_bound_next_states = spr_networks.process_inputs(
+                raw_next_states[:, td_lower_bound_horizon - 1],
+                rng=jax.random.fold_in(rng2, 1),
+                data_augmentation=data_augmentation,
+                dtype=dtype,
+            )
         else:
             next_states = spr_networks.process_inputs(
                 raw_next_states[:, 0],
@@ -943,6 +1065,7 @@ def train(
             target,
             spr_targets,
             future_latents,
+            n_step_target_value,
             loss_multipliers,
             td_loss_multipliers,
             key,
@@ -986,6 +1109,9 @@ def train(
                                             actions[:, 0]]
             dqn_loss = jax.vmap(softmax_cross_entropy_loss_with_logits)(
                 target, chosen_action_logits)
+            lower_bound_loss = jnp.zeros_like(dqn_loss)
+            positive_lower_bound = jnp.zeros_like(dqn_loss)
+            delta_one_step = jnp.zeros_like(dqn_loss)
             if retrace:
                 predicted_probabilities = jax.nn.softmax(chosen_action_logits)
                 retrace_tv = 0.5 * jnp.sum(
@@ -993,6 +1119,23 @@ def train(
                 priority_loss = categorical_retrace_priority(
                     target, predicted_probabilities)
                 td_error = retrace_tv
+            elif td_lower_bound:
+                predicted_probabilities = jax.nn.softmax(chosen_action_logits)
+                q_value = jnp.sum(
+                    predicted_probabilities * support[None, :], axis=-1)
+                one_step_target_value = jnp.sum(
+                    target * support[None, :], axis=-1)
+                (delta_one_step, positive_lower_bound,
+                 priority_loss) = lower_bound_td_signals(
+                     q_value,
+                     one_step_target_value,
+                     n_step_target_value,
+                     td_lower_bound_priority_eta,
+                     td_lower_bound_priority_epsilon,
+                 )
+                lower_bound_loss = one_sided_huber_loss(
+                    positive_lower_bound)
+                td_error = jnp.abs(delta_one_step)
             else:
                 priority_loss = dqn_loss
                 td_error = dqn_loss + jnp.nan_to_num(
@@ -1021,6 +1164,11 @@ def train(
             if retrace:
                 loss = (td_loss_multipliers * dqn_loss +
                         loss_multipliers * spr_weight * spr_loss)
+            elif td_lower_bound:
+                loss = loss_multipliers * (
+                    dqn_loss +
+                    td_lower_bound_weight * lower_bound_loss +
+                    spr_weight * spr_loss)
             else:
                 # Preserve the historical operation order for seed-level
                 # reproducibility when Retrace is disabled.
@@ -1240,9 +1388,18 @@ def train(
                     jnp.sum(jnp.maximum(-target, 0.0), axis=-1))
                 aux_losses["RetraceTargetMass"] = jnp.mean(
                     jnp.sum(target, axis=-1))
+            if td_lower_bound:
+                aux_losses["LowerBoundLoss"] = jnp.mean(lower_bound_loss)
+                aux_losses["LowerBoundGap"] = jnp.mean(positive_lower_bound)
+                aux_losses["LowerBoundActive"] = jnp.mean(
+                    (positive_lower_bound > 0.0).astype(jnp.float32))
+                aux_losses["OneStepAbsTD"] = jnp.mean(
+                    jnp.abs(delta_one_step))
+                aux_losses["NStepTarget"] = jnp.mean(n_step_target_value)
             return total_loss, (aux_losses)
 
         # Use the weighted mean loss for gradient computation.
+        n_step_target_value = jnp.zeros_like(root_rewards)
         if retrace:
             retrace_keys = jax.random.split(
                 rng1, states.shape[0] * retrace_horizon).reshape(
@@ -1271,6 +1428,59 @@ def train(
                     root_discount,
                     retrace_lambda,
                 )
+        elif td_lower_bound:
+            # Primary one-step C51 target: retain the configured current-code
+            # behavior (exact policy mixture when expected_one_step_backup is
+            # enabled, otherwise one sampled bootstrap action).
+            target = jax.vmap(
+                target_output,
+                in_axes=(None, None, 0, 0, 0, None, 0, 0, None),
+                axis_name="batch")(
+                    policy_backup,
+                    q_backup,
+                    next_states,
+                    root_rewards,
+                    root_terminals,
+                    support,
+                    root_discount,
+                    target_rng,
+                    expected_one_step_backup,
+                )
+
+            # Reconstruct the historical uncorrected H-step reward prefix from
+            # raw rows, then use the historical sampled-action C51 bootstrap at
+            # S_H. This is deliberately not an expected value-policy mixture.
+            lower_bound_rewards = jax.vmap(
+                n_step_lower_bound_target,
+                in_axes=(0, 0, None, 0),
+                axis_name="batch")(
+                    per_step_rewards[:, :td_lower_bound_horizon],
+                    terminals[:, :td_lower_bound_horizon],
+                    jnp.asarray(0.0, dtype=per_step_rewards.dtype),
+                    root_discount,
+                )
+            lower_bound_terminals = jnp.max(
+                terminals[:, :td_lower_bound_horizon], axis=-1)
+            lower_bound_discount = jnp.power(
+                root_discount, td_lower_bound_horizon)
+            lower_bound_rng = jax.random.split(
+                jax.random.fold_in(rng1, 1), states.shape[0])
+            lower_bound_distribution = jax.vmap(
+                target_output,
+                in_axes=(None, None, 0, 0, 0, None, 0, 0, None),
+                axis_name="batch")(
+                    policy_backup,
+                    q_backup,
+                    lower_bound_next_states,
+                    lower_bound_rewards,
+                    lower_bound_terminals,
+                    support,
+                    lower_bound_discount,
+                    lower_bound_rng,
+                    False,
+                )
+            n_step_target_value = jax.lax.stop_gradient(
+                jnp.sum(lower_bound_distribution * support[None, :], axis=-1))
         else:
             target = jax.vmap(
                 target_output,
@@ -1300,8 +1510,8 @@ def train(
         rng2 = splits[0]
         key = splits[1:n_samples + 1]
         imag_keys = splits[n_samples + 1:]
-        loss_args = (target, spr_targets, future_latents, loss_weights,
-                     td_loss_weights, key, imag_keys)
+        loss_args = (target, spr_targets, future_latents, n_step_target_value,
+                     loss_weights, td_loss_weights, key, imag_keys)
         if reward_grad_surgery:
             # Two backward passes: main = everything except the grounding
             # losses, model = reward/continue only. The component of the
@@ -1624,6 +1834,10 @@ class BBFAgent(JaxDQNAgent):
         retrace=False,
         retrace_horizon=10,
         retrace_lambda=1.0,
+        td_lower_bound_weight=0.0,
+        td_lower_bound_horizon=10,
+        td_lower_bound_priority_eta=0.5,
+        td_lower_bound_priority_epsilon=1e-6,
         min_gamma=None,
         reset_every=-1,
         no_resets_after=-1,
@@ -1707,6 +1921,23 @@ class BBFAgent(JaxDQNAgent):
                          min_gamma,
                          cycle_steps,
                          self._distributional)
+        self.td_lower_bound_weight = float(td_lower_bound_weight)
+        self.td_lower_bound = self.td_lower_bound_weight > 0.0
+        self.td_lower_bound_horizon = int(td_lower_bound_horizon)
+        self.td_lower_bound_priority_eta = float(
+            td_lower_bound_priority_eta)
+        self.td_lower_bound_priority_epsilon = float(
+            td_lower_bound_priority_epsilon)
+        validate_td_lower_bound(
+            self.td_lower_bound_weight,
+            self.td_lower_bound_horizon,
+            self.td_lower_bound_priority_eta,
+            self.td_lower_bound_priority_epsilon,
+            self.retrace,
+            self.update_horizon,
+            max_update_horizon,
+            self._distributional,
+        )
         self._jumps = int(jumps)
         self.spr_weight = spr_weight
 
@@ -1823,6 +2054,13 @@ class BBFAgent(JaxDQNAgent):
         print(' self.retrace: {}'.format(self.retrace))
         print(' self.retrace_horizon: {}'.format(self.retrace_horizon))
         print(' self.retrace_lambda: {}'.format(self.retrace_lambda))
+        print(' self.td_lower_bound: {}'.format(self.td_lower_bound))
+        print(' self.td_lower_bound_weight: {}'.format(
+            self.td_lower_bound_weight))
+        print(' self.td_lower_bound_horizon: {}'.format(
+            self.td_lower_bound_horizon))
+        print(' self.td_lower_bound_priority_eta: {}'.format(
+            self.td_lower_bound_priority_eta))
         print(" num_actions: {}".format(num_actions))
         print(" self.reset_target: {}".format(self.reset_target))
         # debug - end
@@ -2020,12 +2258,14 @@ class BBFAgent(JaxDQNAgent):
         #exit(0)
 
     def _build_replay_buffer(self):
-        # Retrace consumes H raw transitions. Endpoint states S1..SH come from
-        # the one-step `next_state` columns, so only H replay rows are needed.
-        # SPR keeps its independent jumps+1 state sequence.
+        # Multi-step targets consume raw transitions. Endpoint states S1..SH
+        # come from the one-step `next_state` columns, so only H replay rows are
+        # needed. SPR keeps its independent jumps+1 state sequence.
         subseq_len = max(
             self._jumps + 1,
             self.retrace_horizon if self.retrace else 1,
+            (getattr(self, "td_lower_bound_horizon", 1)
+             if getattr(self, "td_lower_bound", False) else 1),
         )
         extra_storage_types = None
         if self.retrace:
@@ -2098,9 +2338,12 @@ class BBFAgent(JaxDQNAgent):
         while True:
             self._rng, rng = jax.random.split(self._rng)
 
-            # Retrace must see raw rows and uses its own fixed correction
-            # horizon. Explicitly bypass both legacy cyclic TD schedules.
-            replay_horizon = (1 if self.retrace else
+            # Retrace and the lower-bound target both consume raw rows and own
+            # a separate fixed multi-step horizon. Retrace also requires a
+            # fixed gamma; the lower-bound mode may use the current gamma
+            # schedule, with the sampled one-step discount serving as gamma.
+            raw_replay_rows = self.retrace or self.td_lower_bound
+            replay_horizon = (1 if raw_replay_rows else
                               self.update_horizon_scheduler(
                                   self.cycle_grad_steps))
             replay_gamma = (self.gamma if self.retrace else
@@ -2289,6 +2532,11 @@ class BBFAgent(JaxDQNAgent):
             getattr(self, "_jumps", 0),
             getattr(self, "retrace_horizon", 1),
             getattr(self, "retrace_lambda", 1.0),
+            getattr(self, "td_lower_bound", False),
+            getattr(self, "td_lower_bound_horizon", 1),
+            getattr(self, "td_lower_bound_weight", 0.0),
+            getattr(self, "td_lower_bound_priority_eta", 0.5),
+            getattr(self, "td_lower_bound_priority_epsilon", 1e-6),
             self.target_update_tau_scheduler(self.cycle_grad_steps),
             self.target_update_period,
             self.grad_steps,
@@ -2320,13 +2568,12 @@ class BBFAgent(JaxDQNAgent):
 
         # Sample asynchronously while we wait for training
         self._sample_from_replay_buffer()
-        # Rainbow and prioritized replay are parametrized by an exponent
-        # alpha, but in both cases it is set to 0.5 - for simplicity's sake we
-        # leave it as is here, using the more direct sqrt(). Taking the square
-        # root "makes sense", as we are dealing with a squared loss.  Add a
-        # small nonzero value to the loss to avoid 0 priority items. While
-        # technically this may be okay, setting all items to 0 priority will
-        # cause troubles, and also result in 1.0 / 0.0 = NaN correction terms.
+        # Rainbow and prioritized replay use alpha=0.5 here, implemented by
+        # storing sqrt(raw_score). The ordinary path supplies its historical
+        # loss score, Retrace supplies squared TV, and the lower-bound path
+        # supplies u_t directly. Add a small nonzero value before sqrt so zero
+        # scores cannot produce zero sampling probabilities or NaN correction
+        # terms.
         indices = np.reshape(np.asarray(indices), (-1,))
         priority_loss = np.reshape(
             np.asarray(aux_losses["PriorityLoss"]), (-1))
@@ -2350,7 +2597,9 @@ class BBFAgent(JaxDQNAgent):
                         "GroundNormRatio", "ImagActorLoss", "ImagValueLoss",
                         "ImagRet", "ImagReward", "ImagContinue",
                         "ImagEntropy", "ImagTrustClip",
-                        "RetraceNegativeMass", "RetraceTargetMass")
+                        "RetraceNegativeMass", "RetraceTargetMass",
+                        "LowerBoundLoss", "LowerBoundGap",
+                        "LowerBoundActive", "OneStepAbsTD", "NStepTarget")
             msgs = ["grad_step {}".format(self.grad_steps)]
             for k in log_keys:
                 if k in aux_losses:

@@ -32,6 +32,16 @@ BBFAgent.expected_one_step_backup = False
 BBFAgent.retrace = False
 BBFAgent.retrace_horizon = 10
 BBFAgent.retrace_lambda = 1.0
+# Safer one-step + n-step lower-bound TD is independently opt-in. The replay
+# stays raw one-step (bind both replay horizons to 1); one-step C51 remains the
+# primary target, while a sampled-action uncorrected n-step C51 target supplies
+# only an upward Huber penalty on the root support mean. Its priority score is
+# u_t = |delta_1| + eta * positive_gap + epsilon before the existing PER
+# alpha=.5 square-root transform. This mode and Retrace are mutually exclusive.
+BBFAgent.td_lower_bound_weight = 0.0
+BBFAgent.td_lower_bound_horizon = 10
+BBFAgent.td_lower_bound_priority_eta = 0.5
+BBFAgent.td_lower_bound_priority_epsilon = 1e-6
 BBFAgent.min_gamma = 0.97
 BBFAgent.cycle_steps = 10_000
 BBFAgent.reset_every = 20_000 # Change if you change the replay ratio
