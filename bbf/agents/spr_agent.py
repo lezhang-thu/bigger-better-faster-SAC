@@ -283,14 +283,18 @@ def select_maximization_distribution(one_step_distribution,
             jax.lax.stop_gradient(use_n_step))
 
 
-def maximization_td_signals(q_value, one_step_target, n_step_target):
-    """Returns Y_max and its scalar TD error for diagnostics."""
+def maximization_td_signals(q_value, one_step_target, n_step_target,
+                            priority_epsilon=1e-6):
+    """Returns Y_max, its scalar TD error, and absolute-error PER score."""
     q_value = jnp.asarray(q_value)
     one_step_target = jax.lax.stop_gradient(jnp.asarray(one_step_target))
     n_step_target = jax.lax.stop_gradient(jnp.asarray(n_step_target))
     maximization_target = jnp.maximum(one_step_target, n_step_target)
     delta_max = maximization_target - q_value
-    return maximization_target, delta_max
+    priority_score = jax.lax.stop_gradient(
+        jnp.abs(delta_max) +
+        jnp.asarray(priority_epsilon, dtype=q_value.dtype))
+    return maximization_target, delta_max, priority_score
 
 
 def softmax_cross_entropy_loss_with_logits(labels: jnp.array,
@@ -613,7 +617,8 @@ def validate_td_lower_bound(weight, horizon, priority_eta, priority_epsilon,
             "td_lower_bound currently requires the distributional C51 critic.")
 
 
-def validate_td_maximization_target(enabled, horizon, retrace, td_lower_bound,
+def validate_td_maximization_target(enabled, horizon, priority_epsilon,
+                                    retrace, td_lower_bound,
                                     expected_one_step_backup, update_horizon,
                                     max_update_horizon, distributional):
     """Validates one-step versus n-step C51 maximization-target settings."""
@@ -621,6 +626,7 @@ def validate_td_maximization_target(enabled, horizon, retrace, td_lower_bound,
         return
 
     horizon = int(horizon)
+    priority_epsilon = float(priority_epsilon)
     update_horizon = int(update_horizon)
     max_update_horizon = (update_horizon if max_update_horizon is None else
                           int(max_update_horizon))
@@ -641,6 +647,10 @@ def validate_td_maximization_target(enabled, horizon, retrace, td_lower_bound,
         raise ValueError(
             "td_maximization_horizon must be at least 2, got {}.".format(
                 horizon))
+    if not np.isfinite(priority_epsilon) or priority_epsilon <= 0.0:
+        raise ValueError(
+            "td_maximization_priority_epsilon must be finite and positive, got "
+            "{}.".format(priority_epsilon))
     if not distributional:
         raise ValueError(
             "td_maximization_target currently requires distributional C51.")
@@ -956,6 +966,7 @@ def train(
     td_lower_bound_priority_epsilon,
     td_maximization_target,  # static
     td_maximization_horizon,  # static
+    td_maximization_priority_epsilon,
     target_update_tau,
     target_update_every,
     step,
@@ -1215,16 +1226,13 @@ def train(
                 predicted_probabilities = jax.nn.softmax(chosen_action_logits)
                 q_value = jnp.sum(
                     predicted_probabilities * support[None, :], axis=-1)
-                (maximization_target_value,
-                 delta_maximization) = maximization_td_signals(
+                (maximization_target_value, delta_maximization,
+                 priority_loss) = maximization_td_signals(
                      q_value,
                      one_step_target_value,
                      n_step_target_value,
+                     td_maximization_priority_epsilon,
                  )
-                # Match the ordinary one-step C51 path: prioritize the
-                # categorical cross-entropy of the selected target
-                # distribution, not a scalar expectation TD error.
-                priority_loss = dqn_loss
                 maximization_uses_n_step = (
                     n_step_target_value > one_step_target_value).astype(
                         jnp.float32)
@@ -1464,10 +1472,10 @@ def train(
                 "TotalLoss": total_loss,
                 "ModelLoss": model_loss,
                 "DQNLoss": jnp.mean(dqn_loss),
-                # Keep the per-example cross entropy until after the grouped
-                # minibatch scan so every sampled replay index receives a
-                # corresponding priority update.  DQNLoss remains the scalar
-                # logging metric above.
+                # Keep the mode-specific per-example priority score until
+                # after the grouped minibatch scan so every sampled replay
+                # index receives a corresponding priority update. DQNLoss
+                # remains the scalar logging metric above.
                 "PriorityLoss": priority_loss,
                 "TD Error": jnp.mean(td_error),
                 "SPRLoss": jnp.mean(spr_loss),
@@ -1957,6 +1965,7 @@ class BBFAgent(JaxDQNAgent):
         td_lower_bound_priority_epsilon=1e-6,
         td_maximization_target=False,
         td_maximization_horizon=10,
+        td_maximization_priority_epsilon=1e-6,
         min_gamma=None,
         reset_every=-1,
         no_resets_after=-1,
@@ -2059,9 +2068,12 @@ class BBFAgent(JaxDQNAgent):
         )
         self.td_maximization_target = bool(td_maximization_target)
         self.td_maximization_horizon = int(td_maximization_horizon)
+        self.td_maximization_priority_epsilon = float(
+            td_maximization_priority_epsilon)
         validate_td_maximization_target(
             self.td_maximization_target,
             self.td_maximization_horizon,
+            self.td_maximization_priority_epsilon,
             self.retrace,
             self.td_lower_bound,
             self.expected_one_step_backup,
@@ -2678,6 +2690,7 @@ class BBFAgent(JaxDQNAgent):
             getattr(self, "td_lower_bound_priority_epsilon", 1e-6),
             getattr(self, "td_maximization_target", False),
             getattr(self, "td_maximization_horizon", 1),
+            getattr(self, "td_maximization_priority_epsilon", 1e-6),
             self.target_update_tau_scheduler(self.cycle_grad_steps),
             self.target_update_period,
             self.grad_steps,
@@ -2710,8 +2723,9 @@ class BBFAgent(JaxDQNAgent):
         # Sample asynchronously while we wait for training
         self._sample_from_replay_buffer()
         # Rainbow and prioritized replay use alpha=0.5 here, implemented by
-        # storing sqrt(raw_score). The ordinary and maximization paths supply
-        # C51 cross-entropy, Retrace supplies squared TV, and the lower-bound
+        # storing sqrt(raw_score). The ordinary path supplies C51
+        # cross-entropy, maximization supplies absolute scalar TD plus its
+        # configured epsilon, Retrace supplies squared TV, and the lower-bound
         # path supplies its documented u_t score. Add a small nonzero value
         # before sqrt so zero scores cannot produce zero sampling probabilities
         # or NaN correction terms.

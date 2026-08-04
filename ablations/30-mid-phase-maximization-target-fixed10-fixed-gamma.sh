@@ -5,13 +5,13 @@ set -ex
 # the selected C51 distribution replaces the ordinary one-step critic target.
 #
 # PER keeps the codebase's existing alpha/beta/sampling/update plumbing. Its raw
-# score is the selected target distribution's per-sample C51 cross-entropy,
-# matching the ordinary one-step path; the existing host square root implements
-# alpha=.5. Replay returns raw one-step rows; the fixed ten-step reward prefix
-# and S_10 value bootstrap are reconstructed from the same sampled anchor.
-# Gamma is fixed at 0.997. Late-update multiplication is explicitly disabled,
-# so the gradient-update rate stays constant throughout training; there are no
-# 20k-40k or 40k-60k arms in this experiment.
+# score is |max(Y_1, Y_10) - Q(s_t,a_t)| + 1e-6; the existing host square root
+# (with its shared 1e-10 numerical floor) implements alpha=.5. Replay returns
+# raw one-step rows; the fixed ten-step reward prefix and S_10 value bootstrap
+# are reconstructed from the same sampled anchor. Gamma is fixed at 0.997.
+# Late-update multiplication is explicitly disabled, so the gradient-update
+# rate stays constant throughout training; there are no 20k-40k or 40k-60k
+# arms in this experiment.
 #
 # Usage:
 #   bash ablations/30-mid-phase-maximization-target-fixed10-fixed-gamma.sh
@@ -47,6 +47,7 @@ for ((rep = 1; rep <= REPS; rep++)); do
 			--gin_bindings="BBFAgent.td_lower_bound_weight=0.0" \
 			--gin_bindings="BBFAgent.td_maximization_target=True" \
 			--gin_bindings="BBFAgent.td_maximization_horizon=10" \
+			--gin_bindings="BBFAgent.td_maximization_priority_epsilon=1e-6" \
 			--gin_bindings="PrioritizedJaxSubsequenceParallelEnvReplayBuffer.prioritized_sampling=True" \
 			--run_number=$RUN
 	done
