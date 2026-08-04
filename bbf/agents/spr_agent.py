@@ -207,15 +207,15 @@ def n_step_lower_bound_target(rewards, terminals, bootstrap_value, gamma):
 
     Replay rows follow ``(S_t, A_t, R_{t+1}, D_{t+1})``. The terminal reward
     is included, while all later rewards and the bootstrap are masked. This
-    helper is also used to reconstruct the reward prefix for the projected
-    C51 lower-bound target from raw one-step replay rows.
+    helper is also used to reconstruct the reward prefix for projected C51
+    lower-bound and maximization targets from raw one-step replay rows.
     """
     if rewards.ndim != 1 or terminals.ndim != 1:
         raise ValueError("n-step rewards and terminals must be rank one.")
     if rewards.shape != terminals.shape:
         raise ValueError("n-step rewards and terminals must have equal shape.")
     if rewards.shape[0] < 1:
-        raise ValueError("n-step lower-bound horizon must be positive.")
+        raise ValueError("n-step target horizon must be positive.")
 
     dtype = rewards.dtype
     gamma = jnp.asarray(gamma, dtype=dtype)
@@ -256,6 +256,41 @@ def one_sided_huber_loss(positive_gap, delta=1.0):
     quadratic = jnp.minimum(positive_gap, delta)
     linear = positive_gap - quadratic
     return 0.5 * jnp.square(quadratic) + delta * linear
+
+
+def select_maximization_distribution(one_step_distribution,
+                                     n_step_distribution, support):
+    """Selects the whole C51 candidate with the larger projected mean.
+
+    The maximum of two scalar expectations is not an elementwise maximum of
+    their categorical probabilities. Selecting the complete distribution
+    preserves unit mass and makes its support mean exactly the chosen target.
+    Ties deliberately fall back to the policy-consistent one-step candidate.
+    """
+    one_step_distribution = jax.lax.stop_gradient(
+        jnp.asarray(one_step_distribution))
+    n_step_distribution = jax.lax.stop_gradient(
+        jnp.asarray(n_step_distribution))
+    support = jnp.asarray(support)
+    one_step_value = jnp.sum(one_step_distribution * support, axis=-1)
+    n_step_value = jnp.sum(n_step_distribution * support, axis=-1)
+    use_n_step = n_step_value > one_step_value
+    selected_distribution = jnp.where(
+        use_n_step[..., None], n_step_distribution, one_step_distribution)
+    return (jax.lax.stop_gradient(selected_distribution),
+            jax.lax.stop_gradient(one_step_value),
+            jax.lax.stop_gradient(n_step_value),
+            jax.lax.stop_gradient(use_n_step))
+
+
+def maximization_td_signals(q_value, one_step_target, n_step_target):
+    """Returns Y_max and its scalar TD error for diagnostics."""
+    q_value = jnp.asarray(q_value)
+    one_step_target = jax.lax.stop_gradient(jnp.asarray(one_step_target))
+    n_step_target = jax.lax.stop_gradient(jnp.asarray(n_step_target))
+    maximization_target = jnp.maximum(one_step_target, n_step_target)
+    delta_max = maximization_target - q_value
+    return maximization_target, delta_max
 
 
 def softmax_cross_entropy_loss_with_logits(labels: jnp.array,
@@ -578,6 +613,39 @@ def validate_td_lower_bound(weight, horizon, priority_eta, priority_epsilon,
             "td_lower_bound currently requires the distributional C51 critic.")
 
 
+def validate_td_maximization_target(enabled, horizon, retrace, td_lower_bound,
+                                    expected_one_step_backup, update_horizon,
+                                    max_update_horizon, distributional):
+    """Validates one-step versus n-step C51 maximization-target settings."""
+    if not enabled:
+        return
+
+    horizon = int(horizon)
+    update_horizon = int(update_horizon)
+    max_update_horizon = (update_horizon if max_update_horizon is None else
+                          int(max_update_horizon))
+    if retrace or td_lower_bound:
+        raise ValueError(
+            "td_maximization_target, Retrace, and td_lower_bound are mutually "
+            "exclusive.")
+    if not expected_one_step_backup:
+        raise ValueError(
+            "td_maximization_target requires expected_one_step_backup=True so "
+            "both candidate targets bootstrap from the same policy value.")
+    if update_horizon != 1 or max_update_horizon != 1:
+        raise ValueError(
+            "td_maximization_target reconstructs its n-step candidate from raw "
+            "replay rows and requires update_horizon=max_update_horizon=1, got "
+            "{} and {}.".format(update_horizon, max_update_horizon))
+    if horizon < 2:
+        raise ValueError(
+            "td_maximization_horizon must be at least 2, got {}.".format(
+                horizon))
+    if not distributional:
+        raise ValueError(
+            "td_maximization_target currently requires distributional C51.")
+
+
 def td_backup_parameter_sets(online_params, target_params, use_target_backups,
                              double_dqn):
     """Selects value-evaluation and action-selection params for TD backups."""
@@ -839,6 +907,8 @@ train_static_argnames = [
     'retrace_horizon',
     'td_lower_bound',
     'td_lower_bound_horizon',
+    'td_maximization_target',
+    'td_maximization_horizon',
     'match_online_target_rngs',
     'target_eval_mode',
     'reward_weight',
@@ -884,6 +954,8 @@ def train(
     td_lower_bound_weight,
     td_lower_bound_priority_eta,
     td_lower_bound_priority_epsilon,
+    td_maximization_target,  # static
+    td_maximization_horizon,  # static
     target_update_tau,
     target_update_every,
     step,
@@ -984,18 +1056,19 @@ def train(
                 dtype=dtype,
             )
             next_states = retrace_value_states[:, 0]
-        elif td_lower_bound:
-            # The primary target stays exactly one-step. The lower-bound
-            # endpoint is the H-th raw one-step next state and gets an
-            # independent augmentation without changing the root target crop.
+        elif td_lower_bound or td_maximization_target:
+            # Both modes need aligned one-step and H-step endpoints from the
+            # same raw replay anchor. Give the endpoints independent crops.
+            multi_step_horizon = (td_lower_bound_horizon if td_lower_bound else
+                                  td_maximization_horizon)
             next_states = spr_networks.process_inputs(
                 raw_next_states[:, 0],
                 rng=rng2,
                 data_augmentation=data_augmentation,
                 dtype=dtype,
             )
-            lower_bound_next_states = spr_networks.process_inputs(
-                raw_next_states[:, td_lower_bound_horizon - 1],
+            multi_step_next_states = spr_networks.process_inputs(
+                raw_next_states[:, multi_step_horizon - 1],
                 rng=jax.random.fold_in(rng2, 1),
                 data_augmentation=data_augmentation,
                 dtype=dtype,
@@ -1065,6 +1138,7 @@ def train(
             target,
             spr_targets,
             future_latents,
+            one_step_target_value,
             n_step_target_value,
             loss_multipliers,
             td_loss_multipliers,
@@ -1112,6 +1186,9 @@ def train(
             lower_bound_loss = jnp.zeros_like(dqn_loss)
             positive_lower_bound = jnp.zeros_like(dqn_loss)
             delta_one_step = jnp.zeros_like(dqn_loss)
+            maximization_target_value = jnp.zeros_like(dqn_loss)
+            delta_maximization = jnp.zeros_like(dqn_loss)
+            maximization_uses_n_step = jnp.zeros_like(dqn_loss)
             if retrace:
                 predicted_probabilities = jax.nn.softmax(chosen_action_logits)
                 retrace_tv = 0.5 * jnp.sum(
@@ -1123,8 +1200,6 @@ def train(
                 predicted_probabilities = jax.nn.softmax(chosen_action_logits)
                 q_value = jnp.sum(
                     predicted_probabilities * support[None, :], axis=-1)
-                one_step_target_value = jnp.sum(
-                    target * support[None, :], axis=-1)
                 (delta_one_step, positive_lower_bound,
                  priority_loss) = lower_bound_td_signals(
                      q_value,
@@ -1136,6 +1211,24 @@ def train(
                 lower_bound_loss = one_sided_huber_loss(
                     positive_lower_bound)
                 td_error = jnp.abs(delta_one_step)
+            elif td_maximization_target:
+                predicted_probabilities = jax.nn.softmax(chosen_action_logits)
+                q_value = jnp.sum(
+                    predicted_probabilities * support[None, :], axis=-1)
+                (maximization_target_value,
+                 delta_maximization) = maximization_td_signals(
+                     q_value,
+                     one_step_target_value,
+                     n_step_target_value,
+                 )
+                # Match the ordinary one-step C51 path: prioritize the
+                # categorical cross-entropy of the selected target
+                # distribution, not a scalar expectation TD error.
+                priority_loss = dqn_loss
+                maximization_uses_n_step = (
+                    n_step_target_value > one_step_target_value).astype(
+                        jnp.float32)
+                td_error = jnp.abs(delta_maximization)
             else:
                 priority_loss = dqn_loss
                 td_error = dqn_loss + jnp.nan_to_num(
@@ -1396,9 +1489,22 @@ def train(
                 aux_losses["OneStepAbsTD"] = jnp.mean(
                     jnp.abs(delta_one_step))
                 aux_losses["NStepTarget"] = jnp.mean(n_step_target_value)
+            if td_maximization_target:
+                aux_losses["MaxTargetOneStep"] = jnp.mean(
+                    one_step_target_value)
+                aux_losses["MaxTargetNStep"] = jnp.mean(n_step_target_value)
+                aux_losses["MaxTargetValue"] = jnp.mean(
+                    maximization_target_value)
+                aux_losses["MaxTargetLift"] = jnp.mean(
+                    jax.nn.relu(n_step_target_value - one_step_target_value))
+                aux_losses["MaxTargetNStepSelected"] = jnp.mean(
+                    maximization_uses_n_step)
+                aux_losses["MaxTargetAbsTD"] = jnp.mean(
+                    jnp.abs(delta_maximization))
             return total_loss, (aux_losses)
 
         # Use the weighted mean loss for gradient computation.
+        one_step_target_value = jnp.zeros_like(root_rewards)
         n_step_target_value = jnp.zeros_like(root_rewards)
         if retrace:
             retrace_keys = jax.random.split(
@@ -1428,11 +1534,11 @@ def train(
                     root_discount,
                     retrace_lambda,
                 )
-        elif td_lower_bound:
+        elif td_lower_bound or td_maximization_target:
             # Primary one-step C51 target: retain the configured current-code
             # behavior (exact policy mixture when expected_one_step_backup is
             # enabled, otherwise one sampled bootstrap action).
-            target = jax.vmap(
+            one_step_distribution = jax.vmap(
                 target_output,
                 in_axes=(None, None, 0, 0, 0, None, 0, 0, None),
                 axis_name="batch")(
@@ -1447,40 +1553,50 @@ def train(
                     expected_one_step_backup,
                 )
 
-            # Reconstruct the historical uncorrected H-step reward prefix from
-            # raw rows, then use the historical sampled-action C51 bootstrap at
-            # S_H. This is deliberately not an expected value-policy mixture.
-            lower_bound_rewards = jax.vmap(
+            # Reconstruct the uncorrected H-step reward prefix from raw rows.
+            # The lower-bound mode retains its historical sampled-action
+            # endpoint. The maximization mode instead uses the same exact
+            # policy-value mixture as its one-step candidate.
+            multi_step_rewards = jax.vmap(
                 n_step_lower_bound_target,
                 in_axes=(0, 0, None, 0),
                 axis_name="batch")(
-                    per_step_rewards[:, :td_lower_bound_horizon],
-                    terminals[:, :td_lower_bound_horizon],
+                    per_step_rewards[:, :multi_step_horizon],
+                    terminals[:, :multi_step_horizon],
                     jnp.asarray(0.0, dtype=per_step_rewards.dtype),
                     root_discount,
                 )
-            lower_bound_terminals = jnp.max(
-                terminals[:, :td_lower_bound_horizon], axis=-1)
-            lower_bound_discount = jnp.power(
-                root_discount, td_lower_bound_horizon)
-            lower_bound_rng = jax.random.split(
+            multi_step_terminals = jnp.max(
+                terminals[:, :multi_step_horizon], axis=-1)
+            multi_step_discount = jnp.power(
+                root_discount, multi_step_horizon)
+            multi_step_rng = jax.random.split(
                 jax.random.fold_in(rng1, 1), states.shape[0])
-            lower_bound_distribution = jax.vmap(
+            n_step_distribution = jax.vmap(
                 target_output,
                 in_axes=(None, None, 0, 0, 0, None, 0, 0, None),
                 axis_name="batch")(
                     policy_backup,
                     q_backup,
-                    lower_bound_next_states,
-                    lower_bound_rewards,
-                    lower_bound_terminals,
+                    multi_step_next_states,
+                    multi_step_rewards,
+                    multi_step_terminals,
                     support,
-                    lower_bound_discount,
-                    lower_bound_rng,
-                    False,
+                    multi_step_discount,
+                    multi_step_rng,
+                    (expected_one_step_backup
+                     if td_maximization_target else False),
                 )
-            n_step_target_value = jax.lax.stop_gradient(
-                jnp.sum(lower_bound_distribution * support[None, :], axis=-1))
+            if td_maximization_target:
+                (target, one_step_target_value, n_step_target_value,
+                 _) = select_maximization_distribution(
+                     one_step_distribution, n_step_distribution, support)
+            else:
+                target = one_step_distribution
+                one_step_target_value = jax.lax.stop_gradient(
+                    jnp.sum(target * support[None, :], axis=-1))
+                n_step_target_value = jax.lax.stop_gradient(
+                    jnp.sum(n_step_distribution * support[None, :], axis=-1))
         else:
             target = jax.vmap(
                 target_output,
@@ -1510,8 +1626,9 @@ def train(
         rng2 = splits[0]
         key = splits[1:n_samples + 1]
         imag_keys = splits[n_samples + 1:]
-        loss_args = (target, spr_targets, future_latents, n_step_target_value,
-                     loss_weights, td_loss_weights, key, imag_keys)
+        loss_args = (target, spr_targets, future_latents,
+                     one_step_target_value, n_step_target_value, loss_weights,
+                     td_loss_weights, key, imag_keys)
         if reward_grad_surgery:
             # Two backward passes: main = everything except the grounding
             # losses, model = reward/continue only. The component of the
@@ -1838,6 +1955,8 @@ class BBFAgent(JaxDQNAgent):
         td_lower_bound_horizon=10,
         td_lower_bound_priority_eta=0.5,
         td_lower_bound_priority_epsilon=1e-6,
+        td_maximization_target=False,
+        td_maximization_horizon=10,
         min_gamma=None,
         reset_every=-1,
         no_resets_after=-1,
@@ -1934,6 +2053,18 @@ class BBFAgent(JaxDQNAgent):
             self.td_lower_bound_priority_eta,
             self.td_lower_bound_priority_epsilon,
             self.retrace,
+            self.update_horizon,
+            max_update_horizon,
+            self._distributional,
+        )
+        self.td_maximization_target = bool(td_maximization_target)
+        self.td_maximization_horizon = int(td_maximization_horizon)
+        validate_td_maximization_target(
+            self.td_maximization_target,
+            self.td_maximization_horizon,
+            self.retrace,
+            self.td_lower_bound,
+            self.expected_one_step_backup,
             self.update_horizon,
             max_update_horizon,
             self._distributional,
@@ -2061,6 +2192,10 @@ class BBFAgent(JaxDQNAgent):
             self.td_lower_bound_horizon))
         print(' self.td_lower_bound_priority_eta: {}'.format(
             self.td_lower_bound_priority_eta))
+        print(' self.td_maximization_target: {}'.format(
+            self.td_maximization_target))
+        print(' self.td_maximization_horizon: {}'.format(
+            self.td_maximization_horizon))
         print(" num_actions: {}".format(num_actions))
         print(" self.reset_target: {}".format(self.reset_target))
         # debug - end
@@ -2266,6 +2401,8 @@ class BBFAgent(JaxDQNAgent):
             self.retrace_horizon if self.retrace else 1,
             (getattr(self, "td_lower_bound_horizon", 1)
              if getattr(self, "td_lower_bound", False) else 1),
+            (getattr(self, "td_maximization_horizon", 1)
+             if getattr(self, "td_maximization_target", False) else 1),
         )
         extra_storage_types = None
         if self.retrace:
@@ -2342,7 +2479,9 @@ class BBFAgent(JaxDQNAgent):
             # a separate fixed multi-step horizon. Retrace also requires a
             # fixed gamma; the lower-bound mode may use the current gamma
             # schedule, with the sampled one-step discount serving as gamma.
-            raw_replay_rows = self.retrace or self.td_lower_bound
+            raw_replay_rows = (
+                self.retrace or self.td_lower_bound or
+                getattr(self, "td_maximization_target", False))
             replay_horizon = (1 if raw_replay_rows else
                               self.update_horizon_scheduler(
                                   self.cycle_grad_steps))
@@ -2537,6 +2676,8 @@ class BBFAgent(JaxDQNAgent):
             getattr(self, "td_lower_bound_weight", 0.0),
             getattr(self, "td_lower_bound_priority_eta", 0.5),
             getattr(self, "td_lower_bound_priority_epsilon", 1e-6),
+            getattr(self, "td_maximization_target", False),
+            getattr(self, "td_maximization_horizon", 1),
             self.target_update_tau_scheduler(self.cycle_grad_steps),
             self.target_update_period,
             self.grad_steps,
@@ -2569,11 +2710,11 @@ class BBFAgent(JaxDQNAgent):
         # Sample asynchronously while we wait for training
         self._sample_from_replay_buffer()
         # Rainbow and prioritized replay use alpha=0.5 here, implemented by
-        # storing sqrt(raw_score). The ordinary path supplies its historical
-        # loss score, Retrace supplies squared TV, and the lower-bound path
-        # supplies u_t directly. Add a small nonzero value before sqrt so zero
-        # scores cannot produce zero sampling probabilities or NaN correction
-        # terms.
+        # storing sqrt(raw_score). The ordinary and maximization paths supply
+        # C51 cross-entropy, Retrace supplies squared TV, and the lower-bound
+        # path supplies its documented u_t score. Add a small nonzero value
+        # before sqrt so zero scores cannot produce zero sampling probabilities
+        # or NaN correction terms.
         indices = np.reshape(np.asarray(indices), (-1,))
         priority_loss = np.reshape(
             np.asarray(aux_losses["PriorityLoss"]), (-1))
@@ -2599,7 +2740,10 @@ class BBFAgent(JaxDQNAgent):
                         "ImagEntropy", "ImagTrustClip",
                         "RetraceNegativeMass", "RetraceTargetMass",
                         "LowerBoundLoss", "LowerBoundGap",
-                        "LowerBoundActive", "OneStepAbsTD", "NStepTarget")
+                        "LowerBoundActive", "OneStepAbsTD", "NStepTarget",
+                        "MaxTargetOneStep", "MaxTargetNStep",
+                        "MaxTargetValue", "MaxTargetLift",
+                        "MaxTargetNStepSelected", "MaxTargetAbsTD")
             msgs = ["grad_step {}".format(self.grad_steps)]
             for k in log_keys:
                 if k in aux_losses:

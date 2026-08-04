@@ -42,6 +42,16 @@ BBFAgent.td_lower_bound_weight = 0.0
 BBFAgent.td_lower_bound_horizon = 10
 BBFAgent.td_lower_bound_priority_eta = 0.5
 BBFAgent.td_lower_bound_priority_epsilon = 1e-6
+# Optimistic maximization TD is a separate opt-in target. It requires strict
+# raw one-step replay and expected_one_step_backup=True. Both Y_1 and Y_n use
+# the same target-policy value mixture; their projected C51 support means choose
+# the complete candidate distribution used by the critic. PER uses that
+# selected distribution's per-sample C51 cross-entropy, matching the ordinary
+# one-step path; its existing alpha=.5 transform, beta=.5 weights, sampling,
+# insertion, and update logic stay unchanged. This mode is mutually exclusive
+# with Retrace and the lower-bound auxiliary.
+BBFAgent.td_maximization_target = False
+BBFAgent.td_maximization_horizon = 10
 BBFAgent.min_gamma = 0.97
 BBFAgent.cycle_steps = 10_000
 BBFAgent.reset_every = 20_000 # Change if you change the replay ratio
