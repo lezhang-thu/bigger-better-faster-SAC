@@ -34,8 +34,9 @@ BBFAgent.retrace_horizon = 10
 BBFAgent.retrace_lambda = 1.0
 # Safer one-step + n-step lower-bound TD is independently opt-in. The replay
 # stays raw one-step (bind both replay horizons to 1); one-step C51 remains the
-# primary target, while a sampled-action uncorrected n-step C51 target supplies
-# only an upward Huber penalty on the root support mean. Its priority score is
+# primary target, while an uncorrected n-step C51 target with the same endpoint
+# policy backup supplies only an upward Huber penalty on the root support mean.
+# Its priority score is
 # u_t = |delta_1| + eta * positive_gap + epsilon before the existing PER
 # alpha=.5 square-root transform. This mode and Retrace are mutually exclusive.
 BBFAgent.td_lower_bound_weight = 0.0
@@ -52,6 +53,12 @@ BBFAgent.td_lower_bound_priority_epsilon = 1e-6
 BBFAgent.td_maximization_target = False
 BBFAgent.td_maximization_horizon = 10
 BBFAgent.td_maximization_priority_epsilon = 1e-6
+# Ordinary C51 keeps its historical per-sample cross-entropy priority by
+# default. Opt-in rows can instead use |E[projected target] - Q(s_t,a_t)| +
+# epsilon before the existing PER alpha=.5 square-root transform. This changes
+# replay priorities only; the categorical critic target and loss are unchanged.
+BBFAgent.delta_based_priority = False
+BBFAgent.delta_priority_epsilon = 1e-6
 BBFAgent.min_gamma = 0.97
 BBFAgent.cycle_steps = 10_000
 BBFAgent.reset_every = 20_000 # Change if you change the replay ratio
@@ -176,5 +183,10 @@ Runner.max_steps_per_episode = 27000    # agent steps
 bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.replay_capacity = 200000
 bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.n_envs = 1    # agent episodes
 bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.prioritized_sampling = True
+# ERE is opt-in and mutually exclusive with prioritized_sampling. It uses the
+# paper's fixed defaults when enabled; individual ablations may override them.
+bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.ere_sampling = False
+bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.ere_eta = 0.995
+bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.ere_min_window = 5000
 bbf.replay_memory.subsequence_replay_buffer.JaxSubsequenceParallelEnvReplayBuffer.replay_capacity = 10000
 bbf.replay_memory.subsequence_replay_buffer.JaxSubsequenceParallelEnvReplayBuffer.n_envs = 1    # agent episodes

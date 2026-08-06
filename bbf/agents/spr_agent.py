@@ -297,6 +297,32 @@ def maximization_td_signals(q_value, one_step_target, n_step_target,
     return maximization_target, delta_max, priority_score
 
 
+def distributional_td_signals(target_distribution,
+                              predicted_probabilities,
+                              support,
+                              priority_epsilon=1e-6):
+    """Returns the projected C51 expectation error and its PER score.
+
+    The target is the same projected distribution used by the categorical
+    critic loss.  Computing its support mean therefore preserves C51's support
+    clipping semantics.  As in the maximization-target priority, the scalar
+    score is stopped so replay prioritization cannot become an optimization
+    objective.
+    """
+    target_distribution = jax.lax.stop_gradient(
+        jnp.asarray(target_distribution))
+    predicted_probabilities = jnp.asarray(predicted_probabilities)
+    support = jnp.asarray(support)
+    target_value = jax.lax.stop_gradient(
+        jnp.sum(target_distribution * support, axis=-1))
+    q_value = jnp.sum(predicted_probabilities * support, axis=-1)
+    delta = target_value - q_value
+    priority_score = jax.lax.stop_gradient(
+        jnp.abs(delta) +
+        jnp.asarray(priority_epsilon, dtype=q_value.dtype))
+    return delta, priority_score
+
+
 def softmax_cross_entropy_loss_with_logits(labels: jnp.array,
                                            logits: jnp.array) -> jnp.ndarray:
     """Implementation of the softmax cross entropy loss."""
@@ -656,6 +682,28 @@ def validate_td_maximization_target(enabled, horizon, priority_epsilon,
             "td_maximization_target currently requires distributional C51.")
 
 
+def validate_delta_based_priority(enabled, priority_epsilon, retrace,
+                                  td_lower_bound, td_maximization_target,
+                                  distributional):
+    """Validates the opt-in absolute scalar TD priority for ordinary C51."""
+    if not enabled:
+        return
+
+    priority_epsilon = float(priority_epsilon)
+    if retrace or td_lower_bound or td_maximization_target:
+        raise ValueError(
+            "delta_based_priority is only for ordinary C51 and is mutually "
+            "exclusive with Retrace, td_lower_bound, and "
+            "td_maximization_target.")
+    if not np.isfinite(priority_epsilon) or priority_epsilon <= 0.0:
+        raise ValueError(
+            "delta_priority_epsilon must be finite and positive, got {}."
+            .format(priority_epsilon))
+    if not distributional:
+        raise ValueError(
+            "delta_based_priority currently requires distributional C51.")
+
+
 def td_backup_parameter_sets(online_params, target_params, use_target_backups,
                              double_dqn):
     """Selects value-evaluation and action-selection params for TD backups."""
@@ -919,6 +967,7 @@ train_static_argnames = [
     'td_lower_bound_horizon',
     'td_maximization_target',
     'td_maximization_horizon',
+    'delta_based_priority',
     'match_online_target_rngs',
     'target_eval_mode',
     'reward_weight',
@@ -967,6 +1016,8 @@ def train(
     td_maximization_target,  # static
     td_maximization_horizon,  # static
     td_maximization_priority_epsilon,
+    delta_based_priority,  # static
+    delta_priority_epsilon,
     target_update_tau,
     target_update_every,
     step,
@@ -1237,6 +1288,16 @@ def train(
                     n_step_target_value > one_step_target_value).astype(
                         jnp.float32)
                 td_error = jnp.abs(delta_maximization)
+            elif delta_based_priority:
+                predicted_probabilities = jax.nn.softmax(
+                    chosen_action_logits)
+                delta_priority, priority_loss = distributional_td_signals(
+                    target,
+                    predicted_probabilities,
+                    support[None, :],
+                    delta_priority_epsilon,
+                )
+                td_error = jnp.abs(delta_priority)
             else:
                 priority_loss = dqn_loss
                 td_error = dqn_loss + jnp.nan_to_num(
@@ -1562,9 +1623,9 @@ def train(
                 )
 
             # Reconstruct the uncorrected H-step reward prefix from raw rows.
-            # The lower-bound mode retains its historical sampled-action
-            # endpoint. The maximization mode instead uses the same exact
-            # policy-value mixture as its one-step candidate.
+            # Use the same configured endpoint backup as the one-step target.
+            # In the expected-backup ablations this exact policy mixture avoids
+            # adding sampled-action variance before a one-sided target is used.
             multi_step_rewards = jax.vmap(
                 n_step_lower_bound_target,
                 in_axes=(0, 0, None, 0),
@@ -1592,8 +1653,7 @@ def train(
                     support,
                     multi_step_discount,
                     multi_step_rng,
-                    (expected_one_step_backup
-                     if td_maximization_target else False),
+                    expected_one_step_backup,
                 )
             if td_maximization_target:
                 (target, one_step_target_value, n_step_target_value,
@@ -1966,6 +2026,8 @@ class BBFAgent(JaxDQNAgent):
         td_maximization_target=False,
         td_maximization_horizon=10,
         td_maximization_priority_epsilon=1e-6,
+        delta_based_priority=False,
+        delta_priority_epsilon=1e-6,
         min_gamma=None,
         reset_every=-1,
         no_resets_after=-1,
@@ -2079,6 +2141,16 @@ class BBFAgent(JaxDQNAgent):
             self.expected_one_step_backup,
             self.update_horizon,
             max_update_horizon,
+            self._distributional,
+        )
+        self.delta_based_priority = bool(delta_based_priority)
+        self.delta_priority_epsilon = float(delta_priority_epsilon)
+        validate_delta_based_priority(
+            self.delta_based_priority,
+            self.delta_priority_epsilon,
+            self.retrace,
+            self.td_lower_bound,
+            self.td_maximization_target,
             self._distributional,
         )
         self._jumps = int(jumps)
@@ -2482,33 +2554,58 @@ class BBFAgent(JaxDQNAgent):
             "s" if self.update_period > 1 else "",
         )
 
-    def _replay_sampler_generator(self):
-        types = self._replay.get_transition_elements()
-        while True:
-            self._rng, rng = jax.random.split(self._rng)
+    def _uses_ere_replay(self):
+        """Whether the configured replay buffer uses ERE anchor sampling."""
+        # ``is True`` keeps lightweight Mock-based tests and alternate replay
+        # implementations on the legacy prefetch path unless they explicitly
+        # opt into ERE.
+        replay = getattr(self, "_replay", None)
+        return getattr(replay, "ere_sampling", False) is True
 
-            # Retrace and the lower-bound target both consume raw rows and own
-            # a separate fixed multi-step horizon. Retrace also requires a
-            # fixed gamma; the lower-bound mode may use the current gamma
-            # schedule, with the sampled one-step discount serving as gamma.
-            raw_replay_rows = (
-                self.retrace or self.td_lower_bound or
-                getattr(self, "td_maximization_target", False))
-            replay_horizon = (1 if raw_replay_rows else
-                              self.update_horizon_scheduler(
-                                  self.cycle_grad_steps))
-            replay_gamma = (self.gamma if self.retrace else
-                            self.gamma_scheduler(self.cycle_grad_steps))
-            samples = self._replay.sample_transition_batch(
-                rng,
-                batch_size=self._batch_size * self._batches_to_group,
-                update_horizon=replay_horizon,
-                gamma=replay_gamma,
-            )
-            replay_elements = collections.OrderedDict()
-            for element, element_type in zip(samples, types):
-                replay_elements[element_type.name] = element
-            yield replay_elements
+    def _sample_replay_batch(self,
+                             ere_update_index=None,
+                             ere_num_updates=None):
+        types = self._replay.get_transition_elements()
+        self._rng, rng = jax.random.split(self._rng)
+
+        # Retrace and the lower-bound target both consume raw rows and own
+        # a separate fixed multi-step horizon. Retrace also requires a
+        # fixed gamma; the lower-bound mode may use the current gamma
+        # schedule, with the sampled one-step discount serving as gamma.
+        raw_replay_rows = (
+            self.retrace or self.td_lower_bound or
+            getattr(self, "td_maximization_target", False))
+        replay_horizon = (1 if raw_replay_rows else
+                          self.update_horizon_scheduler(
+                              self.cycle_grad_steps))
+        replay_gamma = (self.gamma if self.retrace else
+                        self.gamma_scheduler(self.cycle_grad_steps))
+        sampling_kwargs = {}
+        if ere_update_index is not None or ere_num_updates is not None:
+            if ere_update_index is None or ere_num_updates is None:
+                raise ValueError(
+                    "ERE update index and update count must be provided "
+                    "together.")
+            sampling_kwargs = {
+                "ere_update_index": ere_update_index,
+                "ere_num_updates": ere_num_updates,
+                "ere_batch_size": self._batch_size,
+            }
+        samples = self._replay.sample_transition_batch(
+            rng,
+            batch_size=self._batch_size * self._batches_to_group,
+            update_horizon=replay_horizon,
+            gamma=replay_gamma,
+            **sampling_kwargs,
+        )
+        replay_elements = collections.OrderedDict()
+        for element, element_type in zip(samples, types):
+            replay_elements[element_type.name] = element
+        return replay_elements
+
+    def _replay_sampler_generator(self):
+        while True:
+            yield self._sample_replay_batch()
 
     def sample_eval_batch(self, batch_size, subseq_len=1):
         self._rng, rng = jax.random.split(self._rng)
@@ -2579,16 +2676,28 @@ class BBFAgent(JaxDQNAgent):
         # Returns/discounts are materialized by the replay sampler using the
         # cycle schedule at sampling time.  Discard the pre-reset sample and
         # generator so the first post-reset update is sampled at cycle step 0.
-        if hasattr(self, "prefetcher"):
+        if hasattr(self, "prefetcher") and not self._uses_ere_replay():
             self.initialize_prefetcher()
         if hasattr(self, "replay_elements"):
             del self.replay_elements
 
-    def _training_step_update(self, step_index, offline=False):
+    def _training_step_update(self,
+                              step_index,
+                              offline=False,
+                              num_update_groups=1):
         """Gradient update during every training step."""
         self.start = time.time()
 
-        if not hasattr(self, "replay_elements"):
+        ere_sampling = self._uses_ere_replay()
+        if ere_sampling:
+            # One replay call feeds ``_batches_to_group`` sequential JAX
+            # minibatches. Give each contiguous chunk its own ERE k/K window.
+            self.replay_elements = self._sample_replay_batch(
+                ere_update_index=step_index * self._batches_to_group,
+                ere_num_updates=(num_update_groups *
+                                 self._batches_to_group),
+            )
+        elif not hasattr(self, "replay_elements"):
             self._sample_from_replay_buffer()
 
         probs = self.replay_elements["sampling_probabilities"]
@@ -2691,6 +2800,8 @@ class BBFAgent(JaxDQNAgent):
             getattr(self, "td_maximization_target", False),
             getattr(self, "td_maximization_horizon", 1),
             getattr(self, "td_maximization_priority_epsilon", 1e-6),
+            getattr(self, "delta_based_priority", False),
+            getattr(self, "delta_priority_epsilon", 1e-6),
             self.target_update_tau_scheduler(self.cycle_grad_steps),
             self.target_update_period,
             self.grad_steps,
@@ -2720,15 +2831,19 @@ class BBFAgent(JaxDQNAgent):
         self.grad_steps += self._batches_to_group
         self.cycle_grad_steps += self._batches_to_group
 
-        # Sample asynchronously while we wait for training
-        self._sample_from_replay_buffer()
+        # Sample the next legacy PER/uniform batch while we wait for training.
+        # ERE samples synchronously at the start of each update so its k/K
+        # phase cannot lag behind through the depth-one prefetch queue.
+        if not ere_sampling:
+            self._sample_from_replay_buffer()
         # Rainbow and prioritized replay use alpha=0.5 here, implemented by
         # storing sqrt(raw_score). The ordinary path supplies C51
-        # cross-entropy, maximization supplies absolute scalar TD plus its
-        # configured epsilon, Retrace supplies squared TV, and the lower-bound
-        # path supplies its documented u_t score. Add a small nonzero value
-        # before sqrt so zero scores cannot produce zero sampling probabilities
-        # or NaN correction terms.
+        # cross-entropy unless delta_based_priority supplies absolute scalar TD
+        # plus its configured epsilon. Maximization also supplies absolute
+        # scalar TD, Retrace supplies squared TV, and the lower-bound path
+        # supplies its documented u_t score. Add a small nonzero value before
+        # sqrt so zero scores cannot produce zero sampling probabilities or NaN
+        # correction terms.
         indices = np.reshape(np.asarray(indices), (-1,))
         priority_loss = np.reshape(
             np.asarray(aux_losses["PriorityLoss"]), (-1))
@@ -2837,7 +2952,8 @@ class BBFAgent(JaxDQNAgent):
             logging.info("step: {}, x_ent_coef: {}".format(
                 self.training_steps, self.x_ent_coef))
 
-        if self._replay.add_count == self.min_replay_history:
+        if (self._replay.add_count == self.min_replay_history and
+                not self._uses_ere_replay()):
             self.initialize_prefetcher()
 
         if self._replay.add_count > self.min_replay_history:
@@ -2858,7 +2974,11 @@ class BBFAgent(JaxDQNAgent):
                         num_updates, self.late_update_multiplier,
                         self.late_update_after, self.late_update_until)
                 for i in range(num_updates):
-                    self._training_step_update(i, offline=False)
+                    self._training_step_update(
+                        i,
+                        offline=False,
+                        num_update_groups=num_updates,
+                    )
         if self.reset_every > 0 and self.training_steps > self.next_reset:
             self.reset_weights()
         # debug - start

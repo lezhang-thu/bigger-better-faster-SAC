@@ -17,6 +17,42 @@ from bbf.replay_memory.circular_replay_buffer import modulo_range
 from bbf.replay_memory.circular_replay_buffer import ReplayElement
 
 
+def ere_sampling_window(replay_capacity, eta, min_window, update_index,
+                        num_updates):
+    """Returns the ERE sampling window for one zero-based minibatch update.
+
+    ERE samples update ``k`` from the most recent
+    ``N * eta ** (k * 1000 / K)`` transitions, subject to a minimum window.
+    The maximum replay capacity ``N`` is used even while the buffer is filling,
+    matching the published ERE implementation.
+    """
+    replay_capacity = int(replay_capacity)
+    min_window = int(min_window)
+    update_index = int(update_index)
+    num_updates = int(num_updates)
+    eta = float(eta)
+
+    if replay_capacity < 1:
+        raise ValueError('replay_capacity must be positive, got {}'.format(
+            replay_capacity))
+    if not np.isfinite(eta) or eta <= 0.0 or eta > 1.0:
+        raise ValueError('ERE eta must be in (0, 1], got {}'.format(eta))
+    if min_window < 1:
+        raise ValueError('ERE minimum window must be positive, got {}'.format(
+            min_window))
+    if num_updates < 1:
+        raise ValueError('ERE num_updates must be positive, got {}'.format(
+            num_updates))
+    if update_index < 0 or update_index >= num_updates:
+        raise ValueError(
+            'ERE update_index must be in [0, {}), got {}'.format(
+                num_updates, update_index))
+
+    exponent = update_index * 1000.0 / num_updates
+    window = int(replay_capacity * math.pow(eta, exponent))
+    return min(replay_capacity, max(min_window, window))
+
+
 @gin.configurable
 class JaxSubsequenceParallelEnvReplayBuffer(object):
     """A simple out-of-graph Replay Buffer.
@@ -476,11 +512,22 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
     def sample_index_batch(self,
                            batch_size,
                            subseq_len=None,
-                           update_horizon=None):
+                           update_horizon=None,
+                           sampling_window=None,
+                           ere_update_index=0,
+                           ere_num_updates=1,
+                           ere_batch_size=None):
         """Returns a batch of valid indices sampled uniformly.
 
     Args:
       batch_size: int, number of indices returned.
+      subseq_len: int, sampled sequence length.
+      update_horizon: int, sampled TD horizon.
+      sampling_window: optional number of most-recent time rows from which to
+        sample valid anchors. ``None`` uses the entire retained range.
+      ere_update_index: ERE context accepted for child-class compatibility.
+      ere_num_updates: ERE context accepted for child-class compatibility.
+      ere_batch_size: ERE context accepted for child-class compatibility.
 
     Returns:
       list of ints, a batch of valid indices sampled uniformly.
@@ -492,6 +539,7 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
         subseq_len = self._subseq_len if subseq_len is None else subseq_len
         update_horizon = (self._update_horizon if update_horizon is None else
                           update_horizon)
+        del ere_update_index, ere_num_updates, ere_batch_size
         self._rng, rng = jax.random.split(self._rng)
         if self.is_full():
             # add_count >= self._replay_capacity > self._stack_size
@@ -506,6 +554,16 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
                 'Cannot sample a batch with fewer than stack size ({}) + '
                 'update_horizon ({}) + subseq_len ({}) transitions.'.format(
                     self._stack_size, update_horizon, subseq_len))
+        if sampling_window is not None:
+            sampling_window = int(sampling_window)
+            if sampling_window < 1:
+                raise ValueError(
+                    'sampling_window must be positive, got {}'.format(
+                        sampling_window))
+            # Work in the same unwrapped time coordinate as the full-buffer
+            # bounds. Modulo is applied only after drawing, so this remains a
+            # contiguous recent suffix when the circular buffer wraps.
+            min_id = max(min_id, max_id - sampling_window)
         t_indices = jax.random.randint(rng, (batch_size,), min_id,
                                        max_id) % self._replay_length
         b_indices = jax.random.randint(rng, (batch_size,), 0, self._n_envs)
@@ -565,6 +623,9 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
         subseq_len=None,
         update_horizon=None,
         gamma=None,
+        ere_update_index=0,
+        ere_num_updates=1,
+        ere_batch_size=None,
     ):
         """Returns a batch of transitions (including any extra contents).
 
@@ -590,6 +651,10 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
         buffer default.
       update_horizon: Update horizon to use, if overriding the original setting.
       gamma: Discount factor to use, if overriding the original setting.
+      ere_update_index: Zero-based first minibatch update in the current ERE
+        phase. Ignored by replay buffers without ERE enabled.
+      ere_num_updates: Total minibatch updates in the current ERE phase.
+      ere_batch_size: Number of samples belonging to each minibatch update.
 
     Returns:
       transition_batch: tuple of np.arrays with the shape and type as in
@@ -615,7 +680,10 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
             t_indices, b_indices, censor_before = self.sample_index_batch(
                 batch_size,
                 subseq_len=subseq_len,
-                update_horizon=update_horizon)
+                update_horizon=update_horizon,
+                ere_update_index=ere_update_index,
+                ere_num_updates=ere_num_updates,
+                ere_batch_size=ere_batch_size)
         else:
             flat_indices = np.asarray(indices).reshape(-1)
             if flat_indices.size != batch_size:
@@ -819,7 +887,7 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
 @gin.configurable
 class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
         JaxSubsequenceParallelEnvReplayBuffer):
-    """Replay buffer with selectable prioritized or uniform anchor sampling."""
+    """Replay buffer with prioritized, ERE, or uniform anchor sampling."""
 
     def __init__(self,
                  observation_shape,
@@ -838,7 +906,10 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
                  action_dtype=np.int32,
                  reward_shape=(),
                  reward_dtype=np.float32,
-                 prioritized_sampling=True):
+                 prioritized_sampling=True,
+                 ere_sampling=False,
+                 ere_eta=0.995,
+                 ere_min_window=5000):
         super().__init__(observation_shape=observation_shape,
                          stack_size=stack_size,
                          replay_capacity=int(replay_capacity),
@@ -857,9 +928,27 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
                          reward_dtype=reward_dtype)
 
         self._prioritized_sampling = bool(prioritized_sampling)
+        self._ere_sampling = bool(ere_sampling)
+        self._ere_eta = float(ere_eta)
+        self._ere_min_window = int(ere_min_window)
+        if self._prioritized_sampling and self._ere_sampling:
+            raise ValueError(
+                'Prioritized replay and ERE sampling are mutually exclusive.')
+        # Validate the ERE hyperparameters at construction even when ERE is
+        # disabled, so bad gin bindings fail before a long training run starts.
+        ere_sampling_window(self._replay_capacity, self._ere_eta,
+                            self._ere_min_window, 0, 1)
         logging.info('Using prioritized replay sampling: %s',
                      self._prioritized_sampling)
+        logging.info('Using ERE replay sampling: %s', self._ere_sampling)
+        if self._ere_sampling:
+            logging.info('\t ERE eta: %s', self._ere_eta)
+            logging.info('\t ERE minimum window: %s', self._ere_min_window)
         self.sum_tree = sum_tree.DeterministicSumTree(self._replay_capacity)
+
+    @property
+    def ere_sampling(self):
+        return self._ere_sampling
 
     def get_add_args_signature(self):
         """The signature of the add function."""
@@ -889,20 +978,71 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
             (self._replay_length, self._n_envs),
         )
 
-        for i in range(len(indices)):
-            self.sum_tree.set(indices[i], priority[i])
+        if self._prioritized_sampling:
+            for i in range(len(indices)):
+                self.sum_tree.set(indices[i], priority[i])
         super()._add_transition(transition)
 
     def sample_index_batch(self,
                            batch_size,
                            subseq_len=None,
-                           update_horizon=None):
-        """Returns a batch of valid indices sampled as in Schaul et al. (2015)."""
+                           update_horizon=None,
+                           sampling_window=None,
+                           ere_update_index=0,
+                           ere_num_updates=1,
+                           ere_batch_size=None):
+        """Returns valid indices using PER, ERE, or uniform sampling."""
+        if self._ere_sampling:
+            if sampling_window is not None:
+                raise ValueError(
+                    'sampling_window cannot be combined with ERE sampling.')
+            ere_batch_size = (batch_size if ere_batch_size is None else
+                              int(ere_batch_size))
+            if ere_batch_size < 1:
+                raise ValueError(
+                    'ERE batch size must be positive, got {}'.format(
+                        ere_batch_size))
+            num_chunks = int(math.ceil(batch_size / ere_batch_size))
+            if ere_update_index < 0 or (
+                    ere_update_index + num_chunks > ere_num_updates):
+                raise ValueError(
+                    'ERE minibatch range [{}, {}) exceeds update phase [0, {}).'
+                    .format(ere_update_index,
+                            ere_update_index + num_chunks,
+                            ere_num_updates))
+
+            sampled_chunks = []
+            remaining = batch_size
+            for chunk_offset in range(num_chunks):
+                chunk_size = min(ere_batch_size, remaining)
+                update_index = ere_update_index + chunk_offset
+                window_transitions = ere_sampling_window(
+                    self._replay_capacity,
+                    self._ere_eta,
+                    self._ere_min_window,
+                    update_index,
+                    ere_num_updates,
+                )
+                window_rows = int(
+                    math.ceil(window_transitions / self._n_envs))
+                sampled_chunks.append(
+                    super().sample_index_batch(
+                        chunk_size,
+                        subseq_len=subseq_len,
+                        update_horizon=update_horizon,
+                        sampling_window=window_rows,
+                    ))
+                remaining -= chunk_size
+            return tuple(
+                np.concatenate([chunk[position] for chunk in sampled_chunks])
+                for position in range(3))
+
         if not self._prioritized_sampling:
             return super().sample_index_batch(
                 batch_size,
                 subseq_len=subseq_len,
-                update_horizon=update_horizon)
+                update_horizon=update_horizon,
+                sampling_window=sampling_window)
 
         subseq_len = self._subseq_len if subseq_len is None else subseq_len
         update_horizon = (self._update_horizon if update_horizon is None else
@@ -960,6 +1100,9 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
         subseq_len=None,
         update_horizon=None,
         gamma=None,
+        ere_update_index=0,
+        ere_num_updates=1,
+        ere_batch_size=None,
     ):
         """Returns a batch of transitions with extra storage and the priorities."""
         transition = super().sample_transition_batch(
@@ -969,6 +1112,9 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
             subseq_len=subseq_len,
             update_horizon=update_horizon,
             gamma=gamma,
+            ere_update_index=ere_update_index,
+            ere_num_updates=ere_num_updates,
+            ere_batch_size=ere_batch_size,
         )
         # Extra replay fields are appended after `indices`, so indices are not
         # necessarily the final parent output (Retrace stores a behavior

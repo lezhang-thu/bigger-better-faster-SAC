@@ -1,19 +1,17 @@
 set -ex
-# Bug-fixed PER + strict one-step expected C51 + fixed gamma, with gradient
-# updates doubled only over [20k, 40k). This is the bug-fixed counterpart of
-# the same-named script on bbf-starting-point-claude.
+# ERE + strict one-step expected C51 + fixed gamma. This is the bug-fixed
+# counterpart of the same-named script on bbf-starting-point-claude.
 #
 # Relative to the combo configuration:
-#   1. Prioritized replay remains enabled and uses this branch's corrected
-#      one-priority-per-sampled-anchor implementation. The explicit True
-#      binding prevents this row from inheriting script 26's uniform replay.
+#   1. ERE replaces TD-prioritized replay. Within each two-minibatch update
+#      phase, k=0 samples the full retained replay and k=1 samples uniformly
+#      from the most recent c_k=max(5000, 200000*0.995^(k*1000/2)) transitions.
 #   2. update_horizon=max_update_horizon=1 gives the real transition
 #      (s_t, a_t, r_{t+1}, done_{t+1}, s_{t+1}) throughout training.
 #   3. The C51 bootstrap is the exact current-policy mixture of the target
 #      critic's per-action distributions instead of one sampled action.
 #   4. gamma is fixed at 0.997 for both replay TD and imagined lambda-returns.
-#   5. The normal number of gradient updates is multiplied by two exactly for
-#      environment steps 20,000 <= t < 40,000.
+#   5. The normal replay ratio is retained throughout training.
 #
 # SPR, reward/continue supervision, imagination depth (5), reset timing, and
 # all remaining combo settings are unchanged. RUN=184 is distinct from the
@@ -44,10 +42,13 @@ for ((rep = 1; rep <= REPS; rep++)); do
 			--gin_bindings="BBFAgent.min_gamma=None" \
 			--gin_bindings="BBFAgent.imag_discount=None" \
 			--gin_bindings="BBFAgent.no_resets_after=100000" \
-			--gin_bindings="BBFAgent.late_update_after=20000" \
-			--gin_bindings="BBFAgent.late_update_until=40000" \
-			--gin_bindings="BBFAgent.late_update_multiplier=2" \
-			--gin_bindings="PrioritizedJaxSubsequenceParallelEnvReplayBuffer.prioritized_sampling=True" \
+			--gin_bindings="BBFAgent.late_update_after=-1" \
+			--gin_bindings="BBFAgent.late_update_until=-1" \
+			--gin_bindings="BBFAgent.late_update_multiplier=1" \
+			--gin_bindings="PrioritizedJaxSubsequenceParallelEnvReplayBuffer.prioritized_sampling=False" \
+			--gin_bindings="PrioritizedJaxSubsequenceParallelEnvReplayBuffer.ere_sampling=True" \
+			--gin_bindings="PrioritizedJaxSubsequenceParallelEnvReplayBuffer.ere_eta=0.995" \
+			--gin_bindings="PrioritizedJaxSubsequenceParallelEnvReplayBuffer.ere_min_window=5000" \
 			--gin_bindings="BBFAgent.update_horizon=1" \
 			--gin_bindings="BBFAgent.max_update_horizon=1" \
 			--gin_bindings="BBFAgent.expected_one_step_backup=True" \
