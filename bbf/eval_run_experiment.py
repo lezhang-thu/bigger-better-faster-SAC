@@ -8,7 +8,9 @@ import functools
 import os
 import sys
 import time
-import gym
+import gymnasium as gym
+import ale_py
+gym.register_envs(ale_py)
 import cv2
 
 from absl import logging
@@ -212,6 +214,7 @@ class AtariPreprocessing(object):
                     screen_size))
 
         self.environment = environment
+        self.ale = self.environment.unwrapped.ale
         self.terminal_on_life_loss = terminal_on_life_loss
         self.frame_skip = frame_skip
         self.screen_size = screen_size
@@ -259,7 +262,7 @@ class AtariPreprocessing(object):
         environment.
     """
         self.environment.reset()
-        self.lives = self.environment.ale.lives()
+        self.lives = self.ale.lives()
         self._fetch_grayscale_observation(self.screen_buffer[0])
         self.screen_buffer[1].fill(0)
         return self._pool_and_resize()
@@ -307,11 +310,12 @@ class AtariPreprocessing(object):
         for time_step in range(self.frame_skip):
             # We bypass the Gym observation altogether and directly fetch the
             # grayscale image from the ALE. This is a little faster.
-            _, reward, game_over, info = self.environment.step(action)
+            _, reward, terminated, truncated, info = self.environment.step(action)
+            game_over = terminated or truncated
             accumulated_reward += reward
 
             if self.terminal_on_life_loss:
-                new_lives = self.environment.ale.lives()
+                new_lives = self.ale.lives()
                 is_terminal = game_over or new_lives < self.lives
                 self.lives = new_lives
             else:
@@ -342,7 +346,7 @@ class AtariPreprocessing(object):
     Returns:
       observation: numpy array, the current observation in grayscale.
     """
-        self.environment.ale.getScreenGrayscale(output)
+        self.ale.getScreenGrayscale(output)
         return output
 
     def _pool_and_resize(self):
