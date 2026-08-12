@@ -667,7 +667,7 @@ class DataEfficientAtariRunner(Runner):
 
             if (not live_envs or
                 (max_steps is not None and total_steps > max_steps) or
-                (episodes is not None and total_episodes > episodes)):
+                (episodes is not None and total_episodes >= episodes)):
                 break
 
         state = (new_obses, rewards, terminals, episode_end, cum_rewards,
