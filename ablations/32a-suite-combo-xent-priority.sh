@@ -11,21 +11,14 @@ set -ex
 #
 # Usage:
 #   bash ablations/32a-suite-combo-xent-priority.sh
-#   BBF_PYTHON=/path/to/venv/bin/python \
-#     bash ablations/32a-suite-combo-xent-priority.sh
 #   GAMES="Kangaroo Asterix" GPU=1 RUN=194 \
 #     bash ablations/32a-suite-combo-xent-priority.sh
 cd "$(dirname "$0")/.."
 GAMES=${GAMES:-"Alien Amidar Assault Asterix BankHeist BattleZone Boxing Breakout ChopperCommand CrazyClimber DemonAttack Freeway Frostbite Gopher Hero Jamesbond Kangaroo Krull KungFuMaster MsPacman Pong PrivateEye Qbert RoadRunner Seaquest UpNDown"}
 GPU=${GPU:-0}
 RUN=${RUN:-194}
-BBF_PYTHON=${BBF_PYTHON:-python}
 for game_name in $GAMES; do
-	ROCR_VISIBLE_DEVICES=$GPU \
-	ROCPROFILER_QUEUE_INTERPOSITION=0 \
-	DEBUG_HIP_DYNAMIC_QUEUES=0 \
-	HSA_NO_SCRATCH_RECLAIM=1 \
-	"$BBF_PYTHON" -m bbf.train \
+	CUDA_VISIBLE_DEVICES=$GPU python -m bbf.train \
 		--agent=BBF \
 		--gin_files=bbf/configs/BBF-100K.gin \
 		--gin_bindings="DataEfficientAtariRunner.game_name=\"$game_name\"" \
