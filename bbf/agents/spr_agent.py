@@ -340,6 +340,30 @@ def masked_mean(values, mask, eps=1e-6):
     return jnp.sum(values * mask) / (jnp.sum(mask) + eps)
 
 
+def priority_weighted_masked_mean(values, mask, loss_weights, eps=1e-6):
+    """Masked mean whose trajectory rows carry their sampled-s0 weights.
+
+    ``values`` and ``mask`` have shape ``[B, H]`` and ``loss_weights`` has
+    shape ``[B]``.  The original unweighted mask denominator is retained, so
+    unit weights exactly recover ``masked_mean`` and PER changes each sampled
+    trajectory's contribution rather than self-normalizing the weights away.
+    """
+    values = jnp.asarray(values)
+    mask = jnp.asarray(mask)
+    loss_weights = jnp.asarray(loss_weights)
+    if values.ndim != 2 or mask.shape != values.shape:
+        raise ValueError("Masked trajectory values/mask must have shape [B, H].")
+    if loss_weights.ndim != 1:
+        raise ValueError("Replay-anchor loss weights must have shape [B].")
+    if values.shape[0] != loss_weights.shape[0]:
+        raise ValueError(
+            "Masked trajectory/weight batch mismatch: {} versus {}."
+            .format(values.shape[0], loss_weights.shape[0]))
+    mask = mask.astype(jnp.float32)
+    weighted_values = loss_weights[:, None] * values
+    return jnp.sum(weighted_values * mask) / (jnp.sum(mask) + eps)
+
+
 def masked_correlation(x, y, mask, eps=1e-6):
     """Pearson correlation over masked entries."""
     mask = mask.astype(jnp.float32)
@@ -546,6 +570,25 @@ def replay_loss_weights(priorities, retrace=False, mean_priority=None):
     if not np.all(np.isfinite(td_weights)):
         raise FloatingPointError("Retrace TD importance weights must be finite.")
     return auxiliary_weights, td_weights
+
+
+def apply_replay_anchor_weights(per_anchor_losses, loss_weights):
+    """Applies replay weights to losses defined at sampled real states.
+
+    Both arguments have shape ``[B]``: there is exactly one loss and one
+    priority-derived weight for each sampled replay state ``s_0``.
+    """
+    per_anchor_losses = jnp.asarray(per_anchor_losses)
+    loss_weights = jnp.asarray(loss_weights)
+    if per_anchor_losses.ndim != 1:
+        raise ValueError("Replay-anchor losses must have shape [B].")
+    if loss_weights.ndim != 1:
+        raise ValueError("Replay-anchor loss weights must have shape [B].")
+    if per_anchor_losses.shape[0] != loss_weights.shape[0]:
+        raise ValueError(
+            "Replay-anchor loss/weight batch mismatch: {} versus {}."
+            .format(per_anchor_losses.shape[0], loss_weights.shape[0]))
+    return loss_weights * per_anchor_losses
 
 
 def validate_expected_one_step_backup(enabled, update_horizon,
@@ -1327,15 +1370,17 @@ def train(
                 loss = (td_loss_multipliers * dqn_loss +
                         loss_multipliers * spr_weight * spr_loss)
             elif td_lower_bound:
-                loss = loss_multipliers * (
+                loss = apply_replay_anchor_weights(
                     dqn_loss +
                     td_lower_bound_weight * lower_bound_loss +
-                    spr_weight * spr_loss)
+                    spr_weight * spr_loss,
+                    loss_multipliers)
             else:
                 # Preserve the historical operation order for seed-level
                 # reproducibility when Retrace is disabled.
-                loss = loss_multipliers * (dqn_loss +
-                                           spr_weight * spr_loss)
+                loss = apply_replay_anchor_weights(
+                    dqn_loss + spr_weight * spr_loss,
+                    loss_multipliers)
 
             mean_loss = jnp.mean(loss)
 
@@ -1376,17 +1421,20 @@ def train(
                 pred_reward_real = jax.vmap(jax.vmap(reward_fn))(real_reps)
                 # Real frames past a terminal belong to the next episode.
                 real_mask = model_mask * continue_targets
-                reward_loss = (masked_mean(
+                reward_loss = (priority_weighted_masked_mean(
                     jnp.square(pred_reward_roll - model_rewards),
-                    model_mask) + masked_mean(
+                    model_mask,
+                    loss_multipliers) + priority_weighted_masked_mean(
                         jnp.square(pred_reward_real - model_rewards),
-                        real_mask))
+                        real_mask,
+                        loss_multipliers))
                 continue_logits = jax.vmap(
                     jax.vmap(continue_fn))(continue_reps)
-                continue_loss = masked_mean(
+                continue_loss = priority_weighted_masked_mean(
                     sigmoid_binary_cross_entropy(continue_logits,
                                                  continue_targets),
-                    model_mask)
+                    model_mask,
+                    loss_multipliers)
                 model_loss = (reward_weight * reward_loss +
                               continue_weight * continue_loss)
                 aux_model.update({
@@ -1444,27 +1492,28 @@ def train(
                     imagined_lambda_return(imag_rewards, imag_continues,
                                            imag_values, imag_discount,
                                            imag_lambda))
-                weight = jax.lax.stop_gradient(
-                    imagined_reach_weights(imag_continues, imag_discount))
-
-                percentiles = jnp.percentile(ret, jnp.asarray([5.0, 95.0]))
+                root_ret = ret[:, 0]
+                percentiles = jnp.percentile(
+                    root_ret, jnp.asarray([5.0, 95.0]))
                 new_return_ema = jnp.where(
-                    imag_actor_mult > 0,
+                    jnp.logical_or(imag_actor_mult > 0,
+                                   imag_value_mult > 0),
                     0.01 * percentiles + 0.99 * return_ema,
                     return_ema,
                 )
                 scale = jnp.maximum(new_return_ema[1] - new_return_ema[0],
                                     1.0)
-                adv = jax.lax.stop_gradient(
-                    (ret - imag_values[:, :-1]) / scale)
+                root_adv = jax.lax.stop_gradient(
+                    (root_ret - imag_values[:, 0]) / scale)
 
-                # Carries the same PER weights as the replay actor loss (the
-                # rollouts start from those states), so imag_actor_mult = 1
-                # really does weight the two actor losses equally.
-                imag_actor_loss = jnp.mean(
-                    loss_multipliers[:, None] * weight[:, :-1] *
-                    -(imagined['log_probs'][:, :-1] * adv +
-                      imag_entropy_coef * imagined['entropies'][:, :-1]))
+                # A single full-horizon actor/value objective is trained from
+                # each sampled s_0. Later imagined latents are rollout context
+                # for that target, not shorter-horizon optimization starts.
+                imag_actor_terms = -(
+                    imagined['log_probs'][:, 0] * root_adv +
+                    imag_entropy_coef * imagined['entropies'][:, 0])
+                imag_actor_loss = jnp.mean(apply_replay_anchor_weights(
+                    imag_actor_terms, loss_multipliers))
 
                 def q_logits_fn(feature):
                     return network_def.apply(
@@ -1472,61 +1521,60 @@ def train(
                         feature,
                         method=network_def.q_logits_from_feature)
 
-                imag_q_logits = jax.vmap(jax.vmap(q_logits_fn))(
-                    imagined['features'][:, :-1])
+                imag_q_logits = jax.vmap(q_logits_fn)(
+                    imagined['features'][:, 0])
                 chosen_imag_logits = jnp.squeeze(
                     jnp.take_along_axis(
                         imag_q_logits,
-                        imagined['actions'][:, :-1, None, None].astype(
-                            jnp.int32),
-                        axis=2,
-                    ), 2)
+                        imagined['actions'][:, 0, None, None].astype(jnp.int32),
+                        axis=1,
+                    ), 1)
                 # Trust region for the imagined critic targets: bound the
                 # lambda-return within imag_value_trust * scale of the target
                 # critic's estimate for the taken action (inf = off). The
                 # actor's advantages keep the raw return.
                 q_choice = jnp.squeeze(
                     jnp.take_along_axis(
-                        imag_q_target[:, :-1],
-                        imagined['actions'][:, :-1, None].astype(jnp.int32),
-                        axis=2), 2)
+                        imag_q_target[:, 0],
+                        imagined['actions'][:, 0, None].astype(jnp.int32),
+                        axis=1), 1)
                 trust_band = imag_value_trust * scale
-                value_ret = jnp.where(
+                value_ret = jax.lax.stop_gradient(jnp.where(
                     jnp.isfinite(trust_band),
-                    q_choice + jnp.clip(ret - q_choice, -trust_band,
+                    q_choice + jnp.clip(root_ret - q_choice, -trust_band,
                                         trust_band),
-                    ret)
+                    root_ret))
                 trust_clip_frac = jnp.mean(
                     jnp.where(
                         jnp.isfinite(trust_band),
-                        (jnp.abs(ret - q_choice) >= trust_band).astype(
+                        (jnp.abs(root_ret - q_choice) >= trust_band).astype(
                             jnp.float32), 0.0))
 
-                imag_target_dist = jax.vmap(
-                    jax.vmap(lambda r: project_distribution(
-                        r[None], jnp.ones(1), support)))(value_ret)
-                # Same PER weights as the replay critic loss -- the imagined
-                # targets train the same Q head from the same start states.
-                imag_value_loss = jnp.mean(
-                    loss_multipliers[:, None] * weight[:, :-1] * -jnp.sum(
-                        imag_target_dist *
-                        jax.nn.log_softmax(chosen_imag_logits), -1))
+                imag_target_dist = jax.vmap(lambda r: project_distribution(
+                    r[None], jnp.ones(1), support))(value_ret)
+                imag_value_terms = -jnp.sum(
+                    imag_target_dist *
+                    jax.nn.log_softmax(chosen_imag_logits), -1)
+                imag_value_loss = jnp.mean(apply_replay_anchor_weights(
+                    imag_value_terms, loss_multipliers))
 
                 imag_metrics.update({
                     "ImagActorLoss": imag_actor_loss,
                     "ImagValueLoss": imag_value_loss,
-                    "ImagRet": jnp.mean(ret),
-                    "ImagValue": jnp.mean(imag_values),
+                    "ImagRet": jnp.mean(root_ret),
+                    "ImagValue": jnp.mean(imag_values[:, 0]),
                     "ImagReward": jnp.mean(imag_rewards),
                     "ImagContinue": jnp.mean(imag_continues),
-                    "ImagEntropy": jnp.mean(imagined['entropies']),
+                    "ImagEntropy": jnp.mean(imagined['entropies'][:, 0]),
                     "ImagTrustClip": trust_clip_frac,
                 })
 
             policy_out = jax.vmap(policy_loss, in_axes=0,
                                   axis_name="batch")(x.q_values, logits, key)
+            replay_actor_loss = jnp.mean(
+                apply_replay_anchor_weights(policy_out[0], loss_multipliers))
             total_loss = (mean_loss +
-                          jnp.mean(loss_multipliers * policy_out[0]) +
+                          replay_actor_loss +
                           model_loss + imag_actor_mult * imag_actor_loss +
                           imag_value_mult * imag_value_loss)
             aux_losses = {
