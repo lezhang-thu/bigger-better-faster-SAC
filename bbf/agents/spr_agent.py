@@ -1492,28 +1492,27 @@ def train(
                     imagined_lambda_return(imag_rewards, imag_continues,
                                            imag_values, imag_discount,
                                            imag_lambda))
-                root_ret = ret[:, 0]
-                percentiles = jnp.percentile(
-                    root_ret, jnp.asarray([5.0, 95.0]))
+                weight = jax.lax.stop_gradient(
+                    imagined_reach_weights(imag_continues, imag_discount))
+
+                percentiles = jnp.percentile(ret, jnp.asarray([5.0, 95.0]))
                 new_return_ema = jnp.where(
-                    jnp.logical_or(imag_actor_mult > 0,
-                                   imag_value_mult > 0),
+                    imag_actor_mult > 0,
                     0.01 * percentiles + 0.99 * return_ema,
                     return_ema,
                 )
                 scale = jnp.maximum(new_return_ema[1] - new_return_ema[0],
                                     1.0)
-                root_adv = jax.lax.stop_gradient(
-                    (root_ret - imag_values[:, 0]) / scale)
+                adv = jax.lax.stop_gradient(
+                    (ret - imag_values[:, :-1]) / scale)
 
-                # A single full-horizon actor/value objective is trained from
-                # each sampled s_0. Later imagined latents are rollout context
-                # for that target, not shorter-horizon optimization starts.
-                imag_actor_terms = -(
-                    imagined['log_probs'][:, 0] * root_adv +
-                    imag_entropy_coef * imagined['entropies'][:, 0])
-                imag_actor_loss = jnp.mean(apply_replay_anchor_weights(
-                    imag_actor_terms, loss_multipliers))
+                # Carries the same PER weights as the replay actor loss (the
+                # rollouts start from those states), so imag_actor_mult = 1
+                # really does weight the two actor losses equally.
+                imag_actor_loss = jnp.mean(
+                    loss_multipliers[:, None] * weight[:, :-1] *
+                    -(imagined['log_probs'][:, :-1] * adv +
+                      imag_entropy_coef * imagined['entropies'][:, :-1]))
 
                 def q_logits_fn(feature):
                     return network_def.apply(
@@ -1521,51 +1520,54 @@ def train(
                         feature,
                         method=network_def.q_logits_from_feature)
 
-                imag_q_logits = jax.vmap(q_logits_fn)(
-                    imagined['features'][:, 0])
+                imag_q_logits = jax.vmap(jax.vmap(q_logits_fn))(
+                    imagined['features'][:, :-1])
                 chosen_imag_logits = jnp.squeeze(
                     jnp.take_along_axis(
                         imag_q_logits,
-                        imagined['actions'][:, 0, None, None].astype(jnp.int32),
-                        axis=1,
-                    ), 1)
+                        imagined['actions'][:, :-1, None, None].astype(
+                            jnp.int32),
+                        axis=2,
+                    ), 2)
                 # Trust region for the imagined critic targets: bound the
                 # lambda-return within imag_value_trust * scale of the target
                 # critic's estimate for the taken action (inf = off). The
                 # actor's advantages keep the raw return.
                 q_choice = jnp.squeeze(
                     jnp.take_along_axis(
-                        imag_q_target[:, 0],
-                        imagined['actions'][:, 0, None].astype(jnp.int32),
-                        axis=1), 1)
+                        imag_q_target[:, :-1],
+                        imagined['actions'][:, :-1, None].astype(jnp.int32),
+                        axis=2), 2)
                 trust_band = imag_value_trust * scale
-                value_ret = jax.lax.stop_gradient(jnp.where(
+                value_ret = jnp.where(
                     jnp.isfinite(trust_band),
-                    q_choice + jnp.clip(root_ret - q_choice, -trust_band,
+                    q_choice + jnp.clip(ret - q_choice, -trust_band,
                                         trust_band),
-                    root_ret))
+                    ret)
                 trust_clip_frac = jnp.mean(
                     jnp.where(
                         jnp.isfinite(trust_band),
-                        (jnp.abs(root_ret - q_choice) >= trust_band).astype(
+                        (jnp.abs(ret - q_choice) >= trust_band).astype(
                             jnp.float32), 0.0))
 
-                imag_target_dist = jax.vmap(lambda r: project_distribution(
-                    r[None], jnp.ones(1), support))(value_ret)
-                imag_value_terms = -jnp.sum(
-                    imag_target_dist *
-                    jax.nn.log_softmax(chosen_imag_logits), -1)
-                imag_value_loss = jnp.mean(apply_replay_anchor_weights(
-                    imag_value_terms, loss_multipliers))
+                imag_target_dist = jax.vmap(
+                    jax.vmap(lambda r: project_distribution(
+                        r[None], jnp.ones(1), support)))(value_ret)
+                # Same PER weights as the replay critic loss -- the imagined
+                # targets train the same Q head from the same start states.
+                imag_value_loss = jnp.mean(
+                    loss_multipliers[:, None] * weight[:, :-1] * -jnp.sum(
+                        imag_target_dist *
+                        jax.nn.log_softmax(chosen_imag_logits), -1))
 
                 imag_metrics.update({
                     "ImagActorLoss": imag_actor_loss,
                     "ImagValueLoss": imag_value_loss,
-                    "ImagRet": jnp.mean(root_ret),
-                    "ImagValue": jnp.mean(imag_values[:, 0]),
+                    "ImagRet": jnp.mean(ret),
+                    "ImagValue": jnp.mean(imag_values),
                     "ImagReward": jnp.mean(imag_rewards),
                     "ImagContinue": jnp.mean(imag_continues),
-                    "ImagEntropy": jnp.mean(imagined['entropies'][:, 0]),
+                    "ImagEntropy": jnp.mean(imagined['entropies']),
                     "ImagTrustClip": trust_clip_frac,
                 })
 
