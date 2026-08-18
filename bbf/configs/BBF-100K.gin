@@ -32,6 +32,14 @@ BBFAgent.expected_one_step_backup = False
 BBFAgent.retrace = False
 BBFAgent.retrace_horizon = 10
 BBFAgent.retrace_lambda = 1.0
+# Optional cycle-local target warmup for Retrace experiments. For the first N
+# gradient updates after initialization and every successful weight reset, the
+# critic uses an uncorrected fixed-H C51 target reconstructed from the same raw
+# rows. At update N it switches to Retrace. Replay sampling, total-variation
+# priorities, beta=1 critic correction, and behavior-probability logging remain
+# active and unchanged throughout. Zero preserves immediate Retrace.
+BBFAgent.retrace_warmup_n_step_updates = 0
+BBFAgent.retrace_warmup_n_step_horizon = 10
 # Safer one-step + n-step lower-bound TD is independently opt-in. The replay
 # stays raw one-step (bind both replay horizons to 1); one-step C51 remains the
 # primary target, while an uncorrected n-step C51 target with the same endpoint
