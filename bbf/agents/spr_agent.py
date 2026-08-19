@@ -256,9 +256,17 @@ def categorical_n_step_target(policy_probabilities, target_probabilities,
 
 def retrace_target_active(enabled, cycle_grad_steps,
                           warmup_n_step_updates):
-    """Whether this cycle has finished its fixed-n-step target warmup."""
+    """Whether this cycle has finished its n-step target warmup."""
     return bool(enabled and
                 int(cycle_grad_steps) >= int(warmup_n_step_updates))
+
+
+def retrace_priority_reset_due(enabled, reset_on_target_switch,
+                               cycle_grad_steps, warmup_n_step_updates):
+    """Whether this update is the n-step-to-Retrace priority boundary."""
+    return bool(enabled and reset_on_target_switch and
+                int(warmup_n_step_updates) > 0 and
+                int(cycle_grad_steps) == int(warmup_n_step_updates))
 
 
 def n_step_lower_bound_target(rewards, terminals, bootstrap_value, gamma):
@@ -670,23 +678,54 @@ def validate_expected_one_step_backup(enabled, update_horizon,
 def validate_retrace(enabled, expected_one_step_backup, update_horizon,
                      max_update_horizon, retrace_horizon, retrace_lambda,
                      min_gamma, cycle_steps, distributional,
-                     warmup_n_step_updates=0, warmup_n_step_horizon=10):
-    """Validates the raw-transition and fixed-schedule Retrace contract."""
+                     warmup_n_step_updates=0, warmup_n_step_horizon=10,
+                     warmup_n_step_final_horizon=None,
+                     warmup_min_gamma=None):
+    """Validates the raw-transition and optional warmup Retrace contract."""
     warmup_n_step_updates = int(warmup_n_step_updates)
     warmup_n_step_horizon = int(warmup_n_step_horizon)
+    warmup_n_step_final_horizon = (
+        warmup_n_step_horizon if warmup_n_step_final_horizon is None else
+        int(warmup_n_step_final_horizon))
+    warmup_min_gamma = (None if warmup_min_gamma is None else
+                        float(warmup_min_gamma))
     if warmup_n_step_updates < 0:
         raise ValueError(
             "retrace_warmup_n_step_updates must be nonnegative, got {}."
             .format(warmup_n_step_updates))
     if not enabled:
-        if warmup_n_step_updates:
+        if (warmup_n_step_updates or
+                warmup_n_step_final_horizon != warmup_n_step_horizon or
+                warmup_min_gamma is not None):
             raise ValueError(
-                "retrace_warmup_n_step_updates requires retrace=True.")
+                "Retrace warmup settings require retrace=True.")
         return
     if warmup_n_step_updates and warmup_n_step_horizon < 1:
         raise ValueError(
             "retrace_warmup_n_step_horizon must be positive, got {}."
             .format(warmup_n_step_horizon))
+    if warmup_n_step_final_horizon < 1:
+        raise ValueError(
+            "retrace_warmup_n_step_final_horizon must be positive, got {}."
+            .format(warmup_n_step_final_horizon))
+    if warmup_n_step_final_horizon > warmup_n_step_horizon:
+        raise ValueError(
+            "retrace_warmup_n_step_final_horizon ({}) must not exceed the "
+            "initial horizon ({}).".format(warmup_n_step_final_horizon,
+                                           warmup_n_step_horizon))
+    dynamic_warmup = (
+        warmup_n_step_final_horizon != warmup_n_step_horizon or
+        warmup_min_gamma is not None)
+    if dynamic_warmup and warmup_n_step_updates == 0:
+        raise ValueError(
+            "Dynamic Retrace warmup settings require "
+            "retrace_warmup_n_step_updates > 0.")
+    if (warmup_min_gamma is not None and
+            (not np.isfinite(warmup_min_gamma) or
+             not 0.0 <= warmup_min_gamma < 1.0)):
+        raise ValueError(
+            "retrace_warmup_min_gamma must be finite and in [0, 1), got {}."
+            .format(warmup_min_gamma))
 
     update_horizon = int(update_horizon)
     max_update_horizon = (update_horizon if max_update_horizon is None else
@@ -712,7 +751,8 @@ def validate_retrace(enabled, expected_one_step_backup, update_horizon,
     if min_gamma is not None and int(cycle_steps) > 1:
         raise ValueError(
             "retrace requires a fixed replay-TD gamma; set min_gamma=None "
-            "instead of using the cyclic gamma schedule.")
+            "instead of using the cyclic gamma schedule. Use "
+            "retrace_warmup_min_gamma for a scheduled n-step warmup.")
     if not distributional:
         raise ValueError("retrace currently requires distributional C51.")
 
@@ -818,6 +858,34 @@ def validate_delta_based_priority(enabled, priority_epsilon, retrace,
     if not distributional:
         raise ValueError(
             "delta_based_priority currently requires distributional C51.")
+
+
+def validate_retrace_warmup_priority_settings(
+        delta_based_priority, reset_on_target_switch, priority_epsilon,
+        retrace, warmup_n_step_updates, distributional):
+    """Validates phase-local priorities for an n-step Retrace warmup."""
+    delta_based_priority = bool(delta_based_priority)
+    reset_on_target_switch = bool(reset_on_target_switch)
+    if not delta_based_priority and not reset_on_target_switch:
+        return
+    if not retrace or int(warmup_n_step_updates) <= 0:
+        raise ValueError(
+            "Retrace warmup priority settings require retrace=True and "
+            "retrace_warmup_n_step_updates > 0.")
+    if delta_based_priority and not reset_on_target_switch:
+        raise ValueError(
+            "retrace_warmup_delta_based_priority requires "
+            "retrace_reset_priorities_on_target_switch=True so delta and "
+            "Retrace priorities cannot mix.")
+    if delta_based_priority:
+        priority_epsilon = float(priority_epsilon)
+        if not np.isfinite(priority_epsilon) or priority_epsilon <= 0.0:
+            raise ValueError(
+                "delta_priority_epsilon must be finite and positive, got {}."
+                .format(priority_epsilon))
+        if not distributional:
+            raise ValueError(
+                "Retrace warmup delta priority requires distributional C51.")
 
 
 def td_backup_parameter_sets(online_params, target_params, use_target_backups,
@@ -1081,6 +1149,7 @@ train_static_argnames = [
     'spr_horizon',
     'retrace_horizon',
     'retrace_warmup_n_step_horizon',
+    'retrace_warmup_delta_based_priority',
     'td_lower_bound',
     'td_lower_bound_horizon',
     'td_maximization_target',
@@ -1127,6 +1196,7 @@ def train(
     spr_horizon,  # static
     retrace_horizon,  # static
     retrace_warmup_n_step_horizon,  # static
+    retrace_warmup_delta_based_priority,  # static
     retrace_lambda,
     td_lower_bound,  # static
     td_lower_bound_horizon,  # static
@@ -1306,7 +1376,7 @@ def train(
             )
 
         def current_policy(state, action_sample_key):
-            # Retrace and its fixed-n-step warmup evaluate the current target
+            # Retrace and its n-step warmup evaluate the current target
             # policy explicitly. This is independent of Double-DQN's
             # action-selection routing.
             return network_def.apply(
@@ -1388,7 +1458,26 @@ def train(
             maximization_target_value = jnp.zeros_like(dqn_loss)
             delta_maximization = jnp.zeros_like(dqn_loss)
             maximization_uses_n_step = jnp.zeros_like(dqn_loss)
-            if retrace or retrace_warmup_n_step:
+            if retrace:
+                predicted_probabilities = jax.nn.softmax(chosen_action_logits)
+                retrace_tv = 0.5 * jnp.sum(
+                    jnp.abs(target - predicted_probabilities), axis=-1)
+                priority_loss = categorical_retrace_priority(
+                    target, predicted_probabilities)
+                td_error = retrace_tv
+            elif (retrace_warmup_n_step and
+                  retrace_warmup_delta_based_priority):
+                predicted_probabilities = jax.nn.softmax(
+                    chosen_action_logits)
+                delta_priority, priority_loss = distributional_td_signals(
+                    target,
+                    predicted_probabilities,
+                    support[None, :],
+                    delta_priority_epsilon,
+                )
+                td_error = jnp.abs(delta_priority)
+            elif retrace_warmup_n_step:
+                # Preserve the original row-38 warmup priority by default.
                 predicted_probabilities = jax.nn.softmax(chosen_action_logits)
                 retrace_tv = 0.5 * jnp.sum(
                     jnp.abs(target - predicted_probabilities), axis=-1)
@@ -1458,7 +1547,7 @@ def train(
             #logging.info("spr_loss.shape: {}".format(spr_loss.shape))
             #exit(0)
             # Keep full beta=1 correction for the complete hybrid experiment,
-            # including its fixed-n-step warmup. SPR (and weighted
+            # including its n-step warmup. SPR (and weighted
             # actor/imagination losses below) retain historical beta=0.5.
             if retrace or retrace_warmup_n_step:
                 loss = (td_loss_multipliers * dqn_loss +
@@ -2186,6 +2275,10 @@ class BBFAgent(JaxDQNAgent):
         retrace_lambda=1.0,
         retrace_warmup_n_step_updates=0,
         retrace_warmup_n_step_horizon=10,
+        retrace_warmup_n_step_final_horizon=None,
+        retrace_warmup_min_gamma=None,
+        retrace_warmup_delta_based_priority=False,
+        retrace_reset_priorities_on_target_switch=False,
         td_lower_bound_weight=0.0,
         td_lower_bound_horizon=10,
         td_lower_bound_priority_eta=0.5,
@@ -2273,6 +2366,17 @@ class BBFAgent(JaxDQNAgent):
             retrace_warmup_n_step_updates)
         self.retrace_warmup_n_step_horizon = int(
             retrace_warmup_n_step_horizon)
+        self.retrace_warmup_n_step_final_horizon = (
+            self.retrace_warmup_n_step_horizon
+            if retrace_warmup_n_step_final_horizon is None else
+            int(retrace_warmup_n_step_final_horizon))
+        self.retrace_warmup_min_gamma = (
+            None if retrace_warmup_min_gamma is None else
+            float(retrace_warmup_min_gamma))
+        self.retrace_warmup_delta_based_priority = bool(
+            retrace_warmup_delta_based_priority)
+        self.retrace_reset_priorities_on_target_switch = bool(
+            retrace_reset_priorities_on_target_switch)
         validate_retrace(self.retrace,
                          self.expected_one_step_backup,
                          self.update_horizon,
@@ -2283,7 +2387,9 @@ class BBFAgent(JaxDQNAgent):
                          cycle_steps,
                          self._distributional,
                          self.retrace_warmup_n_step_updates,
-                         self.retrace_warmup_n_step_horizon)
+                         self.retrace_warmup_n_step_horizon,
+                         self.retrace_warmup_n_step_final_horizon,
+                         self.retrace_warmup_min_gamma)
         self.td_lower_bound_weight = float(td_lower_bound_weight)
         self.td_lower_bound = self.td_lower_bound_weight > 0.0
         self.td_lower_bound_horizon = int(td_lower_bound_horizon)
@@ -2324,6 +2430,14 @@ class BBFAgent(JaxDQNAgent):
             self.retrace,
             self.td_lower_bound,
             self.td_maximization_target,
+            self._distributional,
+        )
+        validate_retrace_warmup_priority_settings(
+            self.retrace_warmup_delta_based_priority,
+            self.retrace_reset_priorities_on_target_switch,
+            self.delta_priority_epsilon,
+            self.retrace,
+            self.retrace_warmup_n_step_updates,
             self._distributional,
         )
         self._jumps = int(jumps)
@@ -2446,6 +2560,14 @@ class BBFAgent(JaxDQNAgent):
             self.retrace_warmup_n_step_updates))
         print(' self.retrace_warmup_n_step_horizon: {}'.format(
             self.retrace_warmup_n_step_horizon))
+        print(' self.retrace_warmup_n_step_final_horizon: {}'.format(
+            self.retrace_warmup_n_step_final_horizon))
+        print(' self.retrace_warmup_min_gamma: {}'.format(
+            self.retrace_warmup_min_gamma))
+        print(' self.retrace_warmup_delta_based_priority: {}'.format(
+            self.retrace_warmup_delta_based_priority))
+        print(' self.retrace_reset_priorities_on_target_switch: {}'.format(
+            self.retrace_reset_priorities_on_target_switch))
         print(' self.td_lower_bound: {}'.format(self.td_lower_bound))
         print(' self.td_lower_bound_weight: {}'.format(
             self.td_lower_bound_weight))
@@ -2476,6 +2598,22 @@ class BBFAgent(JaxDQNAgent):
                 self.update_horizon / self.max_update_horizon)
             self.update_horizon_scheduler = lambda x: int(  # pylint: disable=g-long-lambda
                 np.round(n_schedule(x) * self.max_update_horizon))
+
+        if (self.retrace_warmup_n_step_final_horizon ==
+                self.retrace_warmup_n_step_horizon):
+            self.retrace_warmup_horizon_scheduler = (
+                lambda x: self.retrace_warmup_n_step_horizon)
+        else:
+            retrace_warmup_n_schedule = exponential_decay_scheduler(
+                self.retrace_warmup_n_step_updates,
+                0,
+                1,
+                (self.retrace_warmup_n_step_final_horizon /
+                 self.retrace_warmup_n_step_horizon),
+            )
+            self.retrace_warmup_horizon_scheduler = lambda x: int(  # pylint: disable=g-long-lambda
+                np.round(retrace_warmup_n_schedule(x) *
+                         self.retrace_warmup_n_step_horizon))
 
         self.max_target_update_tau = target_update_tau
         self.target_update_tau_scheduler = lambda x: self.target_update_tau
@@ -2514,6 +2652,26 @@ class BBFAgent(JaxDQNAgent):
                                                                self.min_gamma,
                                                                self.gamma,
                                                                reverse=True)
+
+        if self.retrace_warmup_min_gamma is None:
+            self.retrace_warmup_gamma_scheduler = lambda x: self.gamma
+        else:
+            final_gamma = float(self.gamma)
+            valid_gamma_range = (
+                0.0 <= self.retrace_warmup_min_gamma <= final_gamma < 1.0)
+            if not np.isfinite(final_gamma) or not valid_gamma_range:
+                raise ValueError(
+                    "retrace_warmup_min_gamma ({}) and final gamma ({}) "
+                    "must satisfy 0 <= warmup gamma <= final gamma < 1."
+                    .format(self.retrace_warmup_min_gamma, final_gamma))
+            self.retrace_warmup_gamma_scheduler = (
+                exponential_decay_scheduler(
+                    self.retrace_warmup_n_step_updates,
+                    0,
+                    self.retrace_warmup_min_gamma,
+                    final_gamma,
+                    reverse=True,
+                ))
 
         self.cumulative_gamma = (np.ones(
             (self.max_update_horizon,)) * self.gamma).cumprod()
@@ -2757,17 +2915,29 @@ class BBFAgent(JaxDQNAgent):
         self._rng, rng = jax.random.split(self._rng)
 
         # Retrace and the lower-bound target both consume raw rows and own
-        # a separate fixed multi-step horizon. Retrace also requires a
-        # fixed gamma; the lower-bound mode may use the current gamma
-        # schedule, with the sampled one-step discount serving as gamma.
+        # separate multi-step horizons. A configured Retrace warmup can use
+        # its cycle-local gamma schedule; active Retrace uses the fixed final
+        # gamma. The lower-bound mode may use the ordinary gamma schedule,
+        # with the sampled one-step discount serving as gamma.
         raw_replay_rows = (
             self.retrace or self.td_lower_bound or
             getattr(self, "td_maximization_target", False))
         replay_horizon = (1 if raw_replay_rows else
                           self.update_horizon_scheduler(
                               self.cycle_grad_steps))
-        replay_gamma = (self.gamma if self.retrace else
-                        self.gamma_scheduler(self.cycle_grad_steps))
+        retrace_warmup_n_step = (
+            self.retrace and not retrace_target_active(
+                self.retrace,
+                self.cycle_grad_steps,
+                self.retrace_warmup_n_step_updates,
+            ))
+        if retrace_warmup_n_step:
+            replay_gamma = self.retrace_warmup_gamma_scheduler(
+                self.cycle_grad_steps)
+        elif self.retrace:
+            replay_gamma = self.gamma
+        else:
+            replay_gamma = self.gamma_scheduler(self.cycle_grad_steps)
         sampling_kwargs = {}
         if ere_update_index is not None or ere_num_updates is not None:
             if ere_update_index is None or ere_num_updates is None:
@@ -2815,6 +2985,13 @@ class BBFAgent(JaxDQNAgent):
     def _sample_from_replay_buffer(self):
         self.replay_elements = next(self.prefetcher)
 
+    def _discard_pending_replay_sample(self):
+        """Drops any batch selected under obsolete schedules or priorities."""
+        if hasattr(self, "prefetcher") and not self._uses_ere_replay():
+            self.initialize_prefetcher()
+        if hasattr(self, "replay_elements"):
+            del self.replay_elements
+
     def reset_weights(self):
         self.cumulative_resets += 1
         interval = self.reset_every
@@ -2859,15 +3036,12 @@ class BBFAgent(JaxDQNAgent):
         if getattr(self, "retrace", False):
             # Q heads were reset, so their old error-based priorities no longer
             # describe the current critic. Restore uniform sampling until fresh
-            # Retrace TV priorities are written.
+            # priorities from the new warmup cycle are written.
             self._replay.reset_priorities()
         # Returns/discounts are materialized by the replay sampler using the
         # cycle schedule at sampling time.  Discard the pre-reset sample and
         # generator so the first post-reset update is sampled at cycle step 0.
-        if hasattr(self, "prefetcher") and not self._uses_ere_replay():
-            self.initialize_prefetcher()
-        if hasattr(self, "replay_elements"):
-            del self.replay_elements
+        self._discard_pending_replay_sample()
 
     def _training_step_update(self,
                               step_index,
@@ -2877,6 +3051,30 @@ class BBFAgent(JaxDQNAgent):
         self.start = time.time()
 
         ere_sampling = self._uses_ere_replay()
+        retrace_enabled = getattr(self, "retrace", False)
+        warmup_n_step_updates = getattr(
+            self, "retrace_warmup_n_step_updates", 0)
+        retrace_target_enabled = retrace_target_active(
+            retrace_enabled,
+            self.cycle_grad_steps,
+            warmup_n_step_updates,
+        )
+        if retrace_priority_reset_due(
+                retrace_enabled,
+                getattr(self,
+                        "retrace_reset_priorities_on_target_switch", False),
+                self.cycle_grad_steps,
+                warmup_n_step_updates):
+            logging.info(
+                "\t Resetting replay priorities at the n-step-to-Retrace "
+                "target switch (cycle gradient step %s).",
+                self.cycle_grad_steps)
+            self._replay.reset_priorities()
+            # The legacy depth-one prefetcher may already hold a batch selected
+            # with warmup delta priorities. Recreate it and force a new sample
+            # so the first Retrace update is selected from the uniform tree.
+            self._discard_pending_replay_sample()
+
         if ere_sampling:
             # One replay call feeds ``_batches_to_group`` sequential JAX
             # minibatches. Give each contiguous chunk its own ERE k/K window.
@@ -2889,20 +3087,16 @@ class BBFAgent(JaxDQNAgent):
             self._sample_from_replay_buffer()
 
         probs = self.replay_elements["sampling_probabilities"]
-        retrace_enabled = getattr(self, "retrace", False)
-        retrace_target_enabled = retrace_target_active(
-            retrace_enabled,
-            self.cycle_grad_steps,
-            getattr(self, "retrace_warmup_n_step_updates", 0),
-        )
         retrace_warmup_n_step = (
             retrace_enabled and not retrace_target_enabled)
+        retrace_warmup_n_step_horizon = int(
+            self.retrace_warmup_horizon_scheduler(self.cycle_grad_steps))
         mean_priority = None
         if retrace_enabled:
             # Signed Distributional Retrace coefficients are nonnegative only
             # in expectation over behavior trajectories, so its TD loss needs
             # beta=1 PER correction. Preserve that correction during the
-            # fixed-n-step warmup so the schedule changes only the target. A
+            # n-step warmup so the schedule changes only the target. A
             # replay-wide normalizer preserves inverse-priority relative
             # weights without a sampled-batch factor.
             mean_priority = float(self._replay.mean_priority())
@@ -2938,10 +3132,16 @@ class BBFAgent(JaxDQNAgent):
         imag_actor_mult = self.imag_actor_weight * imag_ramp
         imag_value_mult = self.imag_value_weight * imag_ramp
 
-        # Keep imagination aligned with the critic discount. Retrace explicitly
-        # uses the fixed final gamma rather than the legacy cyclic schedule.
-        critic_discount = (self.gamma if getattr(self, "retrace", False) else
-                           self.gamma_scheduler(self.cycle_grad_steps))
+        # Keep imagination aligned with the critic discount. A dynamic Retrace
+        # warmup follows its phase-local schedule; active Retrace uses the fixed
+        # final gamma.
+        if retrace_warmup_n_step:
+            critic_discount = self.retrace_warmup_gamma_scheduler(
+                self.cycle_grad_steps)
+        elif retrace_enabled:
+            critic_discount = self.gamma
+        else:
+            critic_discount = self.gamma_scheduler(self.cycle_grad_steps)
         imag_discount = (critic_discount if self.imag_discount is None else
                          self.imag_discount)
 
@@ -2989,7 +3189,8 @@ class BBFAgent(JaxDQNAgent):
             retrace_warmup_n_step,
             getattr(self, "_jumps", 0),
             getattr(self, "retrace_horizon", 1),
-            getattr(self, "retrace_warmup_n_step_horizon", 1),
+            retrace_warmup_n_step_horizon,
+            getattr(self, "retrace_warmup_delta_based_priority", False),
             getattr(self, "retrace_lambda", 1.0),
             getattr(self, "td_lower_bound", False),
             getattr(self, "td_lower_bound_horizon", 1),
@@ -3037,12 +3238,13 @@ class BBFAgent(JaxDQNAgent):
             self._sample_from_replay_buffer()
         # Rainbow and prioritized replay use alpha=0.5 here, implemented by
         # storing sqrt(raw_score). The ordinary path supplies C51
-        # cross-entropy unless delta_based_priority supplies absolute scalar TD
+        # cross-entropy unless a delta-priority mode supplies absolute scalar TD
         # plus its configured epsilon. Maximization also supplies absolute
-        # scalar TD, Retrace and its fixed-n-step warmup supply squared TV, and
-        # the lower-bound path supplies its documented u_t score. Add a small
-        # nonzero value before sqrt so zero scores cannot produce zero sampling
-        # probabilities or NaN correction terms.
+        # scalar TD. Retrace and the default n-step warmup supply squared TV;
+        # row 40 opts its warmup into scalar delta instead. The lower-bound path
+        # supplies its documented u_t score. Add a small nonzero value before
+        # sqrt so zero scores cannot produce zero sampling probabilities or NaN
+        # correction terms.
         indices = np.reshape(np.asarray(indices), (-1,))
         priority_loss = np.reshape(
             np.asarray(aux_losses["PriorityLoss"]), (-1))
