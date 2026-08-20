@@ -15,18 +15,13 @@
 """Various networks for Jax Dopamine SPR agents."""
 
 import collections
-import enum
-import functools
-import time
-from typing import Any, Sequence, Tuple
+from typing import Any, Tuple
 
-from absl import logging
 from flax import linen as nn
 import gin
 import jax
 from jax import random
 import jax.numpy as jnp
-import numpy as onp
 
 SPROutputType = collections.namedtuple(
     'RL_network',
@@ -443,13 +438,6 @@ class RainbowDQNNetwork(nn.Module):
         )
         latent_dim = self.encoder.dims[-1] * self.width_scale
 
-        # debug - start
-        #print('*' * 20)
-        #print(' latent_dim: {}'.format(latent_dim))
-        #print(' self.num_actions: {}'.format(self.num_actions))
-        #exit(0)
-        # debug - end
-
         self.transition_model = TransitionModel(
             num_actions=self.num_actions,
             latent_dim=int(latent_dim),
@@ -486,8 +474,6 @@ class RainbowDQNNetwork(nn.Module):
         self.policy = nn.Dense(self.num_actions,
                                dtype=jnp.float32,
                                kernel_init=initializer)
-        self._log_alpha = self.param('_log_alpha', nn.initializers.zeros_init(),
-                                     ())
 
         # ******** world-model heads for imagination ******** #
         self.reward_head = PredictionHead(
@@ -502,9 +488,6 @@ class RainbowDQNNetwork(nn.Module):
             dtype=jnp.float32,
             initializer=initializer,
         )
-
-    def entropy_scale(self):
-        return jnp.exp(self._log_alpha)
 
     def encode(self, x, eval_mode=False):
         latent = self.encoder(x, deterministic=not eval_mode)
@@ -628,20 +611,19 @@ class RainbowDQNNetwork(nn.Module):
         return (
             y,
             self.policy_logits_from_feature(
-                #jax.lax.stop_gradient(y.representation),
                 y.representation,
                 eval_mode))
-        #return (y,
-        #        self.policy(jax.lax.stop_gradient(nn.relu(self.project(y.representation, eval_mode)))))
 
     def get_policy(self, x):
-        x = self.encode(x, False)
-        x = x.reshape(-1)
-        #x = jax.lax.stop_gradient(x)
-        logits = self.policy(nn.relu(self.policy_projection(x, False)))
-        #logits = self.policy(jax.lax.stop_gradient(nn.relu(self.encode_project(x, False))))
+        logits = self.get_policy_logits(x)
         return (logits,
                 jax.random.categorical(self.make_rng('action_sample'), logits))
+
+    def get_policy_logits(self, x):
+        """Returns policy logits without drawing an unnecessary action."""
+        x = self.encode(x, False)
+        x = x.reshape(-1)
+        return self.policy(nn.relu(self.policy_projection(x, False)))
 
     def __call__(
         self,

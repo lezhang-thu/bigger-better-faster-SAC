@@ -1,210 +1,68 @@
-# SPR (Schwarzer et al, 2021)
+# The sole supported BBF experiment: fixed H=10 for the first 10,000
+# cycle-local gradient updates, then fixed H=1. Horizon, gamma, bootstrap,
+# priority metric, and switch-reset behavior are hard-coded in spr_agent.py.
 import bbf.spr_networks
 import bbf.agents.spr_agent
 import bbf.replay_memory.subsequence_replay_buffer
 
-JaxDQNAgent.gamma = 0.997
-JaxDQNAgent.min_replay_history = 2000
+JaxDQNAgent.min_replay_history = 2_000
 JaxDQNAgent.update_period = 1
-JaxDQNAgent.target_update_period = 1
-JaxDQNAgent.epsilon_train = 0.00
-JaxDQNAgent.epsilon_eval = 0.001
-JaxDQNAgent.epsilon_decay_period = 2001    # DrQ
-JaxDQNAgent.optimizer = 'adam'
 
-BBFAgent.double_dqn = True
-BBFAgent.distributional = True
 BBFAgent.num_atoms = 51
-BBFAgent.update_horizon = 3
-BBFAgent.max_update_horizon = 10
-# Off by default so historical BBF/combo rows retain their 10->3 replay-TD
-# schedule. New one-step rows enable this together with both horizons set to 1;
-# the agent rejects inconsistent bindings. When enabled, the C51 bootstrap is
-# the exact online-policy mixture of target-critic distributions rather than
-# one sampled action (under the default Double-DQN parameter routing).
-BBFAgent.expected_one_step_backup = False
-# Distributional Retrace is opt-in so historical rows retain their original
-# replay-TD target. When enabled it requires raw replay rows
-# (update_horizon=max_update_horizon=1), a fixed gamma (min_gamma=None), and
-# uses this separate fixed real-trajectory horizon. MODEL_HORIZON remains the
-# independent SPR/imagination depth. Lambda 1 maximizes sparse-reward
-# propagation while clipped pi/mu coefficients control off-policy traces.
-BBFAgent.retrace = False
-BBFAgent.retrace_horizon = 10
-BBFAgent.retrace_lambda = 1.0
-# Optional cycle-local target warmup for Retrace experiments. For the first N
-# gradient updates after initialization and every successful weight reset, the
-# critic uses an uncorrected n-step C51 target reconstructed from the same raw
-# rows. By default its horizon and gamma are fixed. Setting a final horizon
-# and/or minimum gamma anneals them over those N updates with the same schedules
-# used by original BBF, then active Retrace uses retrace_horizon and the final
-# JaxDQNAgent.gamma. The warmup uses Retrace's total-variation priority by
-# default. Its opt-in delta priority uses the projected C51 expectation error;
-# the corresponding target-switch reset prevents those leaves from mixing with
-# active Retrace's TV priorities. Beta=1 critic correction and behavior-policy
-# logging remain active throughout. Zero warmup updates preserves immediate
-# Retrace.
-BBFAgent.retrace_warmup_n_step_updates = 0
-BBFAgent.retrace_warmup_n_step_horizon = 10
-BBFAgent.retrace_warmup_n_step_final_horizon = None
-BBFAgent.retrace_warmup_min_gamma = None
-BBFAgent.retrace_warmup_delta_based_priority = False
-BBFAgent.retrace_reset_priorities_on_target_switch = False
-# Safer one-step + n-step lower-bound TD is independently opt-in. The replay
-# stays raw one-step (bind both replay horizons to 1); one-step C51 remains the
-# primary target, while an uncorrected n-step C51 target with the same endpoint
-# policy backup supplies only an upward Huber penalty on the root support mean.
-# Its priority score is
-# u_t = |delta_1| + eta * positive_gap + epsilon before the existing PER
-# alpha=.5 square-root transform. This mode and Retrace are mutually exclusive.
-BBFAgent.td_lower_bound_weight = 0.0
-BBFAgent.td_lower_bound_horizon = 10
-BBFAgent.td_lower_bound_priority_eta = 0.5
-BBFAgent.td_lower_bound_priority_epsilon = 1e-6
-# Optimistic maximization TD is a separate opt-in target. It requires strict
-# raw one-step replay and expected_one_step_backup=True. Both Y_1 and Y_n use
-# the same target-policy value mixture; their projected C51 support means choose
-# the complete candidate distribution used by the critic. PER uses the raw
-# score |max(Y_1, Y_n) - Q| + epsilon; its existing alpha=.5 transform,
-# beta=.5 weights, sampling, insertion, and update logic stay unchanged. This
-# mode is mutually exclusive with Retrace and the lower-bound auxiliary.
-BBFAgent.td_maximization_target = False
-BBFAgent.td_maximization_horizon = 10
-BBFAgent.td_maximization_priority_epsilon = 1e-6
-# Ordinary C51 keeps its historical per-sample cross-entropy priority by
-# default. Opt-in rows can instead use |E[projected target] - Q(s_t,a_t)| +
-# epsilon before the existing PER alpha=.5 square-root transform. This changes
-# replay priorities only; the categorical critic target and loss are unchanged.
-BBFAgent.delta_based_priority = False
-BBFAgent.delta_priority_epsilon = 1e-6
-BBFAgent.min_gamma = 0.97
-BBFAgent.cycle_steps = 10_000
-BBFAgent.reset_every = 20_000 # Change if you change the replay ratio
-#BBFAgent.reset_every = 5_000 # Change if you change the replay ratio
+BBFAgent.batch_size = 32
+BBFAgent.batches_to_group = 2
+BBFAgent.replay_ratio = 64
+BBFAgent.data_augmentation = True
+
+# Successful shrink-and-perturb resets restart the H=10 phase and uniformize
+# replay priorities.
+BBFAgent.reset_every = 20_000
+BBFAgent.no_resets_after = 100_000
 BBFAgent.shrink_perturb_keys = "encoder,transition_model"
 BBFAgent.shrink_factor = 0.5
 BBFAgent.perturb_factor = 0.5
-BBFAgent.no_resets_after = 100_000 # Need to change if training longer
-BBFAgent.log_every = 100
-BBFAgent.replay_ratio = 64
-#BBFAgent.replay_ratio = 256
-# Late-phase update multiplier (off by default). late_update_after is in env
-# steps like reset_every; from it onwards the agent runs
-# late_update_multiplier x the update phases per env step, i.e. a higher
-# effective replay ratio for the tail of the run only. Note the coupling: the
-# gin default schedule resets at 20k/40k/60k and skips 80k (needs 20_000 env
-# steps of recovery before no_resets_after), so the final phase is already
-# 40k env steps = 80k grad steps, twice the 40k-grad reset cycle. Doubling
-# updates there without also shortening reset_every makes it 160k grad steps
-# in one un-reset stretch.
-BBFAgent.late_update_after = -1
-BBFAgent.late_update_until = -1
-BBFAgent.late_update_multiplier = 1
-BBFAgent.batches_to_group = 2
-BBFAgent.batch_size = 32
-BBFAgent.spr_weight = 5
 
-# Depth of the learned model. SPR is the only thing that supervises the
-# transition model, and it does so out to exactly this many steps (as do the
-# reward and continue heads, which train on the SPR rollout features), so
-# imagination must not roll out deeper than this -- past it, the latents are
-# extrapolating into a regime nothing ever trained them on. Tied rather than
-# set twice: overriding MODEL_HORIZON moves both.
+# The learned-model sequence is six states / five transitions.
 MODEL_HORIZON = 5
 BBFAgent.jumps = %MODEL_HORIZON
-
-# World-model heads and imagination (r2dreamer-style, on the SPR model).
+BBFAgent.spr_weight = 5
 BBFAgent.reward_weight = 1.0
 BBFAgent.continue_weight = 1.0
-# Grounding-gradient surgery (PCGrad on one loss): project out the component
-# of the reward/continue gradient that conflicts with the TD+SPR direction
-# at the shared encoder/TM -- the soft alternative to the all-or-nothing
-# reward_readout (only meaningful when reward_readout=False). Costs a second
-# backward pass when enabled. Logs GroundCos (conflict cosine).
-BBFAgent.reward_grad_surgery = False
+BBFAgent.reward_readout = True
 BBFAgent.imag_horizon = %MODEL_HORIZON
-BBFAgent.imag_actor_weight = .1
-# Model-generated lambda-return targets into the online critic: keep small.
-# ~2% of the critic objective after PER weighting; raise only if the gate
-# games (Kangaroo/Hero/Jamesbond + ChopperCommand) stay healthy.
+BBFAgent.imag_actor_weight = 0.1
 BBFAgent.imag_value_weight = 0.05
-# Trust region for the imagined critic targets: bound the lambda-return
-# within imag_value_trust * return-scale of the target critic's estimate for
-# the taken action (None = off, unbounded). Actor advantages are untouched.
-# Aimed at the model-confident-but-wrong target class (Gopher/Jamesbond).
-# Logs ImagTrustClip (fraction of targets hitting the bound).
 BBFAgent.imag_value_trust = None
+BBFAgent.imag_discount = None
 BBFAgent.imag_lambda = 0.95
-BBFAgent.imag_warmup = 2000
-# Imagination entropy: keep it coupled to the annealed x_ent_coef
-# (0.01 -> 0 over the first 80k env steps). Decoupling was tried twice and
-# failed with a clean dose-response on Pong (refs 17.41-20.41): fixed 3e-4
-# replacement -> 11.54; max(x_ent_coef, 3e-4) late-only floor -> 14.11
-# (Gopher 582.8, below baseline min). The anneal-to-zero is load-bearing in
-# imagination as well as replay; a float here overrides it as an ablation
-# only.
+BBFAgent.imag_warmup = 2_000
 BBFAgent.imag_entropy_weight = None
-# Decay period of x_ent_coef, the only live actor entropy coefficient
-# (the SAC learned-alpha form in policy_loss is behind `if False`): 1e-2 -> 0
-# linearly over this many env steps, then clipped at exactly 0. At the shipped
-# 80_000 the last 20k env steps of a 100k run carry no entropy term in either
-# actor loss (imagination is coupled via imag_entropy_weight=None). 100_000
-# instead makes it reach zero only at the end of training -- but it also raises
-# the coefficient at every earlier step (0.006 vs 0.005 at 40k), so it is not a
-# tail-only change, and in the imagination channel it is a stronger dose of the
-# direction that already failed as a decoupled floor (Pong 14.11 at 3e-4 flat).
-# What it does keep intact is the coupling itself, which is the part the entropy
-# line actually validated. Ablation only; 80_000 stays the default.
 BBFAgent.x_ent_decay_steps = 80_000
-# Lower bound on x_ent_coef, applied after the schedule (0.0 = off = the
-# shipped anneal to exactly zero). Unlike x_ent_decay_steps this is a tail-only
-# change: the ramp is untouched and the floor only bites where the line crosses
-# it, so 1e-3 takes effect from 72_000 env steps on. Note the shape (decay,
-# then flat at a floor) is the shape that already failed at 3e-4 on the
-# imagination weight alone (Pong 14.11, Gopher 582.8) -- what is untested is
-# applying it to x_ent_coef itself, i.e. to both actor losses coupled.
 BBFAgent.x_ent_floor = 0.0
 
-BBFAgent.data_augmentation = True
-BBFAgent.half_precision = False
-BBFAgent.network    = @bbf.spr_networks.RainbowDQNNetwork
-#BBFAgent.epsilon_fn = @jax.agents.dqn.dqn_agent.linearly_decaying_epsilon
+BBFAgent.network = @bbf.spr_networks.RainbowDQNNetwork
 BBFAgent.learning_rate = 0.0001
 BBFAgent.encoder_learning_rate = 0.0001
-
 BBFAgent.target_update_tau = 0.005
-BBFAgent.target_action_selection = True
 
 bbf.spr_networks.RainbowDQNNetwork.renormalize = True
 bbf.spr_networks.RainbowDQNNetwork.hidden_dim = 2048
 bbf.spr_networks.RainbowDQNNetwork.width_scale = 4
 bbf.spr_networks.ImpalaCNN.num_blocks = 2
 
-# Note these parameters are from DER (van Hasselt et al, 2019)
 bbf.agents.spr_agent.create_scaling_optimizer.eps = 0.00015
 bbf.agents.spr_agent.create_scaling_optimizer.weight_decay = 0.1
 
-#DataEfficientAtariRunner.game_name = 'Alien'
 DataEfficientAtariRunner.game_name = 'Jamesbond'
-# Atari 100K benchmark doesn't use sticky actions.
 create_atari_environment.sticky_actions = False
 AtariPreprocessing.terminal_on_life_loss = True
 Runner.num_iterations = 1
-#Runner.training_steps = 100000    # agent steps
-Runner.training_steps = 100_000    # agent steps
-DataEfficientAtariRunner.num_eval_episodes = 100    # agent episodes
-DataEfficientAtariRunner.num_eval_envs = 100    # agent episodes
-DataEfficientAtariRunner.num_train_envs = 1    # agent episodes
+Runner.training_steps = 100_000
+DataEfficientAtariRunner.num_eval_episodes = 100
+DataEfficientAtariRunner.num_eval_envs = 100
+DataEfficientAtariRunner.num_train_envs = 1
 DataEfficientAtariRunner.max_noops = 30
-Runner.max_steps_per_episode = 27000    # agent steps
+Runner.max_steps_per_episode = 27_000
 
-bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.replay_capacity = 200000
-bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.n_envs = 1    # agent episodes
-bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.prioritized_sampling = True
-# ERE is opt-in and mutually exclusive with prioritized_sampling. It uses the
-# paper's fixed defaults when enabled; individual ablations may override them.
-bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.ere_sampling = False
-bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.ere_eta = 0.995
-bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.ere_min_window = 5000
-bbf.replay_memory.subsequence_replay_buffer.JaxSubsequenceParallelEnvReplayBuffer.replay_capacity = 10000
-bbf.replay_memory.subsequence_replay_buffer.JaxSubsequenceParallelEnvReplayBuffer.n_envs = 1    # agent episodes
+bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.replay_capacity = 200_000
+bbf.replay_memory.subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer.n_envs = 1

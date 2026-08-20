@@ -1,10 +1,7 @@
 # coding=utf-8
+"""Compact prioritized replay for fixed-model, phase-local TD horizons."""
 
 import collections
-import gzip
-import math
-import os
-import pickle
 
 from absl import logging
 import gin
@@ -12,66 +9,34 @@ import jax
 import numpy as np
 
 from bbf.replay_memory import deterministic_sum_tree as sum_tree
-from bbf.replay_memory.circular_replay_buffer import invalid_range
-from bbf.replay_memory.circular_replay_buffer import modulo_range
-from bbf.replay_memory.circular_replay_buffer import ReplayElement
+
+ReplayElement = collections.namedtuple('ReplayElement', ['name', 'shape', 'type'])
 
 
-def ere_sampling_window(replay_capacity, eta, min_window, update_index,
-                        num_updates):
-    """Returns the ERE sampling window for one zero-based minibatch update.
+def modulo_range(start, length, modulo):
+    for offset in range(length):
+        yield (start + offset) % modulo
 
-    ERE samples update ``k`` from the most recent
-    ``N * eta ** (k * 1000 / K)`` transitions, subject to a minimum window.
-    The maximum replay capacity ``N`` is used even while the buffer is filling,
-    matching the published ERE implementation.
-    """
-    replay_capacity = int(replay_capacity)
-    min_window = int(min_window)
-    update_index = int(update_index)
-    num_updates = int(num_updates)
-    eta = float(eta)
 
-    if replay_capacity < 1:
-        raise ValueError('replay_capacity must be positive, got {}'.format(
-            replay_capacity))
-    if not np.isfinite(eta) or eta <= 0.0 or eta > 1.0:
-        raise ValueError('ERE eta must be in (0, 1], got {}'.format(eta))
-    if min_window < 1:
-        raise ValueError('ERE minimum window must be positive, got {}'.format(
-            min_window))
-    if num_updates < 1:
-        raise ValueError('ERE num_updates must be positive, got {}'.format(
-            num_updates))
-    if update_index < 0 or update_index >= num_updates:
-        raise ValueError(
-            'ERE update_index must be in [0, {}), got {}'.format(
-                num_updates, update_index))
-
-    exponent = update_index * 1000.0 / num_updates
-    window = int(replay_capacity * math.pow(eta, exponent))
-    return min(replay_capacity, max(min_window, window))
+def invalid_range(cursor, replay_length, stack_history, future_rows):
+    """Returns anchors whose stack or future window crosses the cursor."""
+    return np.asarray([
+        (cursor - future_rows + offset) % replay_length
+        for offset in range(stack_history + future_rows)
+    ])
 
 
 @gin.configurable
-class JaxSubsequenceParallelEnvReplayBuffer(object):
-    """A simple out-of-graph Replay Buffer.
+class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
+    """Prioritized circular replay with compact root-only TD fields.
 
-  Stores transitions, state, action, reward, next_state, terminal (and any
-  extra contents specified) in a circular buffer and provides a uniform
-  transition sampling function.
-  When the states consist of stacks of observations storing the states is
-  inefficient. This class writes observations and constructs the stacked
-  states at sample time.
-  This class supports multiple parallel environments and returns
-  subsequences by default.
-  Attributes:
-    add_count: int, counter of how many transitions have been added (including
-      the blank ones at the beginning of an episode).
-    invalid_range: np.array, an array with the indices of cursor-related invalid
-      transitions
-    total_steps: int, total number of transitions added across all environments.
-  """
+    The replay stores one observation frame per transition and reconstructs
+    stacked states when sampled. A batch contains a fixed-length state/action/
+    reward sequence for SPR and the world model, but only one n-step return,
+    discount, terminal, and endpoint state for the root TD target. The TD
+    horizon is selected per sample call, so switching between horizons 10 and
+    1 does not change any output shape.
+    """
 
     def __init__(
             self,
@@ -79,13 +44,11 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
             stack_size,
             replay_capacity,
             batch_size,
-            subseq_len,
+            update_horizon=10,
+            subseq_len=1,
             n_envs=1,
-            update_horizon=1,
-            gamma=0.99,
+            gamma=0.997,
             max_sample_attempts=1000,
-            use_next_state=True,
-            extra_storage_types=None,
             observation_dtype=np.uint8,
             terminal_dtype=np.uint8,
             action_shape=(),
@@ -93,314 +56,180 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
             reward_shape=(),
             reward_dtype=np.float32,
     ):
-        """Initializes OutOfGraphReplayBuffer.
-
-    Args:
-      observation_shape: tuple of ints.
-      stack_size: int, number of frames to use in state stack.
-      replay_capacity: int, number of transitions to keep in memory.
-      batch_size: int.
-      subseq_len: int, length of subsequences to return.
-      n_envs: int, how many parallel environments will be writing data.
-      update_horizon: int, length of update ('n' in n-step update).
-      gamma: int, the discount factor.
-      max_sample_attempts: int, the maximum number of attempts allowed to get a
-        sample.
-      use_next_state: bool, whether to return separate "next_observation",
-        "next_reward" and "next_action" entries. Disable to reduce sampling time
-        in pure sequence modeling tasks.
-      extra_storage_types: list of ReplayElements defining the type of the extra
-        contents that will be stored and returned by sample_transition_batch.
-      observation_dtype: np.dtype, type of the observations. Defaults to
-        np.uint8 for Atari 2600.
-      terminal_dtype: np.dtype, type of the terminals. Defaults to np.uint8 for
-        Atari 2600.
-      action_shape: tuple of ints, the shape for the action vector. Empty tuple
-        means the action is a scalar.
-      action_dtype: np.dtype, type of elements in the action.
-      reward_shape: tuple of ints, the shape of the reward vector. Empty tuple
-        means the reward is a scalar.
-      reward_dtype: np.dtype, type of elements in the reward.
-
-    Raises:
-      ValueError: If replay_capacity is too small to hold at least one
-          transition.
-    """
-        assert isinstance(observation_shape, tuple)
+        if not isinstance(observation_shape, tuple):
+            raise TypeError('observation_shape must be a tuple.')
+        replay_capacity = int(replay_capacity)
+        stack_size = int(stack_size)
+        batch_size = int(batch_size)
+        update_horizon = int(update_horizon)
+        subseq_len = int(subseq_len)
+        n_envs = int(n_envs)
+        gamma = float(gamma)
         if n_envs < 1:
             raise ValueError('n_envs must be positive, got {}'.format(n_envs))
-        replay_length = int(replay_capacity // n_envs)
-        minimum_replay_length = stack_size + subseq_len + update_horizon - 1
+        if stack_size < 1:
+            raise ValueError(
+                'stack_size must be positive, got {}'.format(stack_size))
+        if batch_size < 1:
+            raise ValueError(
+                'batch_size must be positive, got {}'.format(batch_size))
+        if update_horizon < 1:
+            raise ValueError('update_horizon must be positive, got {}'.format(
+                update_horizon))
+        if subseq_len < 1:
+            raise ValueError(
+                'subseq_len must be positive, got {}'.format(subseq_len))
+        if not np.isfinite(gamma) or gamma < 0.0 or gamma >= 1.0:
+            raise ValueError('gamma must be finite and in [0, 1), got {}'.format(
+                gamma))
+
+        replay_length = replay_capacity // n_envs
+        required_future = max(update_horizon, subseq_len - 1)
+        minimum_replay_length = stack_size + required_future
         if replay_length < minimum_replay_length:
-            raise ValueError('There is not enough capacity to cover '
-                             'stack_size, subseq_len, and update_horizon per '
-                             'environment.')
+            raise ValueError(
+                'Replay capacity must provide at least stack_size ({}) + '
+                'max(update_horizon ({}), subseq_len - 1 ({})) rows per '
+                'environment.'.format(stack_size, update_horizon,
+                                      subseq_len - 1))
 
-        logging.info(
-            'Creating a %s replay memory with the following parameters:',
-            self.__class__.__name__)
-        logging.info('\t observation_shape: %s', str(observation_shape))
-        logging.info('\t observation_dtype: %s', str(observation_dtype))
-        logging.info('\t terminal_dtype: %s', str(terminal_dtype))
-        logging.info('\t stack_size: %d', stack_size)
-        logging.info('\t use_next_state: %d', use_next_state)
-        logging.info('\t replay_capacity: %d', replay_capacity)
-        logging.info('\t batch_size: %d', batch_size)
-        logging.info('\t update_horizon: %d', update_horizon)
-        logging.info('\t gamma: %f', gamma)
-
-        self._action_shape = action_shape
+        self._action_shape = tuple(action_shape)
         self._action_dtype = action_dtype
-        self._reward_shape = reward_shape
+        self._reward_shape = tuple(reward_shape)
         self._reward_dtype = reward_dtype
         self._observation_shape = observation_shape
-        self._stack_size = stack_size
-        self._state_shape = self._observation_shape + (self._stack_size,)
-        self._batch_size = batch_size
-        self._update_horizon = update_horizon
-        self._gamma = gamma
         self._observation_dtype = observation_dtype
         self._terminal_dtype = terminal_dtype
-        self._max_sample_attempts = max_sample_attempts
+        self._stack_size = stack_size
+        self._state_shape = observation_shape + (stack_size,)
+        self._batch_size = batch_size
+        self._update_horizon = update_horizon
         self._subseq_len = subseq_len
-        self._use_next_state = use_next_state
-
+        self._discount_powers = np.power(
+            np.float32(gamma), np.arange(update_horizon + 1),
+        ).astype(np.float32)
+        self._max_sample_attempts = int(max_sample_attempts)
         self._n_envs = n_envs
         self._replay_length = replay_length
+        self._replay_capacity = replay_length * n_envs
 
-        # Gotta round this down, since the matrix is rectangular.
-        self._replay_capacity = self._replay_length * self._n_envs
+        logging.info(
+            'Creating compact prioritized replay: capacity=%s, n_envs=%s, '
+            'batch=%s, subseq_len=%s, max_horizon=%s, gamma=%s',
+            self._replay_capacity, n_envs, batch_size, subseq_len,
+            update_horizon, gamma)
 
-        self.total_steps = 0
-
-        if extra_storage_types:
-            self._extra_storage_types = extra_storage_types
-        else:
-            self._extra_storage_types = []
-        self._create_storage()
-        self.add_count = np.array(0)
-        self.invalid_range = np.array([], dtype=np.int64)
-        # When the horizon is > 1, we compute the sum of discounted rewards as a dot
-        # product using the precomputed vector <gamma^0, gamma^1, ..., gamma^{n-1}>.
-        self._cumulative_discount_vector = np.array(
-            [math.pow(self._gamma, n) for n in range(update_horizon + 1)],
-            dtype=np.float32)
-        self._next_experience_is_episode_start = True
-        self._episode_end_indices = set()
-
-    def _create_storage(self):
-        """Creates the numpy arrays used to store transitions."""
         self._store = {}
-        for storage_element in self.get_storage_signature():
-            array_shape = [self._replay_length, self._n_envs] + list(
-                storage_element.shape)
-            self._store[storage_element.name] = np.empty(
-                array_shape, dtype=storage_element.type)
-
-    def get_add_args_signature(self):
-        """The signature of the add function.
-
-    Note - Derived classes may return a different signature.
-    Returns:
-      list of ReplayElements defining the type of the argument signature
-      needed by the add function.
-    """
-        return self.get_storage_signature()
+        for element in self.get_storage_signature():
+            shape = ((self._replay_length, self._n_envs) +
+                     tuple(element.shape))
+            self._store[element.name] = np.empty(shape, dtype=element.type)
+        self.sum_tree = sum_tree.DeterministicSumTree(self._replay_capacity)
+        self.add_count = np.array(0)
+        self.total_steps = 0
+        self._episode_end_indices = set()
+        self._rng = None
 
     def get_storage_signature(self):
-        """Returns a default list of elements to be stored in this replay memory.
-
-        Note - Derived classes may return a different signature.
-        Returns:
-            list of ReplayElements defining the type of the contents stored.
-    """
-        storage_elements = [
+        """Returns the four transition fields retained in replay storage."""
+        return [
             ReplayElement('observation', self._observation_shape,
                           self._observation_dtype),
             ReplayElement('action', self._action_shape, self._action_dtype),
             ReplayElement('reward', self._reward_shape, self._reward_dtype),
-            ReplayElement('terminal', (), self._terminal_dtype)
+            ReplayElement('terminal', (), self._terminal_dtype),
         ]
 
-        for extra_replay_element in self._extra_storage_types:
-            storage_elements.append(extra_replay_element)
-        return storage_elements
+    def get_add_args_signature(self):
+        """Returns the transition fields plus the non-stored PER priority."""
+        return self.get_storage_signature() + [
+            ReplayElement('priority', (), np.float32)
+        ]
 
-    def _add_zero_transition(self):
-        """Adds a padding transition filled with zeros (Used in episode beginnings).
-    """
-        zero_transition = []
-        for element_type in self.get_add_args_signature():
-            zero_transition.append(
-                np.zeros(element_type.shape, dtype=element_type.type))
-        self._episode_end_indices.discard(self.cursor())  # If present
-        self._add(*zero_transition)
+    def _check_add_types(self, *args):
+        signature = self.get_add_args_signature()
+        if len(args) != len(signature):
+            raise ValueError('Add expects {} elements, received {}'.format(
+                len(signature), len(args)))
+        for index, (argument, element) in enumerate(zip(args, signature)):
+            argument_shape = np.asarray(argument).shape
+            if not argument_shape or argument_shape[0] != self._n_envs:
+                raise ValueError(
+                    'arg {} must have leading n_envs dimension {}, got {}.'
+                    .format(index, self._n_envs, argument_shape))
+            if argument_shape[1:] != tuple(element.shape):
+                raise ValueError('arg {} has shape {}, expected ({}, {}).'
+                                 .format(index, argument_shape, self._n_envs,
+                                         tuple(element.shape)))
 
     def add(self,
             observation,
             action,
             reward,
             terminal,
-            *args,
             priority=None,
             episode_end=False):
-        """Adds a transition to the replay memory.
+        """Adds one row for every environment at the current cursor."""
+        if priority is None:
+            priority = np.full(
+                (self._n_envs,),
+                self.sum_tree.max_recorded_priority,
+                dtype=np.float32,
+            )
+        self._check_add_types(observation, action, reward, terminal, priority)
+        priority = np.asarray(priority, dtype=np.float32)
+        if not np.all(np.isfinite(priority)) or np.any(priority < 0.0):
+            raise ValueError('Priorities must be finite and nonnegative.')
 
-    This function checks the types and handles the padding at the beginning
-    of an episode. Then it calls the _add function.
-    Since the next_observation in the transition will be the observation
-    added next there is no need to pass it.
-    If the replay memory is at capacity the oldest transition will be
-    discarded.
+        terminal = np.asarray(terminal)
+        resets = np.asarray(episode_end) + terminal
+        cursor = self.cursor()
+        for env_index in range(self._n_envs):
+            key = (cursor, env_index)
+            if resets[env_index]:
+                self._episode_end_indices.add(key)
+            else:
+                self._episode_end_indices.discard(key)
 
-    Args:
-      observation: np.array with shape observation_shape.
-      action: int, the action in the transition.
-      reward: float, the reward received in the transition.
-      terminal: np.dtype, acts as a boolean indicating whether the transition
-        was terminal (1) or not (0).
-      *args: extra contents with shapes and dtypes according to
-        extra_storage_types.
-      priority: float, unused in the circular replay buffer, but may be used in
-        child classes like PrioritizedReplayBuffer.
-      episode_end: bool, whether this experience is the last experience in the
-        episode. This is useful for tasks that terminate due to time-out, but do
-        not end on a terminal state. Overloading 'terminal' may not be
-        sufficient in this case, since 'terminal' is passed to the agent for
-        training. 'episode_end' allows the replay buffer to determine episode
-        boundaries without passing that information to the agent.
-    """
-        if priority is not None:
-            args = args + (priority,)
+        flat_indices = self.ravel_indices(
+            np.full((self._n_envs,), cursor, dtype=np.int64),
+            np.arange(self._n_envs),
+        )
+        for flat_index, value in zip(flat_indices, priority):
+            self.sum_tree.set(flat_index, value)
 
+        self._store['observation'][cursor] = observation
+        self._store['action'][cursor] = action
+        self._store['reward'][cursor] = reward
+        self._store['terminal'][cursor] = terminal
+        self.add_count += 1
         self.total_steps += self._n_envs
 
-        self._check_add_types(observation, action, reward, terminal, *args)
-
-        resets = episode_end + terminal
-        for i in range(resets.shape[0]):
-            if resets[i]:
-                self._episode_end_indices.add((self.cursor(), i))
-            else:
-                self._episode_end_indices.discard(
-                    (self.cursor(), i))  # If present
-
-        self._add(observation, action, reward, terminal, *args)
-
-    def _add(self, *args):
-        """Internal add method to add to the storage arrays.
-
-    Args:
-        *args: All the elements in a transition.
-    """
-        self._check_args_length(*args)
-        transition = {
-            e.name: args[idx]
-            for idx, e in enumerate(self.get_add_args_signature())
-        }
-        self._add_transition(transition)
-
-    def _add_transition(self, transition):
-        """Internal add method to add transition dictionary to storage arrays.
-
-    Args:
-        transition: The dictionary of names and values of the transition to add
-          to the storage. Each tensor should have leading dim equal to the
-          number of environments used by the buffer.
-    """
-        cursor = self.cursor()
-        for arg_name in transition:
-            self._store[arg_name][cursor] = transition[arg_name]
-
-        self.add_count += 1
-        self.invalid_range = invalid_range(
-            self.cursor(), self._replay_length, self._stack_size - 1,
-            self._update_horizon + self._subseq_len - 1)
-
-    def _check_args_length(self, *args):
-        """Check if args passed to the add method have the same length as storage.
-
-    Args:
-        *args: Args for elements used in storage.
-
-    Raises:
-        ValueError: If args have wrong length.
-    """
-        if len(args) != len(self.get_add_args_signature()):
-            raise ValueError('Add expects {} elements, received {}'.format(
-                len(self.get_add_args_signature()), len(args)))
-
-    def _check_add_types(self, *args):
-        """Checks if args passed to the add method match those of the storage.
-
-    Args:
-        *args: Args whose types need to be validated.
-
-    Raises:
-        ValueError: If args have wrong shape or dtype.
-    """
-        self._check_args_length(*args)
-        for i, (arg_element, store_element) in enumerate(
-                zip(args, self.get_add_args_signature())):
-            if isinstance(arg_element, np.ndarray):
-                arg_shape = arg_element.shape
-            elif isinstance(arg_element, tuple) or isinstance(
-                    arg_element, list):
-                # TODO(b/80536437). This is not efficient when arg_element is a list.
-                arg_shape = np.array(arg_element).shape
-            else:
-                # Assume it is scalar.
-                arg_shape = tuple()
-            store_element_shape = tuple(store_element.shape)
-            assert arg_shape[0] == self._n_envs
-            arg_shape = arg_shape[1:]
-            if arg_shape != store_element_shape:
-                raise ValueError('arg {} has shape {}, expected {}'.format(
-                    i, arg_shape, store_element_shape))
-
     def is_empty(self):
-        """Is the Replay Buffer empty?"""
         return self.add_count == 0
 
     def is_full(self):
-        """Is the Replay Buffer full?"""
         return self.add_count >= self._replay_length
 
-    def ravel_indices(self, indices_t, indices_b):
-        return np.ravel_multi_index((indices_t, indices_b),
-                                    (self._replay_length, self._n_envs),
-                                    mode='wrap')
-
-    def unravel_indices(self, indices):
-        return np.unravel_index(indices, (self._replay_length, self._n_envs))
-
-    def get_from_store(self, element_name, indices_t, indices_b):
-        array = self._store[element_name]
-        return array[indices_t, indices_b]
+    def num_elements(self):
+        if self.is_full():
+            return self._replay_capacity
+        return self.cursor() * self._n_envs
 
     def cursor(self):
-        """Index to the location where the next transition will be written."""
-        return self.add_count % self._replay_length
+        """Returns the row where the next transition will be written."""
+        return int(self.add_count % self._replay_length)
 
-    def parallel_get_stack(self, element_name, indices_t, indices_b,
-                           first_valid):
-        """Builds stacks in an unwrapped time coordinate, then wraps storage.
+    def ravel_indices(self, indices_t, indices_b):
+        return np.ravel_multi_index(
+            (indices_t, indices_b),
+            (self._replay_length, self._n_envs),
+            mode='wrap',
+        )
 
-        Keeping the time coordinate unwrapped lets a full circular buffer use
-        frames on both sides of physical row zero. ``first_valid`` is the
-        unwrapped first row after the most recent episode boundary for each
-        requested state.
-        """
-        indices_t = np.arange(-self._stack_size + 1,
-                              1)[:, None] + indices_t[None, :]
-        indices_b = indices_b[None, :].repeat(self._stack_size, axis=0)
-        mask = indices_t >= first_valid
-        result = self.get_from_store(element_name,
-                                     indices_t % self._replay_length, indices_b)
-        mask = mask.reshape(*mask.shape, *([1] * (len(result.shape) - 2)))
-        result = result * mask
-        result = np.moveaxis(result, 0, -1)
-        return result
+    def unravel_indices(self, indices):
+        return np.unravel_index(
+            indices, (self._replay_length, self._n_envs))
 
     def _stack_censor_before(self, index_t, index_b):
         """Returns the first valid frame row for one unwrapped state index."""
@@ -415,775 +244,273 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
                 first_valid = unwrapped_index + 1
         return first_valid
 
-    def get_terminal_stack(self, index_t, index_b):
-        index_t = np.asarray(index_t).reshape(-1)
-        index_b = np.asarray(index_b).reshape(-1)
+    def _get_stacked_observations(self, indices_t, indices_b):
+        """Builds frame stacks for parallel unwrapped time coordinates."""
+        indices_t = np.asarray(indices_t)
+        indices_b = np.asarray(indices_b)
         first_valid = np.asarray([
             self._stack_censor_before(t, b)
-            for t, b in zip(index_t, index_b)
+            for t, b in zip(indices_t, indices_b)
         ])
-        return self.parallel_get_stack('terminal', index_t, index_b,
-                                       first_valid)
+        frame_indices = (np.arange(-self._stack_size + 1, 1)[:, None] +
+                         indices_t[None, :])
+        env_indices = np.broadcast_to(indices_b[None, :], frame_indices.shape)
+        mask = frame_indices >= first_valid[None, :]
+        result = self._store['observation'][
+            frame_indices % self._replay_length, env_indices]
+        mask = mask.reshape(mask.shape + (1,) * (result.ndim - 2))
+        return np.moveaxis(result * mask, 0, -1)
 
-    def is_valid_transition(self,
-                            index_t,
-                            index_b,
-                            subseq_len=None,
-                            update_horizon=None):
-        """Checks if the index contains a valid transition.
+    def _required_future(self, update_horizon):
+        return max(int(update_horizon), self._subseq_len - 1)
 
-    Checks for collisions with the end of episodes and the current position
-    of the cursor.
-    Args:
-      index_t: int, index in the time dimension of the state.
-      index_b: int, index in the environment dimension of the state.
-
-    Returns:
-      Is the index valid: Boolean.
-      Start of the current episode (if within our stack size): Integer.
-    """
-        subseq_len = self._subseq_len if subseq_len is None else subseq_len
+    def is_valid_transition(self, index_t, index_b, update_horizon=None):
+        """Checks cursor and non-terminal episode-boundary collisions."""
         update_horizon = (self._update_horizon if update_horizon is None else
-                          update_horizon)
-        required_future = update_horizon + subseq_len - 1
+                          int(update_horizon))
+        required_future = self._required_future(update_horizon)
         index_t = np.asarray(index_t).reshape(-1)
         index_b = np.asarray(index_b).reshape(-1)
         if index_t.size != 1 or index_b.size != 1:
             raise ValueError('is_valid_transition expects one replay index.')
         start_index = int(index_t[0])
         env_index = int(index_b[0])
-
-        # Check the index is in the valid range.
         if start_index < 0 or start_index >= self._replay_length:
             return False, 0
+        if env_index < 0 or env_index >= self._n_envs:
+            return False, 0
         if not self.is_full():
-            # The final state needed is t + subseq_len - 1 + horizon.
-            if start_index > self.cursor() - subseq_len - update_horizon:
+            # Need rows through start + required_future, inclusive.
+            if start_index > self.cursor() - required_future - 1:
                 return False, 0
-            # The first few indices contain the padding states of the first episode.
             if start_index < self._stack_size - 1:
                 return False, 0
 
-        # Skip transitions that straddle the cursor.
-        runtime_invalid_range = invalid_range(
+        cursor_invalid = invalid_range(
             self.cursor(), self._replay_length, self._stack_size - 1,
             required_future)
-        if start_index in set(runtime_invalid_range):
+        if start_index in set(cursor_invalid):
             return False, 0
 
-        ep_start = self._stack_censor_before(start_index, env_index)
-
-        # Reject non-terminal episode boundaries anywhere in the complete
-        # subsequence plus bootstrap window.
-        for i in modulo_range(start_index, required_future,
-                              self._replay_length):
-            if ((i, env_index) in self._episode_end_indices and
-                    not self._store['terminal'][i, env_index]):
+        first_valid = self._stack_censor_before(start_index, env_index)
+        # A timeout boundary may not be crossed by either the model sequence or
+        # the root TD window. True terminals are allowed; masks handle them.
+        for row in modulo_range(start_index, required_future,
+                                self._replay_length):
+            if ((row, env_index) in self._episode_end_indices and
+                    not self._store['terminal'][row, env_index]):
                 return False, 0
+        return True, first_valid
 
-        return True, ep_start
-
-    def _create_batch_arrays(self, batch_size):
-        """Create a tuple of arrays with the type of get_transition_elements.
-
-    When using the WrappedReplayBuffer with staging enabled it is important to
-    create new arrays every sample because StaginArea keeps a pointer to the
-    returned arrays.
-    Args:
-      batch_size: (int) number of transitions returned. If None the default
-        batch_size will be used.
-
-    Returns:
-      Tuple of np.arrays with the shape and type of
-      get_transition_elements.
-    """
-        transition_elements = self.get_transition_elements(batch_size)
-        batch_arrays = []
-        for element in transition_elements:
-            batch_arrays.append(np.empty(element.shape, dtype=element.type))
-        return tuple(batch_arrays)
-
-    def num_elements(self):
-        if self.is_full():
-            return self._replay_capacity
-        else:
-            return self.cursor() * self._n_envs
-
-    def sample_index_batch(self,
-                           batch_size,
-                           subseq_len=None,
-                           update_horizon=None,
-                           sampling_window=None,
-                           ere_update_index=0,
-                           ere_num_updates=1,
-                           ere_batch_size=None):
-        """Returns a batch of valid indices sampled uniformly.
-
-    Args:
-      batch_size: int, number of indices returned.
-      subseq_len: int, sampled sequence length.
-      update_horizon: int, sampled TD horizon.
-      sampling_window: optional number of most-recent time rows from which to
-        sample valid anchors. ``None`` uses the entire retained range.
-      ere_update_index: ERE context accepted for child-class compatibility.
-      ere_num_updates: ERE context accepted for child-class compatibility.
-      ere_batch_size: ERE context accepted for child-class compatibility.
-
-    Returns:
-      list of ints, a batch of valid indices sampled uniformly.
-
-    Raises:
-      RuntimeError: If the batch was not constructed after maximum number
-      of tries.
-    """
-        subseq_len = self._subseq_len if subseq_len is None else subseq_len
+    def sample_index_batch(self, batch_size, update_horizon=None):
+        """Samples valid anchors from the sole supported PER distribution."""
+        batch_size = int(batch_size)
         update_horizon = (self._update_horizon if update_horizon is None else
-                          update_horizon)
-        del ere_update_index, ere_num_updates, ere_batch_size
-        self._rng, rng = jax.random.split(self._rng)
-        if self.is_full():
-            # add_count >= self._replay_capacity > self._stack_size
-            min_id = self.cursor() - self._replay_length + self._stack_size - 1
-            max_id = self.cursor() - update_horizon - subseq_len + 1
-        else:
-            # add_count < self._replay_capacity
-            min_id = self._stack_size - 1
-            max_id = self.cursor() - update_horizon - subseq_len + 1
-        if max_id <= min_id:
-            raise RuntimeError(
-                'Cannot sample a batch with fewer than stack size ({}) + '
-                'update_horizon ({}) + subseq_len ({}) transitions.'.format(
-                    self._stack_size, update_horizon, subseq_len))
-        if sampling_window is not None:
-            sampling_window = int(sampling_window)
-            if sampling_window < 1:
-                raise ValueError(
-                    'sampling_window must be positive, got {}'.format(
-                        sampling_window))
-            # Work in the same unwrapped time coordinate as the full-buffer
-            # bounds. Modulo is applied only after drawing, so this remains a
-            # contiguous recent suffix when the circular buffer wraps.
-            min_id = max(min_id, max_id - sampling_window)
-        t_indices = jax.random.randint(rng, (batch_size,), min_id,
-                                       max_id) % self._replay_length
-        b_indices = jax.random.randint(rng, (batch_size,), 0, self._n_envs)
-        allowed_attempts = self._max_sample_attempts
-        t_indices = np.array(t_indices)
-        b_indices = np.array(b_indices)
-        censor_before = np.zeros_like(t_indices)
-        for i in range(len(t_indices)):
-            is_valid, ep_start = self.is_valid_transition(
-                t_indices[i:i + 1],
-                b_indices[i:i + 1],
-                subseq_len=subseq_len,
-                update_horizon=update_horizon)
-            censor_before[i] = ep_start
-            if not is_valid:
-                if allowed_attempts == 0:
-                    raise RuntimeError(
-                        'Max sample attempts: Tried {} times but only sampled {}'
-                        ' valid indices. Batch size is {}'.format(
-                            self._max_sample_attempts, i, batch_size))
-                while not is_valid and allowed_attempts > 0:
-                    # If index i is not valid keep sampling others. Note that this
-                    # is not stratified.
-                    self._rng, rng = jax.random.split(self._rng)
-                    t_index = jax.random.randint(rng, (1,), min_id,
-                                                 max_id).item()
-                    t_index %= self._replay_length
-                    b_index = jax.random.randint(
-                        rng, (1,), 0, self._n_envs).item()
-                    allowed_attempts -= 1
-                    t_indices[i] = t_index
-                    b_indices[i] = b_index
-                    is_valid, first_valid = self.is_valid_transition(
-                        t_indices[i:i + 1],
-                        b_indices[i:i + 1],
-                        subseq_len=subseq_len,
-                        update_horizon=update_horizon)
-                    censor_before[i] = first_valid
-                if not is_valid:
-                    raise RuntimeError(
-                        'Max sample attempts: Tried {} times but only sampled '
-                        '{} valid indices. Batch size is {}'.format(
-                            self._max_sample_attempts, i, batch_size))
-        return t_indices, b_indices, censor_before
+                          int(update_horizon))
+        if update_horizon < 1 or update_horizon > self._update_horizon:
+            raise ValueError(
+                'update_horizon must be in [1, {}], got {}.'.format(
+                    self._update_horizon, update_horizon))
+        if self._rng is None:
+            raise RuntimeError('A PRNG key must be supplied before sampling.')
 
-    def restore_leading_dims(self, batch_size, subseq_len, tensor):
-        return tensor.reshape(batch_size, subseq_len, *tensor.shape[1:])
+        flat_indices = np.asarray(
+            self.sum_tree.stratified_sample(batch_size, self._rng))
+        t_indices, b_indices = self.unravel_indices(flat_indices)
+        t_indices = np.asarray(t_indices)
+        b_indices = np.asarray(b_indices)
+        attempts_left = self._max_sample_attempts
+
+        for batch_index in range(batch_size):
+            valid, _ = self.is_valid_transition(
+                t_indices[batch_index:batch_index + 1],
+                b_indices[batch_index:batch_index + 1],
+                update_horizon=update_horizon,
+            )
+            while not valid and attempts_left > 0:
+                self._rng, retry_rng = jax.random.split(self._rng)
+                flat_index = int(
+                    self.sum_tree.stratified_sample(1, retry_rng).item())
+                t_index, b_index = self.unravel_indices(flat_index)
+                t_indices[batch_index] = t_index
+                b_indices[batch_index] = b_index
+                attempts_left -= 1
+                valid, _ = self.is_valid_transition(
+                    t_indices[batch_index:batch_index + 1],
+                    b_indices[batch_index:batch_index + 1],
+                    update_horizon=update_horizon,
+                )
+            if not valid:
+                raise RuntimeError(
+                    'Unable to sample {} valid replay anchors after {} retry '
+                    'attempts.'.format(batch_size, self._max_sample_attempts))
+        return t_indices, b_indices
 
     def sample(self, *args, **kwargs):
         return self.sample_transition_batch(*args, **kwargs)
 
-    def sample_transition_batch(
-        self,
-        rng=None,
-        batch_size=None,
-        indices=None,
-        subseq_len=None,
-        update_horizon=None,
-        gamma=None,
-        ere_update_index=0,
-        ere_num_updates=1,
-        ere_batch_size=None,
-    ):
-        """Returns a batch of transitions (including any extra contents).
+    def sample_transition_batch(self,
+                                rng,
+                                batch_size=None,
+                                indices=None,
+                                update_horizon=None):
+        """Returns compact model sequences and one root n-step TD transition."""
+        self._rng = rng
+        batch_size = self._batch_size if batch_size is None else int(batch_size)
+        update_horizon = (self._update_horizon if update_horizon is None else
+                          int(update_horizon))
+        if update_horizon < 1 or update_horizon > self._update_horizon:
+            raise ValueError(
+                'update_horizon must be in [1, {}], got {}.'.format(
+                    self._update_horizon, update_horizon))
 
-    If get_transition_elements has been overridden and defines elements not
-    stored in self._store, an empty array will be returned and it will be
-    left to the child class to fill it. For example, for the child class
-    OutOfGraphPrioritizedReplayBuffer, the contents of the
-    sampling_probabilities are stored separately in a sum tree.
-    When the transition is terminal next_state_batch has undefined contents.
-    NOTE: This transition contains the indices of the sampled elements.
-    These
-    are only valid during the call to sample_transition_batch, i.e. they may
-    be used by subclasses of this replay buffer but may point to different
-    data
-    as soon as sampling is done.
-    Args:
-      rng: Jax PRNG key, if overriding the default buffer state.
-      batch_size: int, number of transitions returned. If None, the default
-        batch_size will be used.
-      indices: None or list of ints, the indices of every transition in the
-        batch. If None, sample the indices uniformly.
-      subseq_len: The length of subsequence to sample. Can override the replay
-        buffer default.
-      update_horizon: Update horizon to use, if overriding the original setting.
-      gamma: Discount factor to use, if overriding the original setting.
-      ere_update_index: Zero-based first minibatch update in the current ERE
-        phase. Ignored by replay buffers without ERE enabled.
-      ere_num_updates: Total minibatch updates in the current ERE phase.
-      ere_batch_size: Number of samples belonging to each minibatch update.
-
-    Returns:
-      transition_batch: tuple of np.arrays with the shape and type as in
-          get_transition_elements().
-    Raises:
-      ValueError: If an element to be sampled is missing from the replay
-      buffer.
-    """
-        self._rng = rng if rng is not None else self._rng
-        if batch_size is None:
-            batch_size = self._batch_size
-        if subseq_len is None:
-            subseq_len = self._subseq_len
-        if update_horizon is None:
-            update_horizon = self._update_horizon
-        if subseq_len < 1:
-            raise ValueError('subseq_len must be positive, got {}'.format(
-                subseq_len))
-        if update_horizon < 1:
-            raise ValueError('update_horizon must be positive, got {}'.format(
-                update_horizon))
         if indices is None:
-            t_indices, b_indices, censor_before = self.sample_index_batch(
-                batch_size,
-                subseq_len=subseq_len,
-                update_horizon=update_horizon,
-                ere_update_index=ere_update_index,
-                ere_num_updates=ere_num_updates,
-                ere_batch_size=ere_batch_size)
+            root_t, root_b = self.sample_index_batch(
+                batch_size, update_horizon=update_horizon)
         else:
             flat_indices = np.asarray(indices).reshape(-1)
             if flat_indices.size != batch_size:
-                raise ValueError('Expected {} indices, got {}'.format(
+                raise ValueError('Expected {} indices, got {}.'.format(
                     batch_size, flat_indices.size))
             if not np.issubdtype(flat_indices.dtype, np.integer):
-                raise TypeError('Replay indices must be integers, got {}'.format(
-                    flat_indices.dtype))
-            t_indices, b_indices = self.unravel_indices(flat_indices)
-            t_indices = np.asarray(t_indices)
-            b_indices = np.asarray(b_indices)
-            censor_before = np.zeros_like(t_indices)
-            for i in range(batch_size):
-                is_valid, ep_start = self.is_valid_transition(
-                    t_indices[i:i + 1],
-                    b_indices[i:i + 1],
-                    subseq_len=subseq_len,
-                    update_horizon=update_horizon)
-                if not is_valid:
-                    raise ValueError('Invalid replay anchor: {}'.format(
-                        flat_indices[i]))
-                censor_before[i] = ep_start
+                raise TypeError('Replay indices must be integers, got {}.'
+                                .format(flat_indices.dtype))
+            root_t, root_b = self.unravel_indices(flat_indices)
+            root_t = np.asarray(root_t)
+            root_b = np.asarray(root_b)
+            for batch_index in range(batch_size):
+                valid, _ = self.is_valid_transition(
+                    root_t[batch_index:batch_index + 1],
+                    root_b[batch_index:batch_index + 1],
+                    update_horizon=update_horizon,
+                )
+                if not valid:
+                    raise ValueError('Invalid replay anchor: {}.'.format(
+                        flat_indices[batch_index]))
 
-        effective_gamma = self._gamma if gamma is None else gamma
-        cumulative_discount_vector = np.array(
-            [math.pow(effective_gamma, n)
-             for n in range(update_horizon + 1)],
-            dtype=np.float32,
-        )
-        assert len(t_indices) == batch_size
-        assert len(b_indices) == batch_size
-        transition_elements = self.get_transition_elements(
-            batch_size, subseq_len=subseq_len)
-        state_indices = t_indices[:, None] + np.arange(subseq_len)[None, :]
-        state_indices = state_indices.reshape(batch_size * subseq_len)
-        b_indices = b_indices[:, None].repeat(subseq_len, axis=1).reshape(
-            batch_size * subseq_len)
-        # Recompute each state's censor point so a terminal inside a sampled
-        # sequence resets the later frame stacks.
-        censor_before = np.asarray([
-            self._stack_censor_before(t, b)
-            for t, b in zip(state_indices, b_indices)
-        ])
+        # Fixed-length real sequence used by SPR and the world-model losses.
+        sequence_t = (root_t[:, None] +
+                      np.arange(self._subseq_len)[None, :])
+        sequence_b = np.broadcast_to(root_b[:, None], sequence_t.shape)
+        flat_sequence_t = sequence_t.reshape(-1)
+        flat_sequence_b = sequence_b.reshape(-1)
+        states = self._get_stacked_observations(
+            flat_sequence_t, flat_sequence_b).reshape(
+                (batch_size, self._subseq_len) + self._state_shape)
+        stored_sequence_t = sequence_t % self._replay_length
+        actions = self._store['action'][stored_sequence_t, sequence_b]
+        rewards = self._store['reward'][stored_sequence_t, sequence_b]
+        dones = self._store['terminal'][stored_sequence_t, sequence_b]
+        previous_dones = np.zeros_like(dones)
+        previous_dones[:, 1:] = dones[:, :-1]
+        same_trajectory = (1 - previous_dones).cumprod(axis=1).astype(
+            self._terminal_dtype, copy=False)
 
-        # Rows store (s_t, a_t, r_{t+1}, done_{t+1}). An N-step
-        # target rooted at t consumes rows t..t+N-1 and bootstraps at s_{t+N}.
-        trajectory_indices = (np.arange(update_horizon)[:, None] +
-                              state_indices[None, :]) % self._replay_length
-        trajectory_b_indices = b_indices[None,].repeat(update_horizon, axis=0)
-        trajectory_terminals = self._store['terminal'][trajectory_indices,
-                                                       trajectory_b_indices]
-        is_terminal_transition = trajectory_terminals.any(0)
-        # Include a terminal transition's reward; mask only later rewards.
-        valid_reward_mask = np.concatenate(
-            [
-                np.ones_like(trajectory_terminals[:1]),
-                (1 - trajectory_terminals[:-1]).cumprod(0),
-            ],
-            axis=0,
-        )
-        trajectory_discount_vector = valid_reward_mask * (
-            cumulative_discount_vector[:update_horizon, None])
-        trajectory_rewards = self._store['reward'][trajectory_indices,
-                                                   trajectory_b_indices]
-        discount_shape = trajectory_discount_vector.shape + (
-            (1,) * len(self._reward_shape))
+        # Root-only H-step return and terminal. A terminal reward is included;
+        # rewards and the bootstrap after that terminal are masked.
+        trajectory_t = (np.arange(update_horizon)[:, None] + root_t[None, :])
+        trajectory_b = np.broadcast_to(root_b[None, :], trajectory_t.shape)
+        stored_trajectory_t = trajectory_t % self._replay_length
+        trajectory_terminals = self._store['terminal'][
+            stored_trajectory_t, trajectory_b].astype(bool, copy=False)
+        terminal = trajectory_terminals.any(axis=0).astype(
+            self._terminal_dtype, copy=False)
+        alive = np.ones(trajectory_terminals.shape, dtype=np.float32)
+        if update_horizon > 1:
+            alive[1:] = np.cumprod(
+                1.0 - trajectory_terminals[:-1].astype(np.float32), axis=0)
+        powers = self._discount_powers[:update_horizon + 1]
+        reward_weights = alive * powers[:update_horizon, None]
+        trajectory_rewards = self._store['reward'][
+            stored_trajectory_t, trajectory_b]
+        weight_shape = reward_weights.shape + (1,) * len(self._reward_shape)
         returns = np.sum(
-            trajectory_discount_vector.reshape(discount_shape) *
-            trajectory_rewards,
-            axis=0)
+            reward_weights.reshape(weight_shape) * trajectory_rewards,
+            axis=0,
+            dtype=self._reward_dtype,
+        )
+        discounts = np.full(
+            (batch_size,), powers[update_horizon], dtype=self._reward_dtype)
 
-        next_indices = state_indices + update_horizon
-        next_b_indices = b_indices
-        next_censor_before = np.asarray([
-            self._stack_censor_before(t, b)
-            for t, b in zip(next_indices, next_b_indices)
-        ])
-        discounts = np.full(batch_size * subseq_len,
-                            cumulative_discount_vector[update_horizon],
-                            dtype=self._reward_dtype)
-        stored_state_indices = state_indices % self._replay_length
-        stored_next_indices = next_indices % self._replay_length
-        outputs = []
-        for element in transition_elements:
-            name = element.name
-            if name == 'state':
-                output = self.parallel_get_stack(
-                    'observation',
-                    state_indices,
-                    b_indices,
-                    censor_before,
-                )
-                output = self.restore_leading_dims(batch_size, subseq_len,
-                                                   output)
-            elif name == 'return':
-                # compute the discounted sum of rewards in the trajectory.
-                output = returns
-                output = self.restore_leading_dims(batch_size, subseq_len,
-                                                   output)
-            elif name == 'discount':
-                output = discounts
-                output = self.restore_leading_dims(batch_size, subseq_len,
-                                                   output)
-            elif name == 'next_state':
-                output = self.parallel_get_stack(
-                    'observation',
-                    next_indices,
-                    next_b_indices,
-                    next_censor_before,
-                )
-                output = self.restore_leading_dims(batch_size, subseq_len,
-                                                   output)
-            elif name == 'same_trajectory':
-                dones = self._store['terminal'][stored_state_indices, b_indices]
-                dones = self.restore_leading_dims(batch_size, subseq_len, dones)
-                previous_dones = np.zeros_like(dones)
-                previous_dones[:, 1:] = dones[:, :-1]
-                output = (1 - previous_dones).cumprod(1)
-            elif name in ('next_action', 'next_reward'):
-                output = self._store[name.lstrip('next_')][stored_next_indices,
-                                                           next_b_indices]
-                output = self.restore_leading_dims(batch_size, subseq_len,
-                                                   output)
-            elif element.name == 'terminal':
-                output = is_terminal_transition
-                output = self.restore_leading_dims(batch_size, subseq_len,
-                                                   output)
-            elif name == 'indices':
-                output = self.ravel_indices(stored_state_indices,
-                                            b_indices).astype('int32')
-                output = self.restore_leading_dims(batch_size, subseq_len,
-                                                   output)[:, 0]
-            elif name in self._store.keys():
-                output = self._store[name][stored_state_indices, b_indices]
-                output = self.restore_leading_dims(batch_size, subseq_len,
-                                                   output)
-            else:
-                continue
-            outputs.append(output)
-        return outputs
+        endpoint_t = root_t + update_horizon
+        next_states = self._get_stacked_observations(endpoint_t, root_b)
+        root_indices = self.ravel_indices(
+            root_t % self._replay_length, root_b).astype(np.int32)
+        priorities = self.get_priority(root_indices)
 
-    def get_transition_elements(self, batch_size=None, subseq_len=None):
-        """Returns a 'type signature' for sample_transition_batch.
+        return [
+            states,
+            actions,
+            rewards,
+            returns,
+            discounts,
+            next_states,
+            terminal,
+            same_trajectory,
+            root_indices,
+            priorities,
+        ]
 
-    Args:
-      batch_size: int, number of transitions returned. If None, the default
-        batch_size will be used.
-      subseq_len: int, length of subsequences to return.
-
-    Returns:
-      signature: A namedtuple describing the method's return type signature.
-    """
-        subseq_len = self._subseq_len if subseq_len is None else subseq_len
-        batch_size = self._batch_size if batch_size is None else batch_size
-
-        transition_elements = [
-            ReplayElement('state', (batch_size, subseq_len) + self._state_shape,
+    def get_transition_elements(self, batch_size=None):
+        """Returns the exact compact batch signature."""
+        batch_size = self._batch_size if batch_size is None else int(batch_size)
+        sequence_prefix = (batch_size, self._subseq_len)
+        return [
+            ReplayElement('state', sequence_prefix + self._state_shape,
                           self._observation_dtype),
-            ReplayElement('action',
-                          (batch_size, subseq_len) + self._action_shape,
+            ReplayElement('action', sequence_prefix + self._action_shape,
                           self._action_dtype),
-            ReplayElement('reward',
-                          (batch_size, subseq_len) + self._reward_shape,
+            ReplayElement('reward', sequence_prefix + self._reward_shape,
                           self._reward_dtype),
-            ReplayElement('return',
-                          (batch_size, subseq_len) + self._reward_shape,
+            ReplayElement('return', (batch_size,) + self._reward_shape,
                           self._reward_dtype),
-            ReplayElement('discount', (batch_size, subseq_len),
-                          self._reward_dtype),
-        ]
-        if self._use_next_state:
-            transition_elements += [
-                ReplayElement('next_state',
-                              (batch_size, subseq_len) + self._state_shape,
-                              self._observation_dtype),
-                ReplayElement('next_action',
-                              (batch_size, subseq_len) + self._action_shape,
-                              self._action_dtype),
-                ReplayElement('next_reward',
-                              (batch_size, subseq_len) + self._reward_shape,
-                              self._reward_dtype),
-            ]
-        transition_elements += [
-            ReplayElement('terminal', (batch_size, subseq_len),
+            ReplayElement('discount', (batch_size,), self._reward_dtype),
+            ReplayElement('next_state', (batch_size,) + self._state_shape,
+                          self._observation_dtype),
+            ReplayElement('terminal', (batch_size,), self._terminal_dtype),
+            ReplayElement('same_trajectory', sequence_prefix,
                           self._terminal_dtype),
-            ReplayElement('same_trajectory', (batch_size, subseq_len),
-                          self._terminal_dtype),
-            ReplayElement('indices', (batch_size,), np.int32)
+            ReplayElement('indices', (batch_size,), np.int32),
+            # These are raw sum-tree leaves, not normalized sampling
+            # probabilities.  Keep that distinction explicit because the
+            # importance weights use both the leaf and the replay-wide mean.
+            ReplayElement('priorities', (batch_size,), np.float32),
         ]
-        for element in self._extra_storage_types:
-            transition_elements.append(
-                ReplayElement(element.name,
-                              (batch_size, subseq_len) + tuple(element.shape),
-                              element.type))
-        return transition_elements
-
-    def reset_priorities(self):
-        pass
-
-
-@gin.configurable
-class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
-        JaxSubsequenceParallelEnvReplayBuffer):
-    """Replay buffer with prioritized, ERE, or uniform anchor sampling."""
-
-    def __init__(self,
-                 observation_shape,
-                 stack_size,
-                 replay_capacity,
-                 batch_size,
-                 update_horizon=1,
-                 subseq_len=0,
-                 n_envs=1,
-                 gamma=0.99,
-                 max_sample_attempts=1000,
-                 extra_storage_types=None,
-                 observation_dtype=np.uint8,
-                 terminal_dtype=np.uint8,
-                 action_shape=(),
-                 action_dtype=np.int32,
-                 reward_shape=(),
-                 reward_dtype=np.float32,
-                 prioritized_sampling=True,
-                 ere_sampling=False,
-                 ere_eta=0.995,
-                 ere_min_window=5000):
-        super().__init__(observation_shape=observation_shape,
-                         stack_size=stack_size,
-                         replay_capacity=int(replay_capacity),
-                         batch_size=batch_size,
-                         update_horizon=update_horizon,
-                         gamma=gamma,
-                         max_sample_attempts=max_sample_attempts,
-                         extra_storage_types=extra_storage_types,
-                         observation_dtype=observation_dtype,
-                         terminal_dtype=terminal_dtype,
-                         subseq_len=subseq_len,
-                         n_envs=n_envs,
-                         action_shape=action_shape,
-                         action_dtype=action_dtype,
-                         reward_shape=reward_shape,
-                         reward_dtype=reward_dtype)
-
-        self._prioritized_sampling = bool(prioritized_sampling)
-        self._ere_sampling = bool(ere_sampling)
-        self._ere_eta = float(ere_eta)
-        self._ere_min_window = int(ere_min_window)
-        if self._prioritized_sampling and self._ere_sampling:
-            raise ValueError(
-                'Prioritized replay and ERE sampling are mutually exclusive.')
-        # Validate the ERE hyperparameters at construction even when ERE is
-        # disabled, so bad gin bindings fail before a long training run starts.
-        ere_sampling_window(self._replay_capacity, self._ere_eta,
-                            self._ere_min_window, 0, 1)
-        logging.info('Using prioritized replay sampling: %s',
-                     self._prioritized_sampling)
-        logging.info('Using ERE replay sampling: %s', self._ere_sampling)
-        if self._ere_sampling:
-            logging.info('\t ERE eta: %s', self._ere_eta)
-            logging.info('\t ERE minimum window: %s', self._ere_min_window)
-        self.sum_tree = sum_tree.DeterministicSumTree(self._replay_capacity)
-
-    @property
-    def ere_sampling(self):
-        return self._ere_sampling
-
-    def get_add_args_signature(self):
-        """The signature of the add function."""
-        parent_add_signature = super().get_add_args_signature()
-        add_signature = parent_add_signature + [
-            ReplayElement('priority', (), np.float32)
-        ]
-        return add_signature
-
-    def _add(self, *args):
-        """Internal add method to add to the underlying memory arrays."""
-        self._check_args_length(*args)
-
-        # Use Schaul et al.'s (2015) scheme of setting the priority of new elements
-        # to the maximum priority so far.
-        # Picks out 'priority' from arguments and adds it to the sum_tree.
-        transition = {}
-        for i, element in enumerate(self.get_add_args_signature()):
-            if element.name == 'priority':
-                priority = np.asarray(args[i], dtype=np.float32)
-            else:
-                transition[element.name] = args[i]
-
-        indices = np.ravel_multi_index(
-            (np.ones(
-                (1,), dtype='int32') * self.cursor(), np.arange(self._n_envs)),
-            (self._replay_length, self._n_envs),
-        )
-
-        if self._prioritized_sampling:
-            for i in range(len(indices)):
-                self.sum_tree.set(indices[i], priority[i])
-        super()._add_transition(transition)
-
-    def sample_index_batch(self,
-                           batch_size,
-                           subseq_len=None,
-                           update_horizon=None,
-                           sampling_window=None,
-                           ere_update_index=0,
-                           ere_num_updates=1,
-                           ere_batch_size=None):
-        """Returns valid indices using PER, ERE, or uniform sampling."""
-        if self._ere_sampling:
-            if sampling_window is not None:
-                raise ValueError(
-                    'sampling_window cannot be combined with ERE sampling.')
-            ere_batch_size = (batch_size if ere_batch_size is None else
-                              int(ere_batch_size))
-            if ere_batch_size < 1:
-                raise ValueError(
-                    'ERE batch size must be positive, got {}'.format(
-                        ere_batch_size))
-            num_chunks = int(math.ceil(batch_size / ere_batch_size))
-            if ere_update_index < 0 or (
-                    ere_update_index + num_chunks > ere_num_updates):
-                raise ValueError(
-                    'ERE minibatch range [{}, {}) exceeds update phase [0, {}).'
-                    .format(ere_update_index,
-                            ere_update_index + num_chunks,
-                            ere_num_updates))
-
-            sampled_chunks = []
-            remaining = batch_size
-            for chunk_offset in range(num_chunks):
-                chunk_size = min(ere_batch_size, remaining)
-                update_index = ere_update_index + chunk_offset
-                window_transitions = ere_sampling_window(
-                    self._replay_capacity,
-                    self._ere_eta,
-                    self._ere_min_window,
-                    update_index,
-                    ere_num_updates,
-                )
-                window_rows = int(
-                    math.ceil(window_transitions / self._n_envs))
-                sampled_chunks.append(
-                    super().sample_index_batch(
-                        chunk_size,
-                        subseq_len=subseq_len,
-                        update_horizon=update_horizon,
-                        sampling_window=window_rows,
-                    ))
-                remaining -= chunk_size
-            return tuple(
-                np.concatenate([chunk[position] for chunk in sampled_chunks])
-                for position in range(3))
-
-        if not self._prioritized_sampling:
-            return super().sample_index_batch(
-                batch_size,
-                subseq_len=subseq_len,
-                update_horizon=update_horizon,
-                sampling_window=sampling_window)
-
-        subseq_len = self._subseq_len if subseq_len is None else subseq_len
-        update_horizon = (self._update_horizon if update_horizon is None else
-                          update_horizon)
-        # Sample stratified indices. Some of them might be invalid.
-        # start = time.time()
-        indices = self.sum_tree.stratified_sample(batch_size, self._rng)
-        indices = np.array(indices)
-        # print("Sampling from sum tree took {}".format(time.time() - start))
-        allowed_attempts = self._max_sample_attempts
-
-        t_indices, b_indices = self.unravel_indices(indices)  # pylint: disable=unbalanced-tuple-unpacking
-        censor_before = np.zeros_like(t_indices)
-        for i in range(len(indices)):
-            is_valid, ep_start = self.is_valid_transition(
-                t_indices[i:i + 1],
-                b_indices[i:i + 1],
-                subseq_len=subseq_len,
-                update_horizon=update_horizon)
-            censor_before[i] = ep_start
-            if not is_valid:
-                if allowed_attempts == 0:
-                    raise RuntimeError(
-                        'Max sample attempts: Tried {} times but only sampled {}'
-                        ' valid indices. Batch size is {}'.format(
-                            self._max_sample_attempts, i, batch_size))
-                while (not is_valid) and allowed_attempts > 0:
-                    # If index i is not valid keep sampling others. Note that this
-                    # is not stratified.
-                    self._rng, rng = jax.random.split(self._rng)
-                    index = self.sum_tree.stratified_sample(1, rng=rng).item()
-                    t_index, b_index = self.unravel_indices(index)  # pylint: disable=unbalanced-tuple-unpacking
-
-                    allowed_attempts -= 1
-                    t_indices[i] = t_index
-                    b_indices[i] = b_index
-                    is_valid, ep_start = self.is_valid_transition(
-                        t_indices[i:i + 1],
-                        b_indices[i:i + 1],
-                        subseq_len=subseq_len,
-                        update_horizon=update_horizon)
-                    censor_before[i] = ep_start
-                if not is_valid:
-                    raise RuntimeError(
-                        'Max sample attempts: Tried {} times but only sampled '
-                        '{} valid indices. Batch size is {}'.format(
-                            self._max_sample_attempts, i, batch_size))
-        return t_indices, b_indices, censor_before
-
-    def sample_transition_batch(
-        self,
-        rng,
-        batch_size=None,
-        indices=None,
-        subseq_len=None,
-        update_horizon=None,
-        gamma=None,
-        ere_update_index=0,
-        ere_num_updates=1,
-        ere_batch_size=None,
-    ):
-        """Returns a batch of transitions with extra storage and the priorities."""
-        transition = super().sample_transition_batch(
-            rng,
-            batch_size,
-            indices,
-            subseq_len=subseq_len,
-            update_horizon=update_horizon,
-            gamma=gamma,
-            ere_update_index=ere_update_index,
-            ere_num_updates=ere_num_updates,
-            ere_batch_size=ere_batch_size,
-        )
-        # Extra replay fields are appended after `indices`, so indices are not
-        # necessarily the final parent output (Retrace stores a behavior
-        # probability this way). Resolve the field by name rather than relying
-        # on its historical position.
-        parent_elements = super().get_transition_elements(
-            batch_size=batch_size, subseq_len=subseq_len)
-        indices_position = next(
-            i for i, element in enumerate(parent_elements)
-            if element.name == 'indices')
-        transition.append(self.get_priority(transition[indices_position]))
-        return transition
 
     def set_priority(self, indices, priorities):
-        """Sets the priority of the given elements according to Schaul et al."""
+        """Updates one raw sum-tree leaf priority per sampled root."""
         indices = np.asarray(indices)
         if not np.issubdtype(indices.dtype, np.integer):
-            raise TypeError('Indices must be integers, given: {}'.format(
+            raise TypeError('Indices must be integers, got {}.'.format(
                 indices.dtype))
         indices = indices.astype(np.int32, copy=False).reshape(-1)
         priorities = np.asarray(priorities, dtype=np.float32).reshape(-1)
         if priorities.size != indices.size:
             raise ValueError(
-                'Priority count must match index count: got {} priorities '
-                'for {} indices.'.format(priorities.size, indices.size))
-        if not self._prioritized_sampling:
-            return
+                'Priority count must match index count: got {} for {}.'
+                .format(priorities.size, indices.size))
+        if not np.all(np.isfinite(priorities)) or np.any(priorities < 0.0):
+            raise ValueError('Priorities must be finite and nonnegative.')
         for index, priority in zip(indices, priorities):
             self.sum_tree.set(index, priority)
 
     def get_priority(self, indices):
-        """Fetches the priorities correspond to a batch of memory indices."""
         indices = np.asarray(indices)
         if not indices.shape:
             raise ValueError('Indices must be an array.')
         if not np.issubdtype(indices.dtype, np.integer):
-            raise TypeError('Indices must be integers, given: {}'.format(
+            raise TypeError('Indices must be integers, got {}.'.format(
                 indices.dtype))
-        indices = indices.astype(np.int32, copy=False)
-        if not self._prioritized_sampling:
-            return np.ones(indices.shape, dtype=np.float32)
-        return np.asarray(self.sum_tree.get(indices), dtype=np.float32)
+        return np.asarray(
+            self.sum_tree.get(indices.astype(np.int32, copy=False)),
+            dtype=np.float32,
+        )
 
     def mean_priority(self):
-        """Returns the replay-wide mean over populated priority leaves.
-
-        This supplies a sample-independent scale for full importance
-        correction.  Normalizing inverse priorities by a sampled batch maximum
-        would instead make the common scale depend on the sampled trajectories.
-        Rejection sampling and prefetch can change the exact common scale, but
-        not the inverse-priority relative weights.
-        """
-        if not self._prioritized_sampling:
-            return np.float32(1.0)
         populated = self.sum_tree.highest_set + 1
         if populated <= 0:
             return np.float32(1.0)
         return np.float32(self.sum_tree._total_priority() / populated)
 
-    def get_transition_elements(self, batch_size=None, subseq_len=None):
-        """Returns a 'type signature' for sample_transition_batch."""
-        batch_size = self._batch_size if batch_size is None else batch_size
-        parent_transition_type = (super().get_transition_elements(
-            batch_size, subseq_len=subseq_len))
-        probablilities_type = [
-            ReplayElement('sampling_probabilities', (batch_size,), np.float32)
-        ]
-        return parent_transition_type + probablilities_type
-
     def reset_priorities(self):
-        if self._prioritized_sampling:
-            self.sum_tree.reset_priorities()
+        self.sum_tree.reset_priorities()

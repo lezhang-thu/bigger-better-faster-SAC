@@ -1,8 +1,3 @@
-import random
-
-import os
-
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".5"
 # coding=utf-8
 r"""Entry point for Atari 100k experiments.
 
@@ -10,14 +5,16 @@ To train a BBF agent locally, run:
 
 python -m bbf.train \
     --agent=BBF \
-    --gin_files=bbf/configs/BBF.gin \
+    --gin_files=bbf/configs/BBF-100K.gin \
     --run_number=1
 
 """
 import functools
-import json
 import os
+import random
 import time
+
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".5"
 
 from absl import app
 from absl import flags
@@ -72,10 +69,10 @@ def create_agent(
     seed,
     explore_end_steps,
 ):
+    del explore_end_steps  # Runner compatibility; this policy has no epsilon ramp.
     return spr_agent.BBFAgent(
         num_actions=environment.action_space.n,
         seed=seed,
-        explore_end_steps=explore_end_steps,
     )
 
 

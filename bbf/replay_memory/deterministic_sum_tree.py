@@ -16,38 +16,17 @@
 
 import functools
 
-from bbf.replay_memory import sum_tree
 import jax
-from jax import numpy as jnp
 import numpy as np
 
 
-@functools.partial(jax.jit, backend='cpu')
-def step(i, args):  # pylint: disable=unused-argument
-    query_value, index, nodes = args
-    left_child = index * 2 + 1
-    left_sum = nodes[left_child]
-    index = jax.lax.cond(query_value < left_sum, lambda x: x, lambda x: x + 1,
-                         left_child)
-    query_value = jax.lax.cond(query_value < left_sum, lambda x: x,
-                               lambda x: x - left_sum, query_value)
-    return query_value, index, nodes
+@functools.partial(jax.jit, backend='cpu', static_argnums=(1,))
+def stratified_offsets(rng, batch_size):
+    """Draws one reproducible unit offset per stratum."""
+    return jax.random.uniform(rng, shape=(batch_size,))
 
 
-@functools.partial(jax.jit, backend='cpu')
-@functools.partial(jax.vmap, in_axes=(None, None, 0, None, None))
-def parallel_stratified_sample(rng, nodes, i, n, depth):
-    rng = jax.random.fold_in(rng, i)
-    total_priority = nodes[0]
-    upper_bound = (i + 1) / n
-    lower_bound = i / n
-    query = jax.random.uniform(rng, minval=lower_bound, maxval=upper_bound)
-    _, index, _ = jax.lax.fori_loop(0, depth, step,
-                                    (query * total_priority, 0, nodes))
-    return index
-
-
-class DeterministicSumTree(sum_tree.SumTree):
+class DeterministicSumTree(object):
     """A sum tree data structure for storing replay priorities.
 
     In contrast to the original implementation, this uses JAX for handling
@@ -92,27 +71,45 @@ class DeterministicSumTree(sum_tree.SumTree):
     """
         return self.nodes[0]
 
+    def _find_indices(self, query_values):
+        """Traverses the host-resident tree for a vector of priority queries."""
+        query_values = np.asarray(query_values, dtype=np.float64).reshape(-1)
+        indices = np.zeros(query_values.shape, dtype=np.int64)
+        for _ in range(self.depth):
+            left_children = 2 * indices + 1
+            left_sums = self.nodes[left_children]
+            take_right = query_values >= left_sums
+            query_values = query_values - take_right * left_sums
+            indices = left_children + take_right.astype(np.int64)
+        return np.minimum(indices - self.low_idx, self.highest_set)
+
     def sample(self, rng, query_value=None):
         """Samples an element from the sum tree."""
-        nodes = jnp.array(self.nodes)
-        query_value = (jax.random.uniform(rng)
-                       if query_value is None else query_value)
-        query_value *= self._total_priority()
-
-        _, index, _ = jax.lax.fori_loop(0, self.depth, step,
-                                        (query_value, 0, nodes))
-
-        return np.minimum(index - self.low_idx, self.highest_set)
+        total_priority = self._total_priority()
+        if total_priority == 0.0:
+            raise ValueError('Cannot sample from an empty sum tree.')
+        fraction = (float(np.asarray(jax.random.uniform(rng)))
+                    if query_value is None else float(query_value))
+        if fraction < 0.0 or fraction > 1.0:
+            raise ValueError('query_value must be in [0, 1].')
+        return self._find_indices([fraction * total_priority])[0]
 
     def stratified_sample(self, batch_size, rng):
         """Performs stratified sampling using the sum tree."""
-        if self._total_priority() == 0.0:
-            raise Exception('Cannot sample from an empty sum tree.')
-
-        indices = parallel_stratified_sample(rng, self.nodes,
-                                             np.arange(batch_size), batch_size,
-                                             self.depth)
-        return np.minimum(indices - self.low_idx, self.highest_set)
+        batch_size = int(batch_size)
+        if batch_size < 1:
+            raise ValueError('batch_size must be positive.')
+        total_priority = self._total_priority()
+        if total_priority == 0.0:
+            raise ValueError('Cannot sample from an empty sum tree.')
+        offsets = np.asarray(
+            stratified_offsets(rng, batch_size), dtype=np.float64)
+        # Do the stratum arithmetic in float64 on the host. In float32 the
+        # final value can round to exactly 1.0, which would bias a padded tree
+        # toward its last populated leaf.
+        fractions = (
+            np.arange(batch_size, dtype=np.float64) + offsets) / batch_size
+        return self._find_indices(fractions * total_priority)
 
     def get(self, node_index):
         """Returns the value of the leaf node corresponding to the index.
@@ -126,8 +123,25 @@ class DeterministicSumTree(sum_tree.SumTree):
         return self.nodes[node_index + self.low_idx]
 
     def reset_priorities(self):
-        for i in range(self.highest_set + 1):
-            self.set(i, self.max_recorded_priority)
+        """Makes every populated leaf equal and rebuilds the tree in O(N).
+
+        Calling ``set`` for every leaf performed O(N log N) Python updates.
+        A reset discards all relative priority information, so filling the
+        contiguous populated leaf prefix and reducing each tree level is both
+        equivalent and substantially cheaper.
+        """
+        if self.highest_set < 0:
+            return
+        self.nodes.fill(0.0)
+        populated = self.highest_set + 1
+        self.nodes[self.low_idx:self.low_idx + populated] = (
+            self.max_recorded_priority)
+        for level in range(self.depth - 1, -1, -1):
+            start = (2**level) - 1
+            end = (2**(level + 1)) - 1
+            self.nodes[start:end] = (
+                self.nodes[2 * start + 1:2 * end + 1:2] +
+                self.nodes[2 * start + 2:2 * end + 2:2])
 
     def set(self, node_index, value):
         """Sets the value of a leaf node and updates internal nodes accordingly.
