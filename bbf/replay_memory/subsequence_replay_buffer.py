@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Compact prioritized replay for fixed-model, phase-local TD horizons."""
+"""Compact prioritized replay for scheduled n-step TD targets."""
 
 import collections
 
@@ -34,8 +34,8 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
     stacked states when sampled. A batch contains a fixed-length state/action/
     reward sequence for SPR and the world model, but only one n-step return,
     discount, terminal, and endpoint state for the root TD target. The TD
-    horizon is selected per sample call, so switching between horizons 10 and
-    1 does not change any output shape.
+    horizon and gamma are selected per sample call, without changing any output
+    shape.
     """
 
     def __init__(
@@ -47,7 +47,6 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
             update_horizon=10,
             subseq_len=1,
             n_envs=1,
-            gamma=0.997,
             max_sample_attempts=1000,
             observation_dtype=np.uint8,
             terminal_dtype=np.uint8,
@@ -64,7 +63,6 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
         update_horizon = int(update_horizon)
         subseq_len = int(subseq_len)
         n_envs = int(n_envs)
-        gamma = float(gamma)
         if n_envs < 1:
             raise ValueError('n_envs must be positive, got {}'.format(n_envs))
         if stack_size < 1:
@@ -79,10 +77,6 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
         if subseq_len < 1:
             raise ValueError(
                 'subseq_len must be positive, got {}'.format(subseq_len))
-        if not np.isfinite(gamma) or gamma < 0.0 or gamma >= 1.0:
-            raise ValueError('gamma must be finite and in [0, 1), got {}'.format(
-                gamma))
-
         replay_length = replay_capacity // n_envs
         required_future = max(update_horizon, subseq_len - 1)
         minimum_replay_length = stack_size + required_future
@@ -105,9 +99,6 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
         self._batch_size = batch_size
         self._update_horizon = update_horizon
         self._subseq_len = subseq_len
-        self._discount_powers = np.power(
-            np.float32(gamma), np.arange(update_horizon + 1),
-        ).astype(np.float32)
         self._max_sample_attempts = int(max_sample_attempts)
         self._n_envs = n_envs
         self._replay_length = replay_length
@@ -115,9 +106,9 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
 
         logging.info(
             'Creating compact prioritized replay: capacity=%s, n_envs=%s, '
-            'batch=%s, subseq_len=%s, max_horizon=%s, gamma=%s',
+            'batch=%s, subseq_len=%s, max_horizon=%s',
             self._replay_capacity, n_envs, batch_size, subseq_len,
-            update_horizon, gamma)
+            update_horizon)
 
         self._store = {}
         for element in self.get_storage_signature():
@@ -353,7 +344,8 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
                                 rng,
                                 batch_size=None,
                                 indices=None,
-                                update_horizon=None):
+                                update_horizon=None,
+                                gamma=None):
         """Returns compact model sequences and one root n-step TD transition."""
         self._rng = rng
         batch_size = self._batch_size if batch_size is None else int(batch_size)
@@ -363,6 +355,12 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
             raise ValueError(
                 'update_horizon must be in [1, {}], got {}.'.format(
                     self._update_horizon, update_horizon))
+        if gamma is None:
+            raise ValueError('gamma must be supplied for every replay sample.')
+        gamma = float(gamma)
+        if not np.isfinite(gamma) or gamma < 0.0 or gamma >= 1.0:
+            raise ValueError(
+                'gamma must be finite and in [0, 1), got {}.'.format(gamma))
 
         if indices is None:
             root_t, root_b = self.sample_index_batch(
@@ -419,7 +417,9 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
         if update_horizon > 1:
             alive[1:] = np.cumprod(
                 1.0 - trajectory_terminals[:-1].astype(np.float32), axis=0)
-        powers = self._discount_powers[:update_horizon + 1]
+        powers = np.power(
+            np.float32(gamma), np.arange(update_horizon + 1),
+        ).astype(np.float32)
         reward_weights = alive * powers[:update_horizon, None]
         trajectory_rewards = self._store['reward'][
             stored_trajectory_t, trajectory_b]

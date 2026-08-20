@@ -1,6 +1,7 @@
-# The sole supported BBF experiment: fixed H=10 for the first 10,000
-# cycle-local gradient updates, then fixed H=1. Horizon, gamma, bootstrap,
-# priority metric, and switch-reset behavior are hard-coded in spr_agent.py.
+# The sole supported BBF experiment: exponential H=10 -> 1 and
+# gamma=.97 -> .997 over 20,000 cycle-local gradient updates, then fixed at
+# H=1/gamma=.997. The schedule, bootstrap, and priority metric are hard-coded
+# in spr_agent.py. There is no priority reset at the schedule endpoint.
 import bbf.spr_networks
 import bbf.agents.spr_agent
 import bbf.replay_memory.subsequence_replay_buffer
@@ -14,7 +15,7 @@ BBFAgent.batches_to_group = 2
 BBFAgent.replay_ratio = 64
 BBFAgent.data_augmentation = True
 
-# Successful shrink-and-perturb resets restart the H=10 phase and uniformize
+# Successful shrink-and-perturb resets restart the schedules and uniformize
 # replay priorities.
 BBFAgent.reset_every = 20_000
 BBFAgent.no_resets_after = 100_000
@@ -33,6 +34,7 @@ BBFAgent.imag_horizon = %MODEL_HORIZON
 BBFAgent.imag_actor_weight = 0.1
 BBFAgent.imag_value_weight = 0.05
 BBFAgent.imag_value_trust = None
+# None makes imagination follow the scheduled critic gamma.
 BBFAgent.imag_discount = None
 BBFAgent.imag_lambda = 0.95
 BBFAgent.imag_warmup = 2_000

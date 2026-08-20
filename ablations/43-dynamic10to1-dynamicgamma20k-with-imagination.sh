@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
 set -ex
 
-# The only supported TD schedule is cycle-local:
-#   * updates [0, 10_000): fixed H=10 C51 target;
-#   * update 10_000: reset replay priorities before sampling the first H=1 batch;
-#   * updates [10_000, infinity): fixed H=1 C51 target.
-# Both phases use gamma=0.997 and exact online-policy mixtures at the target
-# endpoint. Every successful shrink-and-perturb reset starts a new cycle.
+# The only supported TD schedule is cycle-local. For
+# p=clip(cycle_gradient_updates/20_000, 0, 1):
+#   H=round(10 * 0.1^p)
+#   gamma=1 - 0.03 * 0.1^p
+# Thus the schedule starts at H=10/gamma=.97 and stays at H=1/gamma=.997
+# after 20,000 gradient updates. There is no replay-priority reset at 20k.
+# Every successful shrink-and-perturb reset uniformizes priorities and restarts
+# the schedule. The C51 endpoint remains an exact online-policy mixture.
 #
 # Usage:
-#   ARM=E bash ablations/42-nstep10-first10k-then-nstep1-with-imagination.sh
+#   ARM=E bash ablations/43-dynamic10to1-dynamicgamma20k-with-imagination.sh
 #   ARM=F GAMES="Kangaroo Asterix" GPU=1 \
-#     bash ablations/42-nstep10-first10k-then-nstep1-with-imagination.sh
+#     bash ablations/43-dynamic10to1-dynamicgamma20k-with-imagination.sh
 cd "$(dirname "$0")/.."
 GAMES=${GAMES:-"Kangaroo Asterix"}
 GPU=${GPU:-0}
 ARM=${ARM:-E}
 
 case "$ARM" in
-E) RUN=${RUN:-213} ;;
-F) RUN=${RUN:-214} ;;
+E) RUN=${RUN:-215} ;;
+F) RUN=${RUN:-216} ;;
 *)
 	echo "ARM must be E or F (paired run-ID selectors)" >&2
 	exit 1

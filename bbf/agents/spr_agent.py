@@ -37,25 +37,30 @@ RESET_OPTIMIZER_KEYS_TO_COPY = (
     "continue_head",
 )
 
-# This branch intentionally supports one TD schedule only.  Keep these values
+# This branch intentionally supports one TD schedule only. Keep these values
 # in code so an obsolete Gin binding cannot silently change the experiment.
-TD_GAMMA = 0.997
-WARMUP_TD_HORIZON = 10
-POST_WARMUP_TD_HORIZON = 1
-TARGET_SWITCH_GRAD_UPDATES = 10_000
+INITIAL_TD_HORIZON = 10
+FINAL_TD_HORIZON = 1
+INITIAL_TD_GAMMA = 0.97
+FINAL_TD_GAMMA = 0.997
+TD_SCHEDULE_GRAD_UPDATES = 20_000
 DELTA_PRIORITY_EPSILON = 1e-6
 
 
-def td_horizon(cycle_grad_steps):
-    """Returns the sole supported cycle-local TD horizon."""
-    return (WARMUP_TD_HORIZON
-            if int(cycle_grad_steps) < TARGET_SWITCH_GRAD_UPDATES else
-            POST_WARMUP_TD_HORIZON)
+def td_schedule(cycle_grad_steps):
+    """Returns the historical exponential horizon/gamma schedule.
 
-
-def priority_reset_due(cycle_grad_steps):
-    """Whether the next batch is the first one-step batch of this cycle."""
-    return int(cycle_grad_steps) == TARGET_SWITCH_GRAD_UPDATES
+    The cycle begins at H=10 and gamma=.97. Both schedules anneal over 20,000
+    gradient updates; after that they remain at H=1 and gamma=.997.
+    """
+    progress = np.clip(
+        float(cycle_grad_steps) / TD_SCHEDULE_GRAD_UPDATES, 0.0, 1.0)
+    decay = 0.1 ** progress
+    horizon = int(np.round(INITIAL_TD_HORIZON * decay))
+    horizon = int(np.clip(horizon, FINAL_TD_HORIZON, INITIAL_TD_HORIZON))
+    gamma = 1.0 - (1.0 - INITIAL_TD_GAMMA) * decay
+    gamma = float(np.clip(gamma, INITIAL_TD_GAMMA, FINAL_TD_GAMMA))
+    return horizon, gamma
 
 
 def project_distribution(supports, weights, target_support):
@@ -658,10 +663,9 @@ def train(
             rng=rng1,
             data_augmentation=data_augmentation,
             dtype=dtype)
-        # Horizon is the only phase-dependent part of the target. Replay has
-        # already selected S_H and accumulated its root return. In both phases,
-        # the online policy sees an unaugmented S_H and the target critic an
-        # independently augmented S_H.
+        # Replay has already applied the current horizon and gamma, selected
+        # S_H, and accumulated its root return. The online policy sees an
+        # unaugmented S_H and the target critic an independently augmented S_H.
         endpoint_policy_states = spr_networks.process_inputs(
             raw_next_states,
             data_augmentation=False,
@@ -1272,7 +1276,7 @@ class BBFAgent(JaxDQNAgent):
         # target critic's estimate for the taken action.
         self.imag_value_trust = (None if imag_value_trust is None else
                                  float(imag_value_trust))
-        # None follows the fixed TD discount; a float overrides it.
+        # None follows the scheduled TD discount; a float overrides it.
         self.imag_discount = (None if imag_discount is None else
                               float(imag_discount))
         self.imag_lambda = float(imag_lambda)
@@ -1421,13 +1425,12 @@ class BBFAgent(JaxDQNAgent):
 
     def _build_replay_buffer(self):
         # Replay returns the six-step model sequence plus one root TD endpoint.
-        # It supports exactly the two phase horizons up to the fixed maximum 10.
+        # Its compact output shape is fixed while H and gamma are scheduled.
         subseq_len = self._jumps + 1
         prioritized_buffer = subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
             observation_shape=self.observation_shape,
             stack_size=self.stack_size,
-            update_horizon=WARMUP_TD_HORIZON,
-            gamma=TD_GAMMA,
+            update_horizon=INITIAL_TD_HORIZON,
             subseq_len=subseq_len,
             batch_size=self._batch_size,
             observation_dtype=self.observation_dtype,
@@ -1462,12 +1465,12 @@ class BBFAgent(JaxDQNAgent):
         self._batches_to_group = min(self._batches_to_group,
                                      self._num_updates_per_train_step)
         assert self._num_updates_per_train_step % self._batches_to_group == 0
-        if TARGET_SWITCH_GRAD_UPDATES % self._batches_to_group:
+        if TD_SCHEDULE_GRAD_UPDATES % self._batches_to_group:
             raise ValueError(
-                "TARGET_SWITCH_GRAD_UPDATES ({}) must be divisible by "
-                "the effective batches_to_group ({}) so one grouped JAX "
-                "call cannot straddle the target switch.".format(
-                    TARGET_SWITCH_GRAD_UPDATES, self._batches_to_group))
+                "TD_SCHEDULE_GRAD_UPDATES ({}) must be divisible by the "
+                "effective batches_to_group ({}) so the schedule reaches its "
+                "endpoint between grouped JAX calls.".format(
+                    TD_SCHEDULE_GRAD_UPDATES, self._batches_to_group))
         self._num_updates_per_train_step = int(
             max(1, self._num_updates_per_train_step / self._batches_to_group))
 
@@ -1487,11 +1490,13 @@ class BBFAgent(JaxDQNAgent):
 
     def _sample_replay_batch(self, replay_rng):
         batch_size = self._batch_size * self._batches_to_group
+        update_horizon, gamma = td_schedule(self.cycle_grad_steps)
         types = self._replay.get_transition_elements(batch_size=batch_size)
         samples = self._replay.sample_transition_batch(
             replay_rng,
             batch_size=batch_size,
-            update_horizon=td_horizon(self.cycle_grad_steps),
+            update_horizon=update_horizon,
+            gamma=gamma,
         )
         replay_elements = collections.OrderedDict()
         for element, element_type in zip(samples, types):
@@ -1545,21 +1550,14 @@ class BBFAgent(JaxDQNAgent):
         )
 
         self.cycle_grad_steps = 0
-        # The reset critic invalidates every old delta score. Restart H=10 from
-        # uniform sampling, with no materialized H=1 batch surviving the reset.
+        # The reset critic invalidates every old delta score. Restart the
+        # H=10/gamma=.97 schedule from uniform sampling, with no materialized
+        # batch surviving the reset.
         self._replay.reset_priorities()
         self._discard_pending_replay_sample()
 
     def _training_step_update(self):
         """Gradient update during every training step."""
-        if priority_reset_due(self.cycle_grad_steps):
-            logging.info(
-                "\t Resetting replay priorities at the H=10 to H=1 "
-                "target switch (cycle gradient step %s).",
-                self.cycle_grad_steps)
-            self._replay.reset_priorities()
-            self._discard_pending_replay_sample()
-
         if not hasattr(self, "replay_elements"):
             self.replay_elements = self._sample_replay_batch(
                 self._next_replay_rng())
@@ -1582,17 +1580,15 @@ class BBFAgent(JaxDQNAgent):
         imag_actor_mult = self.imag_actor_weight * imag_ramp
         imag_value_mult = self.imag_value_weight * imag_ramp
 
-        imag_discount = (TD_GAMMA if self.imag_discount is None else
+        _, scheduled_gamma = td_schedule(self.cycle_grad_steps)
+        imag_discount = (scheduled_gamma if self.imag_discount is None else
                          self.imag_discount)
 
         self._rng, train_rng = jax.random.split(self._rng)
-        next_cycle_grad_steps = (
-            self.cycle_grad_steps + self._batches_to_group)
         # Prepare the tiny replay key before dispatching GPU work. Otherwise a
         # key split requested after train_fn can queue behind that work and
         # serialize the intended CPU/GPU overlap.
-        lookahead_rng = (None if priority_reset_due(next_cycle_grad_steps)
-                         else self._next_replay_rng())
+        lookahead_rng = self._next_replay_rng()
         (
             new_online_params,
             new_target_params,
@@ -1649,17 +1645,14 @@ class BBFAgent(JaxDQNAgent):
         # Assemble the next group while the dispatched accelerator work can
         # still be running.  Sampling happens before this group's priority
         # writeback, intentionally introducing one group of ordinary PER lag.
-        # Never queue across the target switch: the next call must uniformize
-        # priorities and draw a fresh H=1 batch.
-        if lookahead_rng is not None:
-            self.replay_elements = self._sample_replay_batch(lookahead_rng)
-            self.replay_mean_priority = float(self._replay.mean_priority())
-        else:
-            self._discard_pending_replay_sample()
+        # The lookahead uses the next group's schedule, including across the
+        # smooth 20k endpoint; there is no target-boundary reset or flush.
+        self.replay_elements = self._sample_replay_batch(lookahead_rng)
+        self.replay_mean_priority = float(self._replay.mean_priority())
 
         self.imag_return_ema = np.asarray(new_return_ema)
 
-        # Store alpha=.5 delta priorities for this phase's C51 target.
+        # Store alpha=.5 delta priorities for the current scheduled C51 target.
         indices = np.reshape(np.asarray(indices), (-1,))
         priority_loss = np.reshape(
             np.asarray(aux_losses["PriorityLoss"]), (-1))
