@@ -269,6 +269,20 @@ def retrace_priority_reset_due(enabled, reset_on_target_switch,
                 int(cycle_grad_steps) == int(warmup_n_step_updates))
 
 
+def imagination_training_scale(cycle_grad_steps, imag_warmup, ramp=True):
+    """Returns the cycle-local multiplier for imagined actor/value losses."""
+    cycle_grad_steps = int(cycle_grad_steps)
+    imag_warmup = int(imag_warmup)
+    if not ramp:
+        return float(cycle_grad_steps >= imag_warmup)
+    return float(
+        np.clip(
+            (cycle_grad_steps - imag_warmup) / max(1, imag_warmup),
+            0.0,
+            1.0,
+        ))
+
+
 def n_step_lower_bound_target(rewards, terminals, bootstrap_value, gamma):
     """Returns a terminal-truncated scalar n-step target.
 
@@ -680,7 +694,7 @@ def validate_retrace(enabled, expected_one_step_backup, update_horizon,
                      min_gamma, cycle_steps, distributional,
                      warmup_n_step_updates=0, warmup_n_step_horizon=10,
                      warmup_n_step_final_horizon=None,
-                     warmup_min_gamma=None):
+                     warmup_min_gamma=None, warmup_gamma=None):
     """Validates the raw-transition and optional warmup Retrace contract."""
     warmup_n_step_updates = int(warmup_n_step_updates)
     warmup_n_step_horizon = int(warmup_n_step_horizon)
@@ -689,6 +703,7 @@ def validate_retrace(enabled, expected_one_step_backup, update_horizon,
         int(warmup_n_step_final_horizon))
     warmup_min_gamma = (None if warmup_min_gamma is None else
                         float(warmup_min_gamma))
+    warmup_gamma = (None if warmup_gamma is None else float(warmup_gamma))
     if warmup_n_step_updates < 0:
         raise ValueError(
             "retrace_warmup_n_step_updates must be nonnegative, got {}."
@@ -696,7 +711,7 @@ def validate_retrace(enabled, expected_one_step_backup, update_horizon,
     if not enabled:
         if (warmup_n_step_updates or
                 warmup_n_step_final_horizon != warmup_n_step_horizon or
-                warmup_min_gamma is not None):
+                warmup_min_gamma is not None or warmup_gamma is not None):
             raise ValueError(
                 "Retrace warmup settings require retrace=True.")
         return
@@ -713,12 +728,12 @@ def validate_retrace(enabled, expected_one_step_backup, update_horizon,
             "retrace_warmup_n_step_final_horizon ({}) must not exceed the "
             "initial horizon ({}).".format(warmup_n_step_final_horizon,
                                            warmup_n_step_horizon))
-    dynamic_warmup = (
+    nondefault_warmup = (
         warmup_n_step_final_horizon != warmup_n_step_horizon or
-        warmup_min_gamma is not None)
-    if dynamic_warmup and warmup_n_step_updates == 0:
+        warmup_min_gamma is not None or warmup_gamma is not None)
+    if nondefault_warmup and warmup_n_step_updates == 0:
         raise ValueError(
-            "Dynamic Retrace warmup settings require "
+            "Non-default Retrace warmup settings require "
             "retrace_warmup_n_step_updates > 0.")
     if (warmup_min_gamma is not None and
             (not np.isfinite(warmup_min_gamma) or
@@ -726,6 +741,17 @@ def validate_retrace(enabled, expected_one_step_backup, update_horizon,
         raise ValueError(
             "retrace_warmup_min_gamma must be finite and in [0, 1), got {}."
             .format(warmup_min_gamma))
+    if (warmup_gamma is not None and
+            (not np.isfinite(warmup_gamma) or
+             not 0.0 <= warmup_gamma < 1.0)):
+        raise ValueError(
+            "retrace_warmup_gamma must be finite and in [0, 1), got {}."
+            .format(warmup_gamma))
+    if warmup_gamma is not None and warmup_min_gamma is not None:
+        raise ValueError(
+            "retrace_warmup_gamma and retrace_warmup_min_gamma are mutually "
+            "exclusive; use the former for a fixed warmup discount or the "
+            "latter for an annealed warmup discount.")
 
     update_horizon = int(update_horizon)
     max_update_horizon = (update_horizon if max_update_horizon is None else
@@ -2333,6 +2359,8 @@ class BBFAgent(JaxDQNAgent):
         seed=None,
         log_every=None,
         explore_end_steps=None,
+        retrace_warmup_gamma=None,
+        imag_warmup_ramp=True,
     ):
         logging.info(
             "Creating %s agent with the following parameters:",
@@ -2373,6 +2401,9 @@ class BBFAgent(JaxDQNAgent):
         self.retrace_warmup_min_gamma = (
             None if retrace_warmup_min_gamma is None else
             float(retrace_warmup_min_gamma))
+        self.retrace_warmup_gamma = (
+            None if retrace_warmup_gamma is None else
+            float(retrace_warmup_gamma))
         self.retrace_warmup_delta_based_priority = bool(
             retrace_warmup_delta_based_priority)
         self.retrace_reset_priorities_on_target_switch = bool(
@@ -2389,7 +2420,8 @@ class BBFAgent(JaxDQNAgent):
                          self.retrace_warmup_n_step_updates,
                          self.retrace_warmup_n_step_horizon,
                          self.retrace_warmup_n_step_final_horizon,
-                         self.retrace_warmup_min_gamma)
+                         self.retrace_warmup_min_gamma,
+                         self.retrace_warmup_gamma)
         self.td_lower_bound_weight = float(td_lower_bound_weight)
         self.td_lower_bound = self.td_lower_bound_weight > 0.0
         self.td_lower_bound_horizon = int(td_lower_bound_horizon)
@@ -2519,6 +2551,7 @@ class BBFAgent(JaxDQNAgent):
                               float(imag_discount))
         self.imag_lambda = float(imag_lambda)
         self.imag_warmup = int(imag_warmup)
+        self.imag_warmup_ramp = bool(imag_warmup_ramp)
         # None -> imagination entropy follows the decaying x_ent_coef
         # schedule (original behavior); a float decouples it. 3e-4 is
         # DreamerV3's eta, calibrated for advantages normalized by the same
@@ -2564,6 +2597,8 @@ class BBFAgent(JaxDQNAgent):
             self.retrace_warmup_n_step_final_horizon))
         print(' self.retrace_warmup_min_gamma: {}'.format(
             self.retrace_warmup_min_gamma))
+        print(' self.retrace_warmup_gamma: {}'.format(
+            self.retrace_warmup_gamma))
         print(' self.retrace_warmup_delta_based_priority: {}'.format(
             self.retrace_warmup_delta_based_priority))
         print(' self.retrace_reset_priorities_on_target_switch: {}'.format(
@@ -2653,7 +2688,10 @@ class BBFAgent(JaxDQNAgent):
                                                                self.gamma,
                                                                reverse=True)
 
-        if self.retrace_warmup_min_gamma is None:
+        if self.retrace_warmup_gamma is not None:
+            self.retrace_warmup_gamma_scheduler = (
+                lambda x: self.retrace_warmup_gamma)
+        elif self.retrace_warmup_min_gamma is None:
             self.retrace_warmup_gamma_scheduler = lambda x: self.gamma
         else:
             final_gamma = float(self.gamma)
@@ -2881,6 +2919,22 @@ class BBFAgent(JaxDQNAgent):
                 "the effective batches_to_group ({}) so one grouped JAX "
                 "call cannot straddle the target switch.".format(
                     warmup_updates, self._batches_to_group))
+        hard_imagination_gate = (
+            not getattr(self, "imag_warmup_ramp", True) and
+            getattr(self, "imag_horizon", 0) > 0 and
+            (getattr(self, "imag_actor_weight", 0.0) != 0.0 or
+             getattr(self, "imag_value_weight", 0.0) != 0.0))
+        if hard_imagination_gate:
+            if self.imag_warmup < 0:
+                raise ValueError(
+                    "An abrupt imagination gate requires imag_warmup to be "
+                    "nonnegative, got {}.".format(self.imag_warmup))
+            if self.imag_warmup % self._batches_to_group:
+                raise ValueError(
+                    "imag_warmup ({}) must be divisible by the effective "
+                    "batches_to_group ({}) so one grouped JAX call cannot "
+                    "straddle the abrupt imagination boundary.".format(
+                        self.imag_warmup, self._batches_to_group))
         self._num_updates_per_train_step = int(
             max(1, self._num_updates_per_train_step / self._batches_to_group))
 
@@ -3123,12 +3177,14 @@ class BBFAgent(JaxDQNAgent):
             # debug - end
 
         # Imagination is gated off right after each shrink-and-perturb reset
-        # (the Q target the imagined values come from is also reset), then
-        # ramped back in linearly over another imag_warmup gradient steps.
-        imag_ramp = float(
-            np.clip(
-                (self.cycle_grad_steps - self.imag_warmup) /
-                max(1, self.imag_warmup), 0.0, 1.0))
+        # (the Q target the imagined values come from is also reset). The
+        # historical mode ramps it back in over another imag_warmup updates;
+        # the opt-in hard gate turns it on at full weight at that boundary.
+        imag_ramp = imagination_training_scale(
+            self.cycle_grad_steps,
+            self.imag_warmup,
+            ramp=getattr(self, "imag_warmup_ramp", True),
+        )
         imag_actor_mult = self.imag_actor_weight * imag_ramp
         imag_value_mult = self.imag_value_weight * imag_ramp
 

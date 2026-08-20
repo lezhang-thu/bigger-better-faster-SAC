@@ -35,12 +35,15 @@ BBFAgent.retrace_lambda = 1.0
 # Optional cycle-local target warmup for Retrace experiments. For the first N
 # gradient updates after initialization and every successful weight reset, the
 # critic uses an uncorrected n-step C51 target reconstructed from the same raw
-# rows. By default its horizon and gamma are fixed. Setting a final horizon
-# and/or minimum gamma anneals them over those N updates with the same schedules
-# used by original BBF, then active Retrace uses retrace_horizon and the final
-# JaxDQNAgent.gamma. The warmup uses Retrace's total-variation priority by
-# default. Its opt-in delta priority uses the projected C51 expectation error;
-# the corresponding target-switch reset prevents those leaves from mixing with
+# rows. By default its gamma matches JaxDQNAgent.gamma and its horizon stays at
+# retrace_warmup_n_step_horizon. A fixed warmup gamma can override the final
+# gamma for this phase only. Alternatively, setting a final horizon and/or
+# minimum gamma anneals them over those N updates with the same schedules used
+# by original BBF, then active Retrace uses retrace_horizon and the final
+# JaxDQNAgent.gamma. The fixed and minimum warmup gamma options are mutually
+# exclusive. The warmup uses Retrace's total-variation priority by default. Its
+# opt-in delta priority uses the projected C51 expectation error; the
+# corresponding target-switch reset prevents those leaves from mixing with
 # active Retrace's TV priorities. Beta=1 critic correction and behavior-policy
 # logging remain active throughout. Zero warmup updates preserves immediate
 # Retrace.
@@ -48,6 +51,7 @@ BBFAgent.retrace_warmup_n_step_updates = 0
 BBFAgent.retrace_warmup_n_step_horizon = 10
 BBFAgent.retrace_warmup_n_step_final_horizon = None
 BBFAgent.retrace_warmup_min_gamma = None
+BBFAgent.retrace_warmup_gamma = None
 BBFAgent.retrace_warmup_delta_based_priority = False
 BBFAgent.retrace_reset_priorities_on_target_switch = False
 # Safer one-step + n-step lower-bound TD is independently opt-in. The replay
@@ -135,7 +139,12 @@ BBFAgent.imag_value_weight = 0.05
 # Logs ImagTrustClip (fraction of targets hitting the bound).
 BBFAgent.imag_value_trust = None
 BBFAgent.imag_lambda = 0.95
+# Cycle-local imagination gate. The historical mode is off through
+# imag_warmup, then ramps linearly to full weight over another imag_warmup
+# updates. False instead makes it jump directly from zero to full weight at
+# imag_warmup. Successful weight resets restart either schedule.
 BBFAgent.imag_warmup = 2000
+BBFAgent.imag_warmup_ramp = True
 # Imagination entropy: keep it coupled to the annealed x_ent_coef
 # (0.01 -> 0 over the first 80k env steps). Decoupling was tried twice and
 # failed with a clean dose-response on Pong (refs 17.41-20.41): fixed 3e-4
