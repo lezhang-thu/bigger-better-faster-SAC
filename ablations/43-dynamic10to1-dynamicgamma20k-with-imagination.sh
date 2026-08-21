@@ -9,24 +9,10 @@ set -ex
 # after 20,000 gradient updates. There is no replay-priority reset at 20k.
 # Every successful shrink-and-perturb reset uniformizes priorities and restarts
 # the schedule. The C51 endpoint remains an exact online-policy mixture.
-#
-# Usage:
-#   ARM=E bash ablations/43-dynamic10to1-dynamicgamma20k-with-imagination.sh
-#   ARM=F GAMES="Kangaroo Asterix" GPU=1 \
-#     bash ablations/43-dynamic10to1-dynamicgamma20k-with-imagination.sh
 cd "$(dirname "$0")/.."
 GAMES=${GAMES:-"Kangaroo Asterix"}
 GPU=${GPU:-0}
-ARM=${ARM:-E}
-
-case "$ARM" in
-E) RUN=${RUN:-215} ;;
-F) RUN=${RUN:-216} ;;
-*)
-	echo "ARM must be E or F (paired run-ID selectors)" >&2
-	exit 1
-	;;
-esac
+RUN=${RUN:-1}
 
 for game_name in $GAMES; do
 	CUDA_VISIBLE_DEVICES=$GPU python -m bbf.train \
