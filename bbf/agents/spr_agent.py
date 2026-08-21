@@ -36,6 +36,16 @@ RESET_OPTIMIZER_KEYS_TO_COPY = (
     "reward_head",
     "continue_head",
 )
+# Only these target modules are consumed by critic bootstraps, SPR targets,
+# imagined values, or action selection. The remaining target-side model and
+# prediction heads are never read.
+TARGET_UPDATE_PARAMETER_KEYS = (
+    "encoder",
+    "projection",
+    "head",
+    "policy_projection",
+    "policy",
+)
 
 # This branch intentionally supports one TD schedule only. Keep these values
 # in code so an obsolete Gin binding cannot silently change the experiment.
@@ -45,6 +55,7 @@ INITIAL_TD_GAMMA = 0.97
 FINAL_TD_GAMMA = 0.997
 TD_SCHEDULE_GRAD_UPDATES = 20_000
 DELTA_PRIORITY_EPSILON = 1e-6
+EVAL_ACTION_BATCH_BUCKET = 8
 
 
 def td_schedule(cycle_grad_steps):
@@ -559,6 +570,7 @@ train_static_argnames = [
     'reward_readout',
     'continue_readout',
     'imag_horizon',
+    'target_update_every',
 ]
 
 
@@ -810,8 +822,14 @@ def train(
                         feature,
                         method=network_def.continue_from_feature)
 
-                pred_reward_roll = jax.vmap(jax.vmap(reward_fn))(reward_reps)
-                pred_reward_real = jax.vmap(jax.vmap(reward_fn))(real_reps)
+                # Both feature sets use the same reward head. Joining their
+                # time axes turns two large head invocations into one batched
+                # matrix multiply, then restores the original tensors.
+                reward_features = jnp.concatenate(
+                    (reward_reps, real_reps), axis=1)
+                pred_rewards = jax.vmap(jax.vmap(reward_fn))(reward_features)
+                pred_reward_roll, pred_reward_real = jnp.split(
+                    pred_rewards, 2, axis=1)
                 # Real frames past a terminal belong to the next episode.
                 real_mask = model_mask * continue_targets
                 reward_loss = (priority_weighted_masked_mean(
@@ -1031,17 +1049,20 @@ def train(
 
         target_update_step = functools.partial(
             interpolate_weights,
-            keys=None,
+            keys=TARGET_UPDATE_PARAMETER_KEYS,
             old_weight=1 - target_update_tau,
             new_weight=target_update_tau,
         )
-        target_params = jax.lax.cond(
-            step % target_update_every == 0,
-            target_update_step,
-            lambda old, new: old,
-            target_params,
-            online_params,
-        )
+        if target_update_every == 1:
+            target_params = target_update_step(target_params, online_params)
+        else:
+            target_params = jax.lax.cond(
+                step % target_update_every == 0,
+                target_update_step,
+                lambda old, new: old,
+                target_params,
+                online_params,
+            )
 
         return (
             (
@@ -1335,8 +1356,12 @@ class BBFAgent(JaxDQNAgent):
 
         self.set_replay_settings()
 
+        # These recurrent trees are replaced by every call. Donation lets XLA
+        # reuse their accelerator buffers for the corresponding outputs rather
+        # than allocating another full params/target/Adam state.
         self.train_fn = jax.jit(train,
                                 static_argnames=train_static_argnames,
+                                donate_argnums=(1, 2, 4),
                                 device=jax.local_devices()[0])
 
     def _build_networks_and_optimizer(self):
@@ -1579,6 +1604,16 @@ class BBFAgent(JaxDQNAgent):
                 max(1, self.imag_warmup), 0.0, 1.0))
         imag_actor_mult = self.imag_actor_weight * imag_ramp
         imag_value_mult = self.imag_value_weight * imag_ramp
+        next_grad_steps = self.grad_steps + self._batches_to_group
+        will_log_imagination = (
+            next_grad_steps % 500 < self._batches_to_group)
+        # During reset warmup both imagination losses are multiplied by zero.
+        # Use the cached no-imagination executable except on metric-reporting
+        # groups, where retaining the rollout preserves the existing logs.
+        train_imag_horizon = (
+            self.imag_horizon
+            if (imag_actor_mult != 0.0 or imag_value_mult != 0.0 or
+                will_log_imagination) else 0)
 
         _, scheduled_gamma = td_schedule(self.cycle_grad_steps)
         imag_discount = (scheduled_gamma if self.imag_discount is None else
@@ -1628,7 +1663,7 @@ class BBFAgent(JaxDQNAgent):
             self.continue_weight,
             self.reward_readout,
             self.continue_readout,
-            self.imag_horizon,
+            train_imag_horizon,
             imag_actor_mult,
             imag_value_mult,
             imag_discount,
@@ -1790,13 +1825,29 @@ class BBFAgent(JaxDQNAgent):
                 self.num_actions,
             )
             return action
+        sample_count = int(state.shape[0])
+        padded_count = sample_count
+        if eval_mode:
+            # One-to-one evaluation removes environments as they finish. A
+            # separate network executable for every live count otherwise
+            # causes dozens of expensive recompilations. Coarse padding caps
+            # those variants while adding at most seven dummy observations.
+            padded_count = (
+                (sample_count + EVAL_ACTION_BATCH_BUCKET - 1) //
+                EVAL_ACTION_BATCH_BUCKET * EVAL_ACTION_BATCH_BUCKET)
+        if padded_count > sample_count:
+            state = np.pad(
+                state,
+                ((0, padded_count - sample_count),) +
+                ((0, 0),) * (state.ndim - 1),
+            )
         self._rng, action = select_action(
             self.network_def,
             self.target_network_params,
             state,
             self._rng,
         )
-        return action
+        return action[:sample_count]
 
     def step(self):
         """Records the most recent transition, returns the agent's next action, and trains if appropriate.

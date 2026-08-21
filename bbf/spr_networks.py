@@ -384,6 +384,7 @@ class TransitionModel(nn.Module):
     latent_dim: int
     renormalize: bool
     hidden_layers: int = 1
+    unroll: int = 1
     dtype: Dtype = jnp.float32
     initializer: Any = nn.initializers.xavier_uniform()
 
@@ -395,6 +396,7 @@ class TransitionModel(nn.Module):
             out_axes=0,
             variable_broadcast=['params'],
             split_rngs={'params': False},
+            unroll=self.unroll,
         )(
             latent_dim=self.latent_dim,
             num_actions=self.num_actions,
@@ -426,6 +428,7 @@ class RainbowDQNNetwork(nn.Module):
     hidden_dim: int = 512
     width_scale: float = 1.0
     transition_hidden_layers: int = 1
+    transition_unroll: int = 1
     dtype: Dtype = jnp.float32
 
     def setup(self):
@@ -443,6 +446,7 @@ class RainbowDQNNetwork(nn.Module):
             latent_dim=int(latent_dim),
             renormalize=self.renormalize,
             hidden_layers=self.transition_hidden_layers,
+            unroll=self.transition_unroll,
             dtype=self.dtype,
             initializer=initializer,
         )
@@ -569,7 +573,7 @@ class RainbowDQNNetwork(nn.Module):
         key = self.make_rng('action_sample')
         keys = jax.random.split(key, horizon + 1)
         features, actions, log_probs, entropies = [], [], [], []
-        probs, rewards, continues = [], [], []
+        probs = []
         for i in range(horizon + 1):
             feature = jax.lax.stop_gradient(latent.reshape(-1))
             logits = self.policy_logits_from_feature(feature, False)
@@ -582,19 +586,26 @@ class RainbowDQNNetwork(nn.Module):
             log_probs.append(log_prob[action])
             entropies.append(-jnp.sum(prob * log_prob))
             probs.append(prob)
-            rewards.append(self.reward_from_feature(feature))
-            continues.append(jax.nn.sigmoid(self.continue_from_feature(feature)))
 
             latent, _ = self.transition_model(latent, action[None])
             latent = jax.lax.stop_gradient(latent)
+
+        # Reward and continuation predictions do not affect the autoregressive
+        # policy/dynamics rollout. Evaluate each head once over the complete
+        # feature sequence so XLA emits one large batched matrix multiply per
+        # layer instead of one small multiply for every imagined step.
+        features = jnp.stack(features)
+        rewards = jax.vmap(self.reward_from_feature)(features)
+        continues = jax.nn.sigmoid(
+            jax.vmap(self.continue_from_feature)(features))
         return {
-            'features': jnp.stack(features),
+            'features': features,
             'actions': jnp.stack(actions),
             'log_probs': jnp.stack(log_probs),
             'entropies': jnp.stack(entropies),
             'probs': jnp.stack(probs),
-            'rewards': jnp.stack(rewards),
-            'continues': jnp.stack(continues),
+            'rewards': rewards,
+            'continues': continues,
         }
 
     def init_fn(

@@ -243,14 +243,28 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
             self._stack_censor_before(t, b)
             for t, b in zip(indices_t, indices_b)
         ])
-        frame_indices = (np.arange(-self._stack_size + 1, 1)[:, None] +
-                         indices_t[None, :])
-        env_indices = np.broadcast_to(indices_b[None, :], frame_indices.shape)
-        mask = frame_indices >= first_valid[None, :]
-        result = self._store['observation'][
-            frame_indices % self._replay_length, env_indices]
-        mask = mask.reshape(mask.shape + (1,) * (result.ndim - 2))
-        return np.moveaxis(result * mask, 0, -1)
+        frame_indices = (
+            indices_t[:, None] +
+            np.arange(-self._stack_size + 1, 1, dtype=np.int64)[None, :])
+
+        # Fill the final channel-last layout directly. The previous
+        # frame-major gather allocated another full array for `result * mask`
+        # and returned a non-contiguous moveaxis view, which then had to be
+        # packed before transfer to JAX.
+        result = np.empty(
+            (indices_t.size,) + self._observation_shape +
+            (self._stack_size,),
+            dtype=self._observation_dtype,
+        )
+        for stack_index in range(self._stack_size):
+            result[..., stack_index] = self._store['observation'][
+                frame_indices[:, stack_index] % self._replay_length,
+                indices_b,
+            ]
+            censored = frame_indices[:, stack_index] < first_valid
+            if np.any(censored):
+                result[censored, ..., stack_index] = 0
+        return result
 
     def _required_future(self, update_horizon):
         return max(int(update_horizon), self._subseq_len - 1)
@@ -432,8 +446,14 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
         discounts = np.full(
             (batch_size,), powers[update_horizon], dtype=self._reward_dtype)
 
-        endpoint_t = root_t + update_horizon
-        next_states = self._get_stacked_observations(endpoint_t, root_b)
+        if update_horizon < self._subseq_len:
+            # S_H is already part of the fixed model sequence. Copy its view
+            # into a compact transfer buffer instead of gathering four frames
+            # from replay a second time.
+            next_states = np.ascontiguousarray(states[:, update_horizon])
+        else:
+            endpoint_t = root_t + update_horizon
+            next_states = self._get_stacked_observations(endpoint_t, root_b)
         root_indices = self.ravel_indices(
             root_t % self._replay_length, root_b).astype(np.int32)
         priorities = self.get_priority(root_indices)

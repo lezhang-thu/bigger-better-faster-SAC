@@ -26,6 +26,10 @@ BBFAgent.perturb_factor = 0.5
 # The learned-model sequence is six states / five transitions.
 MODEL_HORIZON = 5
 BBFAgent.jumps = %MODEL_HORIZON
+# The transition scan always receives either one step or the full five-step
+# model sequence. Unrolling removes loop overhead from the latter's backward
+# pass without changing the recurrence.
+bbf.spr_networks.RainbowDQNNetwork.transition_unroll = %MODEL_HORIZON
 BBFAgent.spr_weight = 5
 BBFAgent.reward_weight = 1.0
 BBFAgent.continue_weight = 1.0

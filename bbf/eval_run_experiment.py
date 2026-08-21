@@ -160,7 +160,10 @@ def create_atari_environment(game_name=None, sticky_actions=True):
     assert game_name is not None
     game_version = 'v0' if sticky_actions else 'v4'
     full_game_name = '{}NoFrameskip-{}'.format(game_name, game_version)
-    env = gym.make(full_game_name)
+    # AtariEnv materializes its configured observation on every raw step.
+    # Request grayscale directly so it does not build an RGB frame that the
+    # preprocessor immediately discards.
+    env = gym.make(full_game_name, obs_type='grayscale')
     # Strip out the TimeLimit wrapper from Gym, which caps us at 100k frames. We
     # handle this time limit internally instead, which lets us cap at 108k frames
     # (30 minutes). The TimeLimit wrapper also plays poorly with saving and
@@ -261,9 +264,9 @@ class AtariPreprocessing(object):
       observation: numpy array, the initial observation emitted by the
         environment.
     """
-        self.environment.reset()
+        initial_observation, _ = self.environment.reset()
         self.lives = self.ale.lives()
-        self._fetch_grayscale_observation(self.screen_buffer[0])
+        np.copyto(self.screen_buffer[0], initial_observation)
         self.screen_buffer[1].fill(0)
         return self._pool_and_resize()
 
@@ -308,9 +311,8 @@ class AtariPreprocessing(object):
         accumulated_reward = 0.
 
         for time_step in range(self.frame_skip):
-            # We bypass the Gym observation altogether and directly fetch the
-            # grayscale image from the ALE. This is a little faster.
-            _, reward, terminated, truncated, info = self.environment.step(action)
+            raw_observation, reward, terminated, truncated, info = (
+                self.environment.step(action))
             game_over = terminated or truncated
             accumulated_reward += reward
 
@@ -324,7 +326,7 @@ class AtariPreprocessing(object):
             # We max-pool over the last two frames, in grayscale.
             if time_step >= self.frame_skip - 2:
                 t = time_step - (self.frame_skip - 2)
-                self._fetch_grayscale_observation(self.screen_buffer[t])
+                np.copyto(self.screen_buffer[t], raw_observation)
 
             if is_terminal:
                 break

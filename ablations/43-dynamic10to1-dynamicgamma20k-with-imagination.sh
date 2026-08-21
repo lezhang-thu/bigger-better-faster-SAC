@@ -28,18 +28,8 @@ F) RUN=${RUN:-216} ;;
 	;;
 esac
 
-BBF_PYTHON=${BBF_PYTHON:-"/home/amd-7763/.venvs/bbf-rocm714-jax011/bin/python"}
 for game_name in $GAMES; do
-	env \
-		-u LD_LIBRARY_PATH \
-		-u ROCM_PATH \
-		-u HIP_PATH \
-		-u LLVM_PATH \
-		-u HSA_NO_SCRATCH_RECLAIM \
-		ROCR_VISIBLE_DEVICES="$GPU" \
-		ROCPROFILER_QUEUE_INTERPOSITION=0 \
-		DEBUG_HIP_DYNAMIC_QUEUES=0 \
-		"$BBF_PYTHON" -m bbf.train \
+	CUDA_VISIBLE_DEVICES=$GPU python -m bbf.train \
 		--agent=BBF \
 		--gin_files=bbf/configs/BBF-100K.gin \
 		--gin_bindings="DataEfficientAtariRunner.game_name=\"$game_name\"" \
