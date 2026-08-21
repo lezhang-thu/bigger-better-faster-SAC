@@ -61,8 +61,12 @@ def _random_crop(key, img, cropped_shape):
     """Random crop an image."""
     _, width, height = cropped_shape[:-1]
     key_x, key_y = random.split(key, 2)
-    x = random.randint(key_x, shape=(), minval=0, maxval=img.shape[1] - width)
-    y = random.randint(key_y, shape=(), minval=0, maxval=img.shape[2] - height)
+    # randint's upper bound is exclusive. Include the last legal crop origin so
+    # symmetric padding produces symmetric translations.
+    x = random.randint(
+        key_x, shape=(), minval=0, maxval=img.shape[1] - width + 1)
+    y = random.randint(
+        key_y, shape=(), minval=0, maxval=img.shape[2] - height + 1)
     return img[:, x:x + width, y:y + height]
 
 
@@ -78,11 +82,11 @@ def _per_image_random_crop(key, img, cropped_shape):
     x = random.randint(key_x,
                        shape=(batch_size,),
                        minval=0,
-                       maxval=img.shape[1] - width)
+                       maxval=img.shape[1] - width + 1)
     y = random.randint(key_y,
                        shape=(batch_size,),
                        minval=0,
-                       maxval=img.shape[2] - height)
+                       maxval=img.shape[2] - height + 1)
     return jax.vmap(_crop_with_indices, in_axes=(0, 0, 0, None))(img, x, y,
                                                                  cropped_shape)
 
@@ -657,7 +661,10 @@ class RainbowDQNNetwork(nn.Module):
         if do_rollout:
             latent, rollout_reps = self.spr_rollout(spatial_latent, actions)
 
-        probabilities = jnp.squeeze(nn.softmax(logits))
-        q_values = jnp.squeeze(jnp.sum(support * probabilities, axis=-1))
+        # Preserve the action axis even for singleton action spaces. LinearHead
+        # always returns [num_actions, num_atoms], and downstream policy code
+        # relies on q_values being indexed by action.
+        probabilities = nn.softmax(logits)
+        q_values = jnp.sum(support * probabilities, axis=-1)
         return SPROutputType(q_values, logits, probabilities, latent,
                              representation, spatial_latent, rollout_reps)

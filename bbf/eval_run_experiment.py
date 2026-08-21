@@ -237,10 +237,10 @@ class AtariPreprocessing(object):
     def observation_space(self):
         # Return the observation space adjusted to match the shape of the processed
         # observations.
-        return Box(low=0,
-                   high=255,
-                   shape=(self.screen_size, self.screen_size, 1),
-                   dtype=np.uint8)
+        return gym.spaces.Box(low=0,
+                              high=255,
+                              shape=(self.screen_size, self.screen_size, 1),
+                              dtype=np.uint8)
 
     @property
     def action_space(self):
@@ -266,7 +266,8 @@ class AtariPreprocessing(object):
     """
         initial_observation, _ = self.environment.reset()
         self.lives = self.ale.lives()
-        np.copyto(self.screen_buffer[0], initial_observation)
+        self._store_grayscale_observation(initial_observation,
+                                          self.screen_buffer[0])
         self.screen_buffer[1].fill(0)
         return self._pool_and_resize()
 
@@ -294,8 +295,8 @@ class AtariPreprocessing(object):
 
       * If a terminal state (from life loss or episode end) is reached, this may
         execute fewer than self.frame_skip steps in the environment.
-      * Furthermore, in this case the returned observation may not contain valid
-        image data and should be ignored.
+      * The returned observation pools the last one or two frames that were
+        actually executed, so it remains valid when the loop ends early.
 
     Args:
       action: The action to be executed.
@@ -323,10 +324,16 @@ class AtariPreprocessing(object):
             else:
                 is_terminal = game_over
 
-            # We max-pool over the last two frames, in grayscale.
-            if time_step >= self.frame_skip - 2:
-                t = time_step - (self.frame_skip - 2)
-                np.copyto(self.screen_buffer[t], raw_observation)
+            # Keep the last two frames actually executed, not merely the last
+            # two of a nominal full frame-skip. A life loss can stop the loop
+            # early, and the returned observation is used as the next state.
+            buffer_index = 0 if self.frame_skip == 1 else time_step % 2
+            self._store_grayscale_observation(
+                raw_observation, self.screen_buffer[buffer_index])
+            if is_terminal and time_step == 0 and self.frame_skip > 1:
+                # With only one executed frame, duplicate it rather than
+                # max-pooling it with stale pixels from the previous action.
+                np.copyto(self.screen_buffer[1], self.screen_buffer[0])
 
             if is_terminal:
                 break
@@ -336,6 +343,21 @@ class AtariPreprocessing(object):
 
         self.game_over = game_over
         return observation, accumulated_reward, is_terminal, info
+
+    def _store_grayscale_observation(self, observation, output):
+        """Stores a Gym observation as grayscale in ``output``.
+
+        The experiment factory requests grayscale observations directly. Keep
+        AtariPreprocessing usable with ordinary RGB Atari environments too by
+        falling back to ALE's exact grayscale screen in that case.
+        """
+        observation = np.asarray(observation)
+        if observation.ndim == 2:
+            np.copyto(output, observation)
+        elif observation.ndim == 3 and observation.shape[-1] == 1:
+            np.copyto(output, observation[..., 0])
+        else:
+            self._fetch_grayscale_observation(output)
 
     def _fetch_grayscale_observation(self, output):
         """Returns the current observation in grayscale.
@@ -487,11 +509,11 @@ class DataEfficientAtariRunner(Runner):
       sum of
         returns (float), and the number of episodes performed (int).
     """
-        step_count = 0
         num_episodes = 0
         sum_returns = 0.
 
-        (episode_lengths, episode_returns, state, envs) = self._run_parallel(
+        (episode_lengths, episode_returns, phase_steps, state,
+         envs) = self._run_parallel(
             episodes=max_episodes,
             envs=envs,
             one_to_one=one_to_one,
@@ -500,12 +522,11 @@ class DataEfficientAtariRunner(Runner):
             max_steps=steps,
         )
 
+        if run_mode_str == 'train':
+            self.num_steps += phase_steps
+        step_count = phase_steps
         for episode_length, episode_return in zip(episode_lengths,
                                                   episode_returns):
-            if run_mode_str == 'train':
-                # we use one extra frame at the starting
-                self.num_steps += episode_length
-            step_count += episode_length
             sum_returns += episode_return
             num_episodes += 1
             sys.stdout.flush()
@@ -554,7 +575,8 @@ class DataEfficientAtariRunner(Runner):
       resume_state: State tuple to resume.
 
     Returns:
-      The number of steps taken and the total reward.
+      Completed episode lengths, completed episode returns, number of executed
+      environment steps, resumable runner state, and the environments.
     """
         # You can't ask for 200 episodes run one-to-one on 100 envs
         if one_to_one:
@@ -577,16 +599,20 @@ class DataEfficientAtariRunner(Runner):
             cum_lengths = []
         else:
             assert resume_state is not None
-            (new_obses, rewards, terminals, episode_end, cum_rewards,
-             cum_lengths) = (resume_state)
+            (new_obses, rewards, terminals, episode_end, _, _) = resume_state
+            # These lists are phase results, not environment state. Carrying
+            # them across a resume makes every later phase recount old episodes.
+            cum_rewards = []
+            cum_lengths = []
 
         total_steps = 0
         total_episodes = 0
         max_steps = np.inf if max_steps is None else max_steps
         step = 0
 
-        # Keep interacting until we reach a terminal state.
-        while True:
+        # Keep interacting until the requested step/episode cap is reached.
+        while (live_envs and total_steps < max_steps and
+               (episodes is None or total_episodes < episodes)):
             b = 0
             step += 1
             episode_end.fill(0)
@@ -667,14 +693,9 @@ class DataEfficientAtariRunner(Runner):
             self._agent.log_transition(new_obs, actions, rewards, terminals,
                                        episode_end)
 
-            if (not live_envs or
-                (max_steps is not None and total_steps > max_steps) or
-                (episodes is not None and total_episodes >= episodes)):
-                break
-
         state = (new_obses, rewards, terminals, episode_end, cum_rewards,
                  cum_lengths)
-        return cum_lengths, cum_rewards, state, envs
+        return cum_lengths, cum_rewards, total_steps, state, envs
 
     def _run_train_phase(self,):
         """Run training phase.

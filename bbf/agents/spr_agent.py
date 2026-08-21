@@ -755,7 +755,9 @@ def train(
                                  axis_name="batch")(current_state,
                                                     model_actions, use_spr)
             spr_predictions = x.latent
-            q_logits = jnp.squeeze(x.logits)
+            # x.logits is [B, A, N]. An unconditional squeeze drops B when the
+            # configured minibatch size is one and breaks the C51 gather below.
+            q_logits = x.logits
             chosen_action_logits = q_logits[jnp.arange(q_logits.shape[0]),
                                             actions[:, 0]]
             dqn_loss = jax.vmap(softmax_cross_entropy_loss_with_logits)(
@@ -768,20 +770,27 @@ def train(
                 delta_priority_epsilon,
             )
 
-            spr_predictions = spr_predictions.transpose(1, 0, 2)
-            spr_predictions = spr_networks.split_spr_branches(
-                spr_predictions, network_def.hidden_dim)
+            if spr_weight > 0:
+                spr_predictions = spr_predictions.transpose(1, 0, 2)
+                spr_predictions = spr_networks.split_spr_branches(
+                    spr_predictions, network_def.hidden_dim)
 
-            spr_predictions = spr_predictions / jnp.linalg.norm(
-                spr_predictions, 2, -1, keepdims=True)
+                spr_predictions = spr_predictions / jnp.linalg.norm(
+                    spr_predictions, 2, -1, keepdims=True)
 
-            spr_targets = spr_networks.split_spr_branches(
-                spr_targets, network_def.hidden_dim)
-            spr_targets = spr_targets / jnp.linalg.norm(
-                spr_targets, 2, -1, keepdims=True)
-            spr_loss = jnp.power(spr_predictions - spr_targets,
-                                 2).sum((-1, -2))
-            spr_loss = (spr_loss * same_traj_mask.transpose(1, 0)).mean(0) * .5
+                spr_targets = spr_networks.split_spr_branches(
+                    spr_targets, network_def.hidden_dim)
+                spr_targets = spr_targets / jnp.linalg.norm(
+                    spr_targets, 2, -1, keepdims=True)
+                spr_loss = jnp.power(spr_predictions - spr_targets,
+                                     2).sum((-1, -2))
+                spr_loss = (
+                    spr_loss * same_traj_mask.transpose(1, 0)).mean(0) * .5
+            else:
+                # With every auxiliary disabled, init_fn intentionally skips
+                # the transition rollout and x.latent is spatial [B,h,w,c].
+                # There is no SPR objective in that mode.
+                spr_loss = jnp.zeros_like(dqn_loss)
             # Full beta=1 correction is fixed for the real C51 critic. SPR and
             # every other replay-anchored auxiliary retain beta=0.5.
             loss = (td_loss_multipliers * dqn_loss +
@@ -1252,7 +1261,7 @@ class BBFAgent(JaxDQNAgent):
         # We need casting because passing arguments can convert ints to floats
         vmax = float(vmax)
         self._num_atoms = int(num_atoms)
-        vmin = float(vmin) if vmin else -vmax
+        vmin = float(vmin) if vmin is not None else -vmax
         self._support = jnp.linspace(vmin, vmax, self._num_atoms)
         self._data_augmentation = bool(data_augmentation)
         self._replay_ratio = int(replay_ratio)
@@ -1586,7 +1595,9 @@ class BBFAgent(JaxDQNAgent):
         if not hasattr(self, "replay_elements"):
             self.replay_elements = self._sample_replay_batch(
                 self._next_replay_rng())
-            self.replay_mean_priority = float(self._replay.mean_priority())
+            update_horizon, _ = td_schedule(self.cycle_grad_steps)
+            self.replay_mean_priority = float(
+                self._replay.mean_priority(update_horizon=update_horizon))
 
         sampled_priorities = self.replay_elements["priorities"]
         # The real critic uses beta=1; replay-anchored auxiliary and imagined
@@ -1683,7 +1694,9 @@ class BBFAgent(JaxDQNAgent):
         # The lookahead uses the next group's schedule, including across the
         # smooth 20k endpoint; there is no target-boundary reset or flush.
         self.replay_elements = self._sample_replay_batch(lookahead_rng)
-        self.replay_mean_priority = float(self._replay.mean_priority())
+        update_horizon, _ = td_schedule(self.cycle_grad_steps)
+        self.replay_mean_priority = float(
+            self._replay.mean_priority(update_horizon=update_horizon))
 
         self.imag_return_ema = np.asarray(new_return_ema)
 

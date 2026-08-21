@@ -119,6 +119,7 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
         self.add_count = np.array(0)
         self.total_steps = 0
         self._episode_end_indices = set()
+        self._timeout_indices = set()
         self._rng = None
 
     def get_storage_signature(self):
@@ -173,7 +174,9 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
             raise ValueError('Priorities must be finite and nonnegative.')
 
         terminal = np.asarray(terminal)
-        resets = np.asarray(episode_end) + terminal
+        episode_end = np.broadcast_to(
+            np.asarray(episode_end, dtype=bool), terminal.shape)
+        resets = episode_end + terminal
         cursor = self.cursor()
         for env_index in range(self._n_envs):
             key = (cursor, env_index)
@@ -181,6 +184,10 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
                 self._episode_end_indices.add(key)
             else:
                 self._episode_end_indices.discard(key)
+            if episode_end[env_index] and not terminal[env_index]:
+                self._timeout_indices.add(key)
+            else:
+                self._timeout_indices.discard(key)
 
         flat_indices = self.ravel_indices(
             np.full((self._n_envs,), cursor, dtype=np.int64),
@@ -493,7 +500,7 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
             ReplayElement('indices', (batch_size,), np.int32),
             # These are raw sum-tree leaves, not normalized sampling
             # probabilities.  Keep that distinction explicit because the
-            # importance weights use both the leaf and the replay-wide mean.
+            # importance weights use both the leaf and the valid-anchor mean.
             ReplayElement('priorities', (batch_size,), np.float32),
         ]
 
@@ -526,11 +533,68 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
             dtype=np.float32,
         )
 
-    def mean_priority(self):
+    def mean_priority(self, update_horizon=None):
+        """Returns the mean priority over anchors sampling can actually accept.
+
+        Sampling rejects roots whose frame history/future crosses the circular
+        cursor, as well as roots whose future crosses a nonterminal episode end.
+        The beta=1 importance correction must use the same conditional support;
+        including rejected leaves changes the critic's scale relative to every
+        other loss.
+        """
         populated = self.sum_tree.highest_set + 1
         if populated <= 0:
             return np.float32(1.0)
-        return np.float32(self.sum_tree._total_priority() / populated)
+
+        update_horizon = (self._update_horizon if update_horizon is None else
+                          int(update_horizon))
+        if update_horizon < 1 or update_horizon > self._update_horizon:
+            raise ValueError(
+                'update_horizon must be in [1, {}], got {}.'.format(
+                    self._update_horizon, update_horizon))
+        required_future = self._required_future(update_horizon)
+
+        invalid_indices = set()
+
+        def mark_invalid(row, env_index):
+            flat_index = ((int(row) % self._replay_length) * self._n_envs +
+                          int(env_index))
+            if flat_index < populated:
+                invalid_indices.add(flat_index)
+
+        # These roots have a frame stack or required future row on the other
+        # side of the circular write cursor.
+        cursor_rows = invalid_range(
+            self.cursor(), self._replay_length, self._stack_size - 1,
+            required_future)
+        for row in cursor_rows:
+            for env_index in range(self._n_envs):
+                mark_invalid(row, env_index)
+
+        if not self.is_full():
+            # Before the first wrap there is no frame history preceding row 0.
+            for row in range(self._stack_size - 1):
+                for env_index in range(self._n_envs):
+                    mark_invalid(row, env_index)
+
+        # A timeout at transition e invalidates roots e-F+1 through e. True
+        # terminals remain sampleable and are handled by return/model masks.
+        for episode_row, env_index in self._timeout_indices:
+            for offset in range(required_future):
+                mark_invalid(episode_row - offset, env_index)
+
+        valid_count = populated - len(invalid_indices)
+        if valid_count <= 0:
+            raise RuntimeError('Replay contains no valid anchors.')
+        invalid_priority = 0.0
+        if invalid_indices:
+            invalid_priority = np.sum(
+                self.sum_tree.get(
+                    np.fromiter(invalid_indices, dtype=np.int64)),
+                dtype=np.float64,
+            )
+        valid_priority = self.sum_tree._total_priority() - invalid_priority
+        return np.float32(valid_priority / valid_count)
 
     def reset_priorities(self):
         self.sum_tree.reset_priorities()

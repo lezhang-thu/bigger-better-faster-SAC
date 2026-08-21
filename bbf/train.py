@@ -107,7 +107,8 @@ def main(unused_argv):
     if FLAGS.no_seeding:
         seed = int(time.time() * 10000000) % 2**31
     else:
-        seed = FLAGS.run_number if not FLAGS.agent_seed else FLAGS.agent_seed
+        seed = (FLAGS.run_number
+                if FLAGS.agent_seed is None else FLAGS.agent_seed)
     set_random_seed(seed)
     load_gin_configs(gin_files, gin_bindings)
 
