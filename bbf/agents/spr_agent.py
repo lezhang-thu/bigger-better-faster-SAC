@@ -34,6 +34,13 @@ RESET_PARAMETER_KEYS_TO_COPY = (
 RESET_OPTIMIZER_KEYS_TO_COPY = (
     "encoder", "transition_model", "reward_head", "continue_head")
 
+# Only these modules are ever read through target parameters.  World-model
+# rollout/prediction heads and entropy temperature are trained and consumed
+# solely through the online parameters, so Polyak-interpolating them every
+# minibatch only moves large arrays without affecting an output.
+TARGET_UPDATE_PARAMETER_KEYS = (
+    "encoder", "projection", "head", "policy_projection", "policy")
+
 
 def project_distribution(supports, weights, target_support):
     """Projects a batch of (support, weights) onto target_support.
@@ -437,7 +444,7 @@ def jit_reset(
                                             keys=parameter_keys_to_copy)
         target_network_params = FrozenDict(target_network_params)
 
-    return online_params, target_network_params, optimizer_state, random_params
+    return online_params, target_network_params, optimizer_state
 
 
 def exponential_decay_scheduler(decay_period,
@@ -975,7 +982,7 @@ def train(
 
         target_update_step = functools.partial(
             interpolate_weights,
-            keys=None,
+            keys=TARGET_UPDATE_PARAMETER_KEYS,
             old_weight=1 - target_update_tau,
             new_weight=target_update_tau,
         )
@@ -1170,7 +1177,7 @@ class JaxDQNAgent(object):
 
         self._rng = jax.random.PRNGKey(seed)
         state_shape = self.observation_shape + (stack_size,)
-        self.state = np.zeros(state_shape)
+        self.state = np.zeros(state_shape, dtype=self.observation_dtype)
         self._replay = self._build_replay_buffer()
         self._optimizer_name = optimizer
         self._build_networks_and_optimizer()
@@ -1383,6 +1390,7 @@ class BBFAgent(JaxDQNAgent):
 
         self.train_fn = jax.jit(train,
                                 static_argnames=train_static_argnames,
+                                donate_argnums=(1, 2, 4),
                                 device=jax.local_devices()[0])
 
         # debug - start
@@ -1484,7 +1492,6 @@ class BBFAgent(JaxDQNAgent):
 
         self.optimizer_state = self.optimizer.init(self.online_params)
         self.target_network_params = copy.deepcopy(self.online_params)
-        self.random_params = copy.deepcopy(self.online_params)
 
         #print(' so far so good')
         #exit(0)
@@ -1550,22 +1557,28 @@ class BBFAgent(JaxDQNAgent):
             "s" if self.update_period > 1 else "",
         )
 
+    def _sample_replay_elements(self, rng):
+        sample_batch_size = self._batch_size * self._batches_to_group
+        types = self._replay.get_transition_elements(
+            batch_size=sample_batch_size, root_next_state_only=True)
+        samples = self._replay.sample_transition_batch(
+            rng,
+            batch_size=sample_batch_size,
+            update_horizon=self.update_horizon_scheduler(
+                self.cycle_grad_steps),
+            gamma=self.gamma_scheduler(self.cycle_grad_steps),
+            root_next_state_only=True,
+        )
+        replay_elements = collections.OrderedDict()
+        for element, element_type in zip(samples, types):
+            replay_elements[element_type.name] = element
+
+        return replay_elements
+
     def _replay_sampler_generator(self):
-        types = self._replay.get_transition_elements()
         while True:
             self._rng, rng = jax.random.split(self._rng)
-
-            samples = self._replay.sample_transition_batch(
-                rng,
-                batch_size=self._batch_size * self._batches_to_group,
-                update_horizon=self.update_horizon_scheduler(
-                    self.cycle_grad_steps),
-                gamma=self.gamma_scheduler(self.cycle_grad_steps),
-            )
-            replay_elements = collections.OrderedDict()
-            for element, element_type in zip(samples, types):
-                replay_elements[element_type.name] = element
-            yield replay_elements
+            yield self._sample_replay_elements(rng)
 
     def sample_eval_batch(self, batch_size, subseq_len=1):
         self._rng, rng = jax.random.split(self._rng)
@@ -1584,8 +1597,9 @@ class BBFAgent(JaxDQNAgent):
         self.prefetcher = prefetch_to_device(self._replay_sampler_generator(),
                                              1)
 
-    def _sample_from_replay_buffer(self):
-        self.replay_elements = next(self.prefetcher)
+    def _sample_from_replay_buffer(self, rng=None):
+        self.replay_elements = (next(self.prefetcher) if rng is None else
+                                self._sample_replay_elements(rng))
 
     def reset_weights(self):
         self.cumulative_resets += 1
@@ -1604,12 +1618,7 @@ class BBFAgent(JaxDQNAgent):
 
         self._rng, reset_rng = jax.random.split(self._rng, 2)
 
-        (
-            self.online_params,
-            self.target_network_params,
-            self.optimizer_state,
-            self.random_params,
-        ) = jit_reset(
+        reset_result = jit_reset(
             self.online_params,
             self.target_network_params,
             self.optimizer_state,
@@ -1626,6 +1635,8 @@ class BBFAgent(JaxDQNAgent):
             RESET_PARAMETER_KEYS_TO_COPY,
             RESET_OPTIMIZER_KEYS_TO_COPY,
         )
+        (self.online_params, self.target_network_params,
+         self.optimizer_state) = reset_result[:3]
 
         self.cycle_grad_steps = 0
         # Returns and discounts are materialized using the cycle schedule at
@@ -1686,6 +1697,12 @@ class BBFAgent(JaxDQNAgent):
                          if self.imag_discount is None else self.imag_discount)
 
         self._rng, train_rng = jax.random.split(self._rng)
+        # Reserve the same next key the replay generator would have consumed,
+        # and put it on the CPU before launching the update.  Replay sampling
+        # can then run independently while the accelerator trains.
+        self._rng, replay_rng = jax.random.split(self._rng)
+        replay_rng = jax.device_put(
+            replay_rng, device=jax.local_devices(backend="cpu")[0])
         (
             new_online_params,
             new_target_params,
@@ -1735,12 +1752,18 @@ class BBFAgent(JaxDQNAgent):
              self.imag_entropy_weight),
             self.imag_return_ema,
         )
-        self.imag_return_ema = np.asarray(new_return_ema)
+
+        # JAX dispatches the update asynchronously on GPU. Prepare the next
+        # host replay batch before reading any result back to NumPy so sampling
+        # can overlap the device work.
         self.grad_steps += self._batches_to_group
         self.cycle_grad_steps += self._batches_to_group
+        self._sample_from_replay_buffer(replay_rng)
 
-        # Sample asynchronously while we wait for training
-        self._sample_from_replay_buffer()
+        # Keep this tiny recurrent training state on device; converting it to
+        # NumPy here would synchronize the entire asynchronous update.
+        self.imag_return_ema = new_return_ema
+
         # Rainbow and prioritized replay are parametrized by an exponent
         # alpha, but in both cases it is set to 0.5 - for simplicity's sake we
         # leave it as is here, using the more direct sqrt(). Taking the square
@@ -1869,7 +1892,8 @@ class BBFAgent(JaxDQNAgent):
 
     def _reset_state(self, n_envs):
         """Resets the agent state by filling it with zeros."""
-        self.state = np.zeros((n_envs, *self.state_shape))
+        self.state = np.zeros((n_envs, *self.state_shape),
+                              dtype=self.observation_dtype)
 
     def _record_observation(self, observation):
         """Records an observation and update state.
@@ -1895,7 +1919,8 @@ class BBFAgent(JaxDQNAgent):
     def reset_all(self, new_obs):
         """Resets the agent state by filling it with zeros."""
         n_envs = new_obs.shape[0]
-        self.state = np.zeros((n_envs, *self.state_shape))
+        self.state = np.zeros((n_envs, *self.state_shape),
+                              dtype=self.observation_dtype)
         self._record_observation(new_obs)
 
     def reset_one(self, env_id):
@@ -1904,6 +1929,10 @@ class BBFAgent(JaxDQNAgent):
     def delete_one(self, env_id):
         self.state = np.concatenate(
             [self.state[:env_id], self.state[env_id + 1:]], 0)
+
+    def retain_envs(self, env_ids):
+        """Compacts batched inference state to the selected environment slots."""
+        self.state = self.state[env_ids]
 
     def cache_train_state(self):
         self.training_state = (

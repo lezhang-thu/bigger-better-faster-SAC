@@ -2,7 +2,7 @@ import random
 
 import os
 
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "1."
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".5"
 # coding=utf-8
 r"""Entry point for Atari 100k experiments.
 

@@ -47,6 +47,25 @@ def parallel_stratified_sample(rng, nodes, i, n, depth):
     return index
 
 
+@functools.partial(jax.jit, backend='cpu')
+@functools.partial(jax.vmap, in_axes=(None, 0, None, None))
+def parallel_stratified_queries(rng, i, n, total_priority):
+    """Generates the scaled queries used by stratified tree sampling.
+
+    Keeping this operation in JAX preserves the existing fold-in PRNG stream
+    and JAX's dtype canonicalization. In particular, with x64 disabled the
+    double-precision NumPy tree total is downcast to float32 before scaling,
+    exactly as it was when the complete tree was passed to the JIT sampler.
+    """
+    rng = jax.random.fold_in(rng, i)
+    upper_bound = (i + 1) / n
+    lower_bound = i / n
+    query = jax.random.uniform(rng,
+                               minval=lower_bound,
+                               maxval=upper_bound)
+    return query * total_priority
+
+
 class DeterministicSumTree(sum_tree.SumTree):
     """A sum tree data structure for storing replay priorities.
 
@@ -111,9 +130,25 @@ class DeterministicSumTree(sum_tree.SumTree):
         if self._total_priority() == 0.0:
             raise Exception('Cannot sample from an empty sum tree.')
 
-        indices = parallel_stratified_sample(rng, self.nodes,
-                                             np.arange(batch_size), batch_size,
-                                             self.depth)
+        # Only the random query generation benefits from JAX here. Passing the
+        # complete NumPy tree through a CPU JIT on every replay sample copies
+        # and stages hundreds of thousands of nodes. Generate the identical
+        # stratified queries in JAX, then traverse the resident tree in a
+        # vectorized batch using NumPy.
+        queries = np.asarray(
+            parallel_stratified_queries(rng, np.arange(batch_size), batch_size,
+                                        self._total_priority()))
+        indices = np.zeros(batch_size, dtype=np.int32)
+        for _ in range(self.depth):
+            left_children = indices * 2 + 1
+            # JAX canonicalized the old full-tree argument to the query dtype.
+            # Cast only the nodes this batch visits instead of copying the
+            # complete 524k-node tree on every sample.
+            left_sums = self.nodes[left_children].astype(queries.dtype,
+                                                         copy=False)
+            go_right = queries >= left_sums
+            indices = left_children + go_right
+            queries = np.where(go_right, queries - left_sums, queries)
         return np.minimum(indices - self.low_idx, self.highest_set)
 
     def get(self, node_index):

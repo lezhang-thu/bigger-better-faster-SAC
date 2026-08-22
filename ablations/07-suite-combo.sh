@@ -9,6 +9,9 @@ set -ex
 # (available on branch stage0123v2). Split across boxes via GAMES=...; keep
 # RUN=50 everywhere so the suite has a single id.
 cd "$(dirname "$0")/.."
+# Each game runs in a fresh Python process, but many games share identical
+# action/shape signatures.  Persist compiled executables across those processes.
+export JAX_COMPILATION_CACHE_DIR=${JAX_COMPILATION_CACHE_DIR:-/tmp/bbf-jax-compilation-cache}
 GAMES=${GAMES:-"Alien Amidar Assault Asterix BankHeist BattleZone Boxing Breakout ChopperCommand CrazyClimber DemonAttack Freeway Frostbite Gopher Hero Jamesbond Kangaroo Krull KungFuMaster MsPacman Pong PrivateEye Qbert RoadRunner Seaquest UpNDown"}
 GPU=${GPU:-0}
 RUN=${RUN:-50}

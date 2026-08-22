@@ -158,7 +158,9 @@ def create_atari_environment(game_name=None, sticky_actions=True):
     assert game_name is not None
     game_version = 'v0' if sticky_actions else 'v4'
     full_game_name = '{}NoFrameskip-{}'.format(game_name, game_version)
-    env = gym.make(full_game_name)
+    # The preprocessing wrapper consumes grayscale pixels.  Ask ALE for them
+    # directly instead of materializing an ignored RGB frame on every raw step.
+    env = gym.make(full_game_name, obs_type='grayscale')
     # Strip out the TimeLimit wrapper from Gym, which caps us at 100k frames. We
     # handle this time limit internally instead, which lets us cap at 108k frames
     # (30 minutes). The TimeLimit wrapper also plays poorly with saving and
@@ -258,9 +260,9 @@ class AtariPreprocessing(object):
       observation: numpy array, the initial observation emitted by the
         environment.
     """
-        self.environment.reset()
+        raw_observation = self.environment.reset()
         self.lives = self.environment.ale.lives()
-        self._fetch_grayscale_observation(self.screen_buffer[0])
+        np.copyto(self.screen_buffer[0], raw_observation)
         self.screen_buffer[1].fill(0)
         return self._pool_and_resize()
 
@@ -305,9 +307,8 @@ class AtariPreprocessing(object):
         accumulated_reward = 0.
 
         for time_step in range(self.frame_skip):
-            # We bypass the Gym observation altogether and directly fetch the
-            # grayscale image from the ALE. This is a little faster.
-            _, reward, game_over, info = self.environment.step(action)
+            raw_observation, reward, game_over, info = (
+                self.environment.step(action))
             accumulated_reward += reward
 
             if self.terminal_on_life_loss:
@@ -320,8 +321,7 @@ class AtariPreprocessing(object):
             # Retain the last two frames actually executed. A life loss can
             # stop frame skipping before its nominal final two iterations.
             buffer_index = 0 if self.frame_skip == 1 else time_step % 2
-            self._fetch_grayscale_observation(
-                self.screen_buffer[buffer_index])
+            np.copyto(self.screen_buffer[buffer_index], raw_observation)
             if is_terminal and time_step == 0 and self.frame_skip > 1:
                 # Avoid pooling a sole new frame with stale pixels.
                 np.copyto(self.screen_buffer[1], self.screen_buffer[0])
@@ -560,11 +560,13 @@ class DataEfficientAtariRunner(Runner):
 
         # Create envs
         live_envs = list(range(len(envs)))
+        live_slots = list(range(len(envs)))
 
         if needs_reset:
             new_obs = self._initialize_episode(envs)
             new_obses = np.zeros(
-                (2, len(envs), *self._agent.observation_shape, 1))
+                (2, len(envs), *self._agent.observation_shape, 1),
+                dtype=self._agent.observation_dtype)
             self._agent.reset_all(new_obs)
 
             rewards = np.zeros((len(envs),))
@@ -603,12 +605,17 @@ class DataEfficientAtariRunner(Runner):
             # don't want to do a for-loop since live envs may change
             while b < len(live_envs):
                 env_id = live_envs[b]
-                obs, reward, d, _ = envs[env_id].step(actions[b])
+                # Evaluation removes finished environments from live_envs, but
+                # temporarily keeps their slots in the agent batch. Batching
+                # removals below avoids recompiling the policy after every
+                # episode without doing excessive work for inactive slots.
+                slot = live_slots[b] if one_to_one else b
+                obs, reward, d, _ = envs[env_id].step(actions[slot])
                 envs[env_id].cum_length += 1
                 envs[env_id].cum_reward += reward
-                new_obs[b] = obs
-                rewards[b] = reward
-                terminals[b] = d
+                new_obs[slot] = obs
+                rewards[slot] = reward
+                terminals[slot] = d
 
                 if (envs[env_id].game_over or
                         envs[env_id].cum_length == self._max_steps_per_episode):
@@ -630,18 +637,14 @@ class DataEfficientAtariRunner(Runner):
                             np.round(human_norm_ret, 3)))
 
                     if one_to_one:
-                        new_obses = delete_ind_from_array(new_obses, b, axis=1)
-                        new_obs = new_obses[step % 2]
-                        actions = delete_ind_from_array(actions, b)
-                        rewards = delete_ind_from_array(rewards, b)
-                        terminals = delete_ind_from_array(terminals, b)
-                        self._agent.delete_one(b)
                         del live_envs[b]
+                        del live_slots[b]
                         b -= 1  # live_envs[b] is now the next env, so go back one.
                     else:
-                        episode_end[b] = 1
-                        new_obs[b] = self._initialize_episode([envs[env_id]])
-                        self._agent.reset_one(env_id=b)
+                        episode_end[slot] = 1
+                        new_obs[slot] = self._initialize_episode(
+                            [envs[env_id]])
+                        self._agent.reset_one(env_id=slot)
                     # debug - start
                     if not self._agent.eval_mode:
                         self._agent.greedy_action = random.random(
@@ -650,7 +653,7 @@ class DataEfficientAtariRunner(Runner):
                         #    self._agent.greedy_action))
                     # debug - end
                 elif d:
-                    self._agent.reset_one(env_id=b)
+                    self._agent.reset_one(env_id=slot)
                     # debug - start
                     if not self._agent.eval_mode:
                         self._agent.greedy_action = random.random(
@@ -660,6 +663,21 @@ class DataEfficientAtariRunner(Runner):
                     # debug - end
 
                 b += 1
+
+            # Shrink one-to-one evaluation in groups.  With 100 evaluation
+            # environments this produces about 13 policy shapes instead of up
+            # to 100, while carrying at most seven inactive rows at a time.
+            if (one_to_one and live_envs and
+                    len(rewards) - len(live_envs) >= 8):
+                keep_slots = np.asarray(live_slots, dtype=np.int32)
+                new_obses = new_obses[:, keep_slots]
+                new_obs = new_obses[step % 2]
+                actions = actions[keep_slots]
+                rewards = rewards[keep_slots]
+                terminals = terminals[keep_slots]
+                episode_end = episode_end[keep_slots]
+                self._agent.retain_envs(keep_slots)
+                live_slots = list(range(len(live_envs)))
 
             if self._clip_rewards:
                 # Perform reward clipping.

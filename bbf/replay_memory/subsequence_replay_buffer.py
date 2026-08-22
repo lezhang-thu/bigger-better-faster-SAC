@@ -349,12 +349,14 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
         """Builds stacks in unwrapped time while wrapping storage indices."""
         indices_t = np.arange(-self._stack_size + 1,
                               1)[:, None] + indices_t[None, :]
-        indices_b = indices_b[None, :].repeat(self._stack_size, axis=0)
         mask = indices_t >= first_valid
-        result = self.get_from_store(element_name,
-                                     indices_t % self._replay_length, indices_b)
-        mask = mask.reshape(*mask.shape, *([1] * (len(result.shape) - 2)))
-        result = result * mask
+        result = self.get_from_store(
+            element_name, indices_t % self._replay_length, indices_b[None, :])
+        # Advanced indexing already returns a copy. Episode censorship is rare,
+        # so avoid allocating and multiplying a full image-sized broadcast mask
+        # for the overwhelmingly common all-valid case.
+        if not mask.all():
+            result[~mask] = 0
         result = np.moveaxis(result, 0, -1)
         return result
 
@@ -559,6 +561,7 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
         subseq_len=None,
         update_horizon=None,
         gamma=None,
+        root_next_state_only=False,
     ):
         """Returns a batch of transitions (including any extra contents).
 
@@ -584,6 +587,9 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
         buffer default.
       update_horizon: Update horizon to use, if overriding the original setting.
       gamma: Discount factor to use, if overriding the original setting.
+      root_next_state_only: Return only the first subsequence root's next state.
+        This avoids gathering unused image stacks for callers whose TD target
+        only bootstraps the anchor transition.
 
     Returns:
       transition_batch: tuple of np.arrays with the shape and type as in
@@ -646,7 +652,9 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
         assert len(t_indices) == batch_size
         assert len(b_indices) == batch_size
         transition_elements = self.get_transition_elements(
-            batch_size, subseq_len=subseq_len)
+            batch_size,
+            subseq_len=subseq_len,
+            root_next_state_only=root_next_state_only)
         state_indices = t_indices[:, None] + np.arange(subseq_len)[None, :]
         state_indices = state_indices.reshape(batch_size * subseq_len)
         b_indices = b_indices[:, None].repeat(subseq_len, axis=1).reshape(
@@ -689,9 +697,15 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
             axis=0).astype(self._reward_dtype, copy=False)
 
         next_indices = state_indices + update_horizon
+        root_positions = (np.arange(batch_size) * subseq_len
+                          if root_next_state_only else None)
+        next_censor_indices = (next_indices[root_positions]
+                               if root_next_state_only else next_indices)
+        next_censor_envs = (b_indices[root_positions]
+                            if root_next_state_only else b_indices)
         next_censor_before = np.asarray([
             self._stack_censor_before(t, b)
-            for t, b in zip(next_indices, b_indices)
+            for t, b in zip(next_censor_indices, next_censor_envs)
         ])
         discounts = np.full(batch_size * subseq_len,
                             cumulative_discount_vector[update_horizon],
@@ -720,6 +734,16 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
                 output = self.restore_leading_dims(batch_size, subseq_len,
                                                    output)
             elif name == 'next_state':
+                if root_next_state_only:
+                    output = self.parallel_get_stack(
+                        'observation',
+                        next_indices[root_positions],
+                        b_indices[root_positions],
+                        next_censor_before,
+                    )
+                    output = self.restore_leading_dims(batch_size, 1, output)
+                    outputs.append(output)
+                    continue
                 output = self.parallel_get_stack(
                     'observation',
                     next_indices,
@@ -759,13 +783,17 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
             outputs.append(output)
         return outputs
 
-    def get_transition_elements(self, batch_size=None, subseq_len=None):
+    def get_transition_elements(self,
+                                batch_size=None,
+                                subseq_len=None,
+                                root_next_state_only=False):
         """Returns a 'type signature' for sample_transition_batch.
 
     Args:
       batch_size: int, number of transitions returned. If None, the default
         batch_size will be used.
       subseq_len: int, length of subsequences to return.
+      root_next_state_only: Whether next_state contains only the first root.
 
     Returns:
       signature: A namedtuple describing the method's return type signature.
@@ -789,9 +817,10 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
                           self._reward_dtype),
         ]
         if self._use_next_state:
+            next_state_len = 1 if root_next_state_only else subseq_len
             transition_elements += [
                 ReplayElement('next_state',
-                              (batch_size, subseq_len) + self._state_shape,
+                              (batch_size, next_state_len) + self._state_shape,
                               self._observation_dtype),
                 ReplayElement('next_action',
                               (batch_size, subseq_len) + self._action_shape,
@@ -957,6 +986,7 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
         subseq_len=None,
         update_horizon=None,
         gamma=None,
+        root_next_state_only=False,
     ):
         """Returns a batch of transitions with extra storage and the priorities."""
         transition = super().sample_transition_batch(
@@ -966,9 +996,12 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
             subseq_len=subseq_len,
             update_horizon=update_horizon,
             gamma=gamma,
+            root_next_state_only=root_next_state_only,
         )
         base_elements = super().get_transition_elements(
-            batch_size, subseq_len=subseq_len)
+            batch_size,
+            subseq_len=subseq_len,
+            root_next_state_only=root_next_state_only)
         indices_position = next(
             i for i, element in enumerate(base_elements)
             if element.name == 'indices')
@@ -1009,11 +1042,16 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
         indices = indices.astype(np.int32, copy=False)
         return np.asarray(self.sum_tree.get(indices), dtype=np.float32)
 
-    def get_transition_elements(self, batch_size=None, subseq_len=None):
+    def get_transition_elements(self,
+                                batch_size=None,
+                                subseq_len=None,
+                                root_next_state_only=False):
         """Returns a 'type signature' for sample_transition_batch."""
         batch_size = self._batch_size if batch_size is None else batch_size
         parent_transition_type = (super().get_transition_elements(
-            batch_size, subseq_len=subseq_len))
+            batch_size,
+            subseq_len=subseq_len,
+            root_next_state_only=root_next_state_only))
         probablilities_type = [
             ReplayElement('sampling_probabilities', (batch_size,), np.float32)
         ]
