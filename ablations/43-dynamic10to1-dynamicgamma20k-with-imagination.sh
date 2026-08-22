@@ -9,6 +9,10 @@ set -ex
 # after 20,000 gradient updates. There is no replay-priority reset at 20k.
 # Every successful shrink-and-perturb reset uniformizes priorities and restarts
 # the schedule. The C51 endpoint remains an exact online-policy mixture.
+# Between the first and second successful resets, the gradient-update rate is
+# doubled. Because the TD, gamma, and imagination-warmup schedules are keyed to
+# gradient steps, they intentionally progress twice as fast in environment time
+# during that phase.
 cd "$(dirname "$0")/.."
 GAMES=${GAMES:-"Kangaroo Asterix"}
 GPU=${GPU:-0}
@@ -19,5 +23,6 @@ for game_name in $GAMES; do
 		--agent=BBF \
 		--gin_files=bbf/configs/BBF-100K.gin \
 		--gin_bindings="DataEfficientAtariRunner.game_name=\"$game_name\"" \
+		--gin_bindings="BBFAgent.first_reset_update_multiplier=2" \
 		--run_number="$RUN"
 done

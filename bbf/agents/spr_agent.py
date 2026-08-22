@@ -50,7 +50,7 @@ TARGET_UPDATE_PARAMETER_KEYS = (
 # This branch intentionally supports one TD schedule only. Keep these values
 # in code so an obsolete Gin binding cannot silently change the experiment.
 INITIAL_TD_HORIZON = 10
-FINAL_TD_HORIZON = 1
+FINAL_TD_HORIZON = 3
 INITIAL_TD_GAMMA = 0.97
 FINAL_TD_GAMMA = 0.997
 TD_SCHEDULE_GRAD_UPDATES = 20_000
@@ -1228,6 +1228,7 @@ class BBFAgent(JaxDQNAgent):
         reset_every=-1,
         no_resets_after=-1,
         reset_offset=1,
+        first_reset_update_multiplier=1,
         learning_rate=0.0001,
         encoder_learning_rate=0.0001,
         reset_target=True,
@@ -1275,8 +1276,15 @@ class BBFAgent(JaxDQNAgent):
         self.reset_target = reset_target
         self.no_resets_after = int(no_resets_after)
         self.cumulative_resets = 0
+        self._successful_resets = 0
         self.reset_offset = int(reset_offset)
         self.next_reset = self.reset_every + self.reset_offset
+        self.first_reset_update_multiplier = int(
+            first_reset_update_multiplier)
+        if self.first_reset_update_multiplier < 1:
+            raise ValueError(
+                "first_reset_update_multiplier must be at least 1, got {}."
+                .format(first_reset_update_multiplier))
 
         self.learning_rate = learning_rate
         self.encoder_learning_rate = encoder_learning_rate
@@ -1589,6 +1597,23 @@ class BBFAgent(JaxDQNAgent):
         # batch surviving the reset.
         self._replay.reset_priorities()
         self._discard_pending_replay_sample()
+        self._successful_resets = getattr(self, "_successful_resets", 0) + 1
+        update_multiplier = getattr(
+            self, "first_reset_update_multiplier", 1)
+        if (update_multiplier != 1 and
+                self._successful_resets == 1):
+            logging.info(
+                "\t Multiplying gradient updates by %s until the next "
+                "successful reset.", update_multiplier)
+        elif (update_multiplier != 1 and
+              self._successful_resets == 2):
+            logging.info("\t Restoring the base gradient-update rate.")
+
+    def _num_update_groups_for_current_reset_phase(self):
+        """Returns the update-group count for the current reset phase."""
+        multiplier = (getattr(self, "first_reset_update_multiplier", 1)
+                      if getattr(self, "_successful_resets", 0) == 1 else 1)
+        return self._num_updates_per_train_step * multiplier
 
     def _training_step_update(self):
         """Gradient update during every training step."""
@@ -1757,7 +1782,10 @@ class BBFAgent(JaxDQNAgent):
         self.x_ent_coef = max(1e-2 * decay_fraction, self.x_ent_floor)
         if self._replay.add_count > self.min_replay_history:
             if self.training_steps % self.update_period == 0:
-                num_updates = self._num_updates_per_train_step
+                # Extra calls advance grad_steps and cycle_grad_steps normally,
+                # so all gradient-step-based schedules accelerate with them.
+                num_updates = (
+                    self._num_update_groups_for_current_reset_phase())
                 for _ in range(num_updates):
                     self._training_step_update()
         if self.reset_every > 0 and self.training_steps > self.next_reset:
