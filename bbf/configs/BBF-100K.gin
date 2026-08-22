@@ -1,7 +1,8 @@
 # The sole supported BBF experiment: exponential H=10 -> 1 and
-# gamma=.97 -> .997 over 20,000 cycle-local gradient updates, then fixed at
+# gamma=.97 -> .997 over 40,000 cycle-local gradient updates, then fixed at
 # H=1/gamma=.997. The schedule, bootstrap, and priority metric are hard-coded
-# in spr_agent.py. There is no priority reset at the schedule endpoint.
+# in spr_agent.py. Priorities persist across both the smooth schedule and
+# network resets, matching Google BBF.
 import bbf.spr_networks
 import bbf.agents.spr_agent
 import bbf.replay_memory.subsequence_replay_buffer
@@ -15,7 +16,7 @@ BBFAgent.batches_to_group = 2
 BBFAgent.replay_ratio = 64
 BBFAgent.data_augmentation = True
 
-# Successful shrink-and-perturb resets restart the schedules and uniformize
+# Successful shrink-and-perturb resets restart the schedules while retaining
 # replay priorities.
 BBFAgent.reset_every = 20_000
 BBFAgent.no_resets_after = 100_000

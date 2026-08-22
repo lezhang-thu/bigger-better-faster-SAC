@@ -499,8 +499,8 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
                           self._terminal_dtype),
             ReplayElement('indices', (batch_size,), np.int32),
             # These are raw sum-tree leaves, not normalized sampling
-            # probabilities.  Keep that distinction explicit because the
-            # importance weights use both the leaf and the valid-anchor mean.
+            # probabilities. BBF's batch-normalized beta=.5 correction consumes
+            # these leaves directly; the common tree normalizer cancels.
             ReplayElement('priorities', (batch_size,), np.float32),
         ]
 
@@ -538,9 +538,8 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(object):
 
         Sampling rejects roots whose frame history/future crosses the circular
         cursor, as well as roots whose future crosses a nonterminal episode end.
-        The beta=1 importance correction must use the same conditional support;
-        including rejected leaves changes the critic's scale relative to every
-        other loss.
+        This diagnostic uses that same conditional support rather than including
+        leaves that the sampler will reject.
         """
         populated = self.sum_tree.highest_set + 1
         if populated <= 0:

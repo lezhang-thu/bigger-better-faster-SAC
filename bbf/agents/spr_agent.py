@@ -54,14 +54,14 @@ FINAL_TD_HORIZON = 1
 INITIAL_TD_GAMMA = 0.97
 FINAL_TD_GAMMA = 0.997
 TD_SCHEDULE_GRAD_UPDATES = 40_000
-DELTA_PRIORITY_EPSILON = 1e-6
+PER_EPSILON = 1e-10
 EVAL_ACTION_BATCH_BUCKET = 8
 
 
 def td_schedule(cycle_grad_steps):
     """Returns the historical exponential horizon/gamma schedule.
 
-    The cycle begins at H=10 and gamma=.97. Both schedules anneal over 20,000
+    The cycle begins at H=10 and gamma=.97. Both schedules anneal over 40,000
     gradient updates; after that they remain at H=1 and gamma=.997.
     """
     progress = np.clip(
@@ -115,31 +115,6 @@ def project_distribution(supports, weights, target_support):
     # inner_prod = `\sum_{j=0}^{N-1} clipped_quotient * p_j(x', \pi(x'))` in Eq7.
     inner_prod = clipped_quotient * weights
     return jnp.squeeze(jnp.sum(inner_prod, -1))
-
-
-def distributional_td_signals(target_distribution,
-                              predicted_probabilities,
-                              support,
-                              priority_epsilon=1e-6):
-    """Returns the projected C51 expectation error and its PER score.
-
-    The target is the same projected distribution used by the categorical
-    critic loss.  Computing its support mean therefore preserves C51's support
-    clipping semantics. The scalar score is stopped so replay prioritization
-    cannot become an optimization objective.
-    """
-    target_distribution = jax.lax.stop_gradient(
-        jnp.asarray(target_distribution))
-    predicted_probabilities = jnp.asarray(predicted_probabilities)
-    support = jnp.asarray(support)
-    target_value = jax.lax.stop_gradient(
-        jnp.sum(target_distribution * support, axis=-1))
-    q_value = jnp.sum(predicted_probabilities * support, axis=-1)
-    delta = target_value - q_value
-    priority_score = jax.lax.stop_gradient(
-        jnp.abs(delta) +
-        jnp.asarray(priority_epsilon, dtype=q_value.dtype))
-    return delta, priority_score
 
 
 def softmax_cross_entropy_loss_with_logits(labels: jnp.array,
@@ -329,8 +304,15 @@ def validate_priority_cardinality(indices, priority_losses):
             f"{num_indices} indices but {num_losses} per-example losses.")
 
 
-def replay_loss_weights(priorities, mean_priority):
-    """Builds fixed beta=.5 auxiliary and beta=1 critic PER weights."""
+def replay_loss_weights(priorities):
+    """Builds BBF's fixed beta=.5, batch-normalized PER weights.
+
+    ``priorities`` are raw sum-tree leaves.  The omitted tree normalizer and
+    replay-size factor are common to the whole sampled group and therefore
+    cancel when the inverse weights are normalized by their sampled maximum.
+    The same correction is used for the C51 critic and every replay-anchored
+    auxiliary objective, matching Google BBF.
+    """
     priorities = np.asarray(priorities, dtype=np.float32)
     if priorities.size == 0:
         raise ValueError("Replay priorities must not be empty.")
@@ -339,17 +321,12 @@ def replay_loss_weights(priorities, mean_priority):
         raise FloatingPointError(
             "Sampled replay priorities must be finite and positive.")
 
-    auxiliary_weights = 1.0 / np.sqrt(priorities + 1e-10)
-    auxiliary_weights /= np.max(auxiliary_weights)
-    if (mean_priority is None or not np.isfinite(mean_priority) or
-            mean_priority <= 0.0):
-        raise FloatingPointError(
-            "Replay mean priority must be finite and positive.")
-    td_weights = np.asarray(
-        mean_priority / (priorities + 1e-10), dtype=np.float32)
-    if not np.all(np.isfinite(td_weights)):
-        raise FloatingPointError("Critic importance weights must be finite.")
-    return auxiliary_weights, td_weights
+    weights = 1.0 / np.sqrt(priorities + PER_EPSILON)
+    weights /= np.max(weights)
+    weights = np.asarray(weights, dtype=np.float32)
+    if not np.all(np.isfinite(weights)):
+        raise FloatingPointError("Replay importance weights must be finite.")
+    return weights, weights.copy()
 
 
 def apply_replay_anchor_weights(per_anchor_losses, loss_weights):
@@ -575,28 +552,27 @@ train_static_argnames = [
 
 
 def train(
-    network_def,  # 0, static
-    online_params,  # 1
-    target_params,  # 2
-    optimizer,  # 3, static
-    optimizer_state,  # 4
-    raw_states,  # 5
-    actions,  # 6
-    raw_next_states,  # 7
-    rewards,  # 8
-    terminals,  # 9
-    same_traj_mask,  # 10
-    loss_weights,  # 11
+    network_def,  # static
+    online_params,
+    target_params,
+    optimizer,  # static
+    optimizer_state,
+    raw_states,
+    actions,
+    raw_next_states,
+    rewards,
+    terminals,
+    same_traj_mask,
+    loss_weights,
     td_loss_weights,
-    support,  # 12
-    cumulative_gamma,  # 13
-    rng,  # 16
-    spr_weight,  # 17, static (gates rollouts)
+    support,
+    cumulative_gamma,
+    rng,
+    spr_weight,  # static (gates rollouts)
     data_augmentation,  # static
     dtype,  # static
     batch_size,  # static
     spr_horizon,  # static
-    delta_priority_epsilon,
     target_update_tau,
     target_update_every,
     step,
@@ -762,13 +738,11 @@ def train(
                                             actions[:, 0]]
             dqn_loss = jax.vmap(softmax_cross_entropy_loss_with_logits)(
                 target, chosen_action_logits)
-            predicted_probabilities = jax.nn.softmax(chosen_action_logits)
-            _, priority_loss = distributional_td_signals(
-                target,
-                predicted_probabilities,
-                support[None, :],
-                delta_priority_epsilon,
-            )
+            # Google BBF prioritizes the raw C51 cross-entropy rather than a
+            # scalar value delta (or the entropy-adjusted KL metric it logs).
+            # Preserve one stopped score per replay anchor; reducing here would
+            # reproduce the upstream grouped-minibatch cardinality bug.
+            priority_loss = jax.lax.stop_gradient(dqn_loss)
 
             if spr_weight > 0:
                 spr_predictions = spr_predictions.transpose(1, 0, 2)
@@ -791,8 +765,8 @@ def train(
                 # the transition rollout and x.latent is spatial [B,h,w,c].
                 # There is no SPR objective in that mode.
                 spr_loss = jnp.zeros_like(dqn_loss)
-            # Full beta=1 correction is fixed for the real C51 critic. SPR and
-            # every other replay-anchored auxiliary retain beta=0.5.
+            # Google BBF uses the same fixed beta=.5 correction for the real
+            # C51 critic and replay-anchored auxiliary objectives.
             loss = (td_loss_multipliers * dqn_loss +
                     loss_multipliers * spr_weight * spr_loss)
 
@@ -997,7 +971,7 @@ def train(
                           model_loss + imag_actor_mult * imag_actor_loss +
                           imag_value_mult * imag_value_loss)
             aux_losses = {
-                # Keep the per-example delta priority until after the grouped
+                # Keep the per-example C51 cross-entropy until after the grouped
                 # minibatch scan so every replay anchor is updated.
                 "PriorityLoss": priority_loss,
                 "ReturnEMAState": new_return_ema,
@@ -1268,7 +1242,6 @@ class BBFAgent(JaxDQNAgent):
         self._replay_ratio = int(replay_ratio)
         self._batch_size = int(batch_size)
         self._batches_to_group = int(batches_to_group)
-        self.delta_priority_epsilon = DELTA_PRIORITY_EPSILON
         self._jumps = int(jumps)
         self.spr_weight = spr_weight
 
@@ -1549,8 +1522,6 @@ class BBFAgent(JaxDQNAgent):
         """Drops any materialized batch selected before a global reset."""
         if hasattr(self, "replay_elements"):
             del self.replay_elements
-        if hasattr(self, "replay_mean_priority"):
-            del self.replay_mean_priority
 
     def reset_weights(self):
         self.cumulative_resets += 1
@@ -1592,10 +1563,9 @@ class BBFAgent(JaxDQNAgent):
         )
 
         self.cycle_grad_steps = 0
-        # The reset critic invalidates every old delta score. Restart the
-        # H=10/gamma=.97 schedule from uniform sampling, with no materialized
-        # batch surviving the reset.
-        self._replay.reset_priorities()
+        # Match Google BBF by retaining replay priorities across network
+        # resets.  The materialized batch must still be discarded because its
+        # return/discount were built with the old cycle's H/gamma schedule.
         self._discard_pending_replay_sample()
         self._successful_resets = getattr(self, "_successful_resets", 0) + 1
         update_multiplier = getattr(
@@ -1620,15 +1590,11 @@ class BBFAgent(JaxDQNAgent):
         if not hasattr(self, "replay_elements"):
             self.replay_elements = self._sample_replay_batch(
                 self._next_replay_rng())
-            update_horizon, _ = td_schedule(self.cycle_grad_steps)
-            self.replay_mean_priority = float(
-                self._replay.mean_priority(update_horizon=update_horizon))
 
         sampled_priorities = self.replay_elements["priorities"]
-        # The real critic uses beta=1; replay-anchored auxiliary and imagined
-        # objectives retain beta=.5.
-        loss_weights, td_loss_weights = replay_loss_weights(
-            sampled_priorities, self.replay_mean_priority)
+        # Match Google BBF's fixed beta=.5 correction for critic and auxiliary
+        # objectives.  These arrays are intentionally identical.
+        loss_weights, td_loss_weights = replay_loss_weights(sampled_priorities)
         indices = self.replay_elements["indices"]
 
         # Imagination is gated off right after each shrink-and-perturb reset
@@ -1688,7 +1654,6 @@ class BBFAgent(JaxDQNAgent):
             self.dtype,
             self._batch_size,
             self._jumps,
-            self.delta_priority_epsilon,
             self.target_update_tau,
             self.target_update_period,
             self.grad_steps,
@@ -1717,21 +1682,18 @@ class BBFAgent(JaxDQNAgent):
         # still be running.  Sampling happens before this group's priority
         # writeback, intentionally introducing one group of ordinary PER lag.
         # The lookahead uses the next group's schedule, including across the
-        # smooth 20k endpoint; there is no target-boundary reset or flush.
+        # smooth schedule endpoint; there is no target-boundary reset or flush.
         self.replay_elements = self._sample_replay_batch(lookahead_rng)
-        update_horizon, _ = td_schedule(self.cycle_grad_steps)
-        self.replay_mean_priority = float(
-            self._replay.mean_priority(update_horizon=update_horizon))
 
         self.imag_return_ema = np.asarray(new_return_ema)
 
-        # Store alpha=.5 delta priorities for the current scheduled C51 target.
+        # Store alpha=.5 C51 cross-entropy priorities for the current target.
         indices = np.reshape(np.asarray(indices), (-1,))
         priority_loss = np.reshape(
             np.asarray(aux_losses["PriorityLoss"]), (-1))
         validate_priority_cardinality(indices, priority_loss)
 
-        priorities = np.sqrt(priority_loss + 1e-10)
+        priorities = np.sqrt(priority_loss + PER_EPSILON)
         if not np.all(np.isfinite(priorities)):
             raise FloatingPointError("Replay priorities must be finite.")
         validate_priority_cardinality(indices, priorities)
