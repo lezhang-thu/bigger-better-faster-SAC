@@ -231,10 +231,10 @@ class AtariPreprocessing(object):
     def observation_space(self):
         # Return the observation space adjusted to match the shape of the processed
         # observations.
-        return Box(low=0,
-                   high=255,
-                   shape=(self.screen_size, self.screen_size, 1),
-                   dtype=np.uint8)
+        return gym.spaces.Box(low=0,
+                              high=255,
+                              shape=(self.screen_size, self.screen_size, 1),
+                              dtype=np.uint8)
 
     @property
     def action_space(self):
@@ -317,10 +317,14 @@ class AtariPreprocessing(object):
             else:
                 is_terminal = game_over
 
-            # We max-pool over the last two frames, in grayscale.
-            if time_step >= self.frame_skip - 2:
-                t = time_step - (self.frame_skip - 2)
-                self._fetch_grayscale_observation(self.screen_buffer[t])
+            # Retain the last two frames actually executed. A life loss can
+            # stop frame skipping before its nominal final two iterations.
+            buffer_index = 0 if self.frame_skip == 1 else time_step % 2
+            self._fetch_grayscale_observation(
+                self.screen_buffer[buffer_index])
+            if is_terminal and time_step == 0 and self.frame_skip > 1:
+                # Avoid pooling a sole new frame with stale pixels.
+                np.copyto(self.screen_buffer[1], self.screen_buffer[0])
 
             if is_terminal:
                 break
@@ -485,7 +489,8 @@ class DataEfficientAtariRunner(Runner):
         num_episodes = 0
         sum_returns = 0.
 
-        (episode_lengths, episode_returns, state, envs) = self._run_parallel(
+        (episode_lengths, episode_returns, phase_steps, state,
+         envs) = self._run_parallel(
             episodes=max_episodes,
             envs=envs,
             one_to_one=one_to_one,
@@ -494,12 +499,11 @@ class DataEfficientAtariRunner(Runner):
             max_steps=steps,
         )
 
+        if run_mode_str == 'train':
+            self.num_steps += phase_steps
+        step_count = phase_steps
         for episode_length, episode_return in zip(episode_lengths,
                                                   episode_returns):
-            if run_mode_str == 'train':
-                # we use one extra frame at the starting
-                self.num_steps += episode_length
-            step_count += episode_length
             sum_returns += episode_return
             num_episodes += 1
             sys.stdout.flush()
@@ -571,16 +575,19 @@ class DataEfficientAtariRunner(Runner):
             cum_lengths = []
         else:
             assert resume_state is not None
-            (new_obses, rewards, terminals, episode_end, cum_rewards,
-             cum_lengths) = (resume_state)
+            (new_obses, rewards, terminals, episode_end, _, _) = resume_state
+            # Completed-episode lists are phase results, not resumable state.
+            cum_rewards = []
+            cum_lengths = []
 
         total_steps = 0
         total_episodes = 0
         max_steps = np.inf if max_steps is None else max_steps
         step = 0
 
-        # Keep interacting until we reach a terminal state.
-        while True:
+        # Keep interacting until the requested step/episode cap is reached.
+        while (live_envs and total_steps < max_steps and
+               (episodes is None or total_episodes < episodes)):
             b = 0
             step += 1
             episode_end.fill(0)
@@ -661,14 +668,9 @@ class DataEfficientAtariRunner(Runner):
             self._agent.log_transition(new_obs, actions, rewards, terminals,
                                        episode_end)
 
-            if (not live_envs or
-                (max_steps is not None and total_steps > max_steps) or
-                (episodes is not None and total_episodes > episodes)):
-                break
-
         state = (new_obses, rewards, terminals, episode_end, cum_rewards,
                  cum_lengths)
-        return cum_lengths, cum_rewards, state, envs
+        return cum_lengths, cum_rewards, total_steps, state, envs
 
     def _run_train_phase(self,):
         """Run training phase.

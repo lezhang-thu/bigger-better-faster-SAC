@@ -35,10 +35,23 @@ SPROutputType = collections.namedtuple(
         'spatial_latent', 'rollout_reps'
     ],
 )
+SPR_BRANCH_NAMES = ('q', 'policy')
 PRNGKey = Any
 Array = Any
 Shape = Tuple[int]
 Dtype = Any
+
+
+def split_spr_branches(features, branch_dim):
+    """Splits concatenated Q/policy SPR features along the final axis."""
+    branch_dim = int(branch_dim)
+    num_branches = len(SPR_BRANCH_NAMES)
+    expected_dim = num_branches * branch_dim
+    if features.shape[-1] != expected_dim:
+        raise ValueError(
+            'SPR feature width must equal {} * branch_dim ({}), got {}.'.format(
+                num_branches, expected_dim, features.shape[-1]))
+    return features.reshape(*features.shape[:-1], num_branches, branch_dim)
 
 
 def _absolute_dims(rank, dims):
@@ -52,8 +65,10 @@ def _random_crop(key, img, cropped_shape):
     """Random crop an image."""
     _, width, height = cropped_shape[:-1]
     key_x, key_y = random.split(key, 2)
-    x = random.randint(key_x, shape=(), minval=0, maxval=img.shape[1] - width)
-    y = random.randint(key_y, shape=(), minval=0, maxval=img.shape[2] - height)
+    x = random.randint(
+        key_x, shape=(), minval=0, maxval=img.shape[1] - width + 1)
+    y = random.randint(
+        key_y, shape=(), minval=0, maxval=img.shape[2] - height + 1)
     return img[:, x:x + width, y:y + height]
 
 
@@ -69,11 +84,11 @@ def _per_image_random_crop(key, img, cropped_shape):
     x = random.randint(key_x,
                        shape=(batch_size,),
                        minval=0,
-                       maxval=img.shape[1] - width)
+                       maxval=img.shape[1] - width + 1)
     y = random.randint(key_y,
                        shape=(batch_size,),
                        minval=0,
-                       maxval=img.shape[2] - height)
+                       maxval=img.shape[2] - height + 1)
     return jax.vmap(_crop_with_indices, in_axes=(0, 0, 0, None))(img, x, y,
                                                                  cropped_shape)
 
@@ -650,7 +665,7 @@ class RainbowDQNNetwork(nn.Module):
         if do_rollout:
             latent, rollout_reps = self.spr_rollout(spatial_latent, actions)
 
-        probabilities = jnp.squeeze(nn.softmax(logits))
-        q_values = jnp.squeeze(jnp.sum(support * probabilities, axis=-1))
+        probabilities = nn.softmax(logits)
+        q_values = jnp.sum(support * probabilities, axis=-1)
         return SPROutputType(q_values, logits, probabilities, latent,
                              representation, spatial_latent, rollout_reps)

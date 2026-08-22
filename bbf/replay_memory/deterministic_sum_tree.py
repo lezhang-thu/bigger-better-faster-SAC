@@ -79,7 +79,8 @@ class DeterministicSumTree(sum_tree.SumTree):
         self.nodes = np.zeros(2**(self.depth + 1) - 1)  # Double precision.
         self.capacity = capacity
 
-        self.highest_set = 0
+        # -1 distinguishes an empty tree from a tree whose leaf zero is set.
+        self.highest_set = -1
 
         self.max_recorded_priority = 1.0
 
@@ -93,6 +94,8 @@ class DeterministicSumTree(sum_tree.SumTree):
 
     def sample(self, rng, query_value=None):
         """Samples an element from the sum tree."""
+        if self._total_priority() == 0.0:
+            raise Exception('Cannot sample from an empty sum tree.')
         nodes = jnp.array(self.nodes)
         query_value = (jax.random.uniform(rng)
                        if query_value is None else query_value)
@@ -125,7 +128,7 @@ class DeterministicSumTree(sum_tree.SumTree):
         return self.nodes[node_index + self.low_idx]
 
     def reset_priorities(self):
-        for i in range(self.highest_set):
+        for i in range(self.highest_set + 1):
             self.set(i, self.max_recorded_priority)
 
     def set(self, node_index, value):
@@ -141,9 +144,13 @@ class DeterministicSumTree(sum_tree.SumTree):
     Raises:
         ValueError: If the given value is negative.
     """
-        if value < 0.0:
+        if node_index < 0 or node_index >= self.capacity:
+            raise ValueError('Sum tree index is out of bounds: {}'.format(
+                node_index))
+        if not np.isfinite(value) or value < 0.0:
             raise ValueError(
-                'Sum tree values should be nonnegative. Got {}'.format(value))
+                'Sum tree values should be finite and nonnegative. Got {}'.format(
+                    value))
         self.highest_set = max(node_index, self.highest_set)
         node_index = node_index + self.low_idx
         self.max_recorded_priority = max(value, self.max_recorded_priority)
