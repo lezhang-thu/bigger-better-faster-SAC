@@ -50,10 +50,10 @@ TARGET_UPDATE_PARAMETER_KEYS = (
 # This branch intentionally supports one TD schedule only. Keep these values
 # in code so an obsolete Gin binding cannot silently change the experiment.
 INITIAL_TD_HORIZON = 10
-FINAL_TD_HORIZON = 3
+FINAL_TD_HORIZON = 1
 INITIAL_TD_GAMMA = 0.97
 FINAL_TD_GAMMA = 0.997
-TD_SCHEDULE_GRAD_UPDATES = 20_000
+TD_SCHEDULE_GRAD_UPDATES = 40_000
 DELTA_PRIORITY_EPSILON = 1e-6
 EVAL_ACTION_BATCH_BUCKET = 8
 
