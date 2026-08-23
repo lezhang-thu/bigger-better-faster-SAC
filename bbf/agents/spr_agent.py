@@ -1650,9 +1650,13 @@ class BBFAgent(JaxDQNAgent):
          self.optimizer_state) = reset_result[:3]
 
         self.cycle_grad_steps = 0
-        # Returns and discounts are materialized using the cycle schedule at
-        # sampling time. Discard queued pre-reset samples so the reset network
-        # immediately receives cycle-zero targets.
+        # The reset critic invalidates the priorities estimated by the old
+        # critic. Uniformize populated replay entries before rebuilding the
+        # prefetcher so its first post-reset batch uses the reset priorities.
+        self._replay.reset_priorities()
+        # Returns and discounts are also materialized using the cycle schedule
+        # at sampling time. Discard queued pre-reset samples so the reset
+        # network immediately receives cycle-zero targets.
         if hasattr(self, "prefetcher"):
             self.initialize_prefetcher()
         if hasattr(self, "replay_elements"):
