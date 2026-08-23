@@ -1214,6 +1214,7 @@ class BBFAgent(JaxDQNAgent):
         reset_every=-1,
         no_resets_after=-1,
         reset_offset=1,
+        first_reset_update_multiplier=1,
         learning_rate=0.0001,
         encoder_learning_rate=0.0001,
         reset_target=True,
@@ -1280,9 +1281,19 @@ class BBFAgent(JaxDQNAgent):
         self.offline_update_frac = float(offline_update_frac)
         self.no_resets_after = int(no_resets_after)
         self.cumulative_resets = 0
+        self._successful_resets = 0
         self.reset_interval_scaling = reset_interval_scaling
         self.reset_offset = int(reset_offset)
         self.next_reset = self.reset_every + self.reset_offset
+        self.first_reset_update_multiplier = int(
+            first_reset_update_multiplier)
+        if (isinstance(first_reset_update_multiplier, bool) or
+                self.first_reset_update_multiplier !=
+                first_reset_update_multiplier or
+                self.first_reset_update_multiplier < 1):
+            raise ValueError(
+                "first_reset_update_multiplier must be a positive integer, "
+                "got {}.".format(first_reset_update_multiplier))
 
         self.learning_rate = learning_rate
         self.encoder_learning_rate = encoder_learning_rate
@@ -1647,6 +1658,22 @@ class BBFAgent(JaxDQNAgent):
         if hasattr(self, "replay_elements"):
             del self.replay_elements
 
+        self._successful_resets += 1
+        if (self.first_reset_update_multiplier != 1 and
+                self._successful_resets == 1):
+            logging.info(
+                "\t Multiplying gradient updates by %s until the next "
+                "successful reset.", self.first_reset_update_multiplier)
+        elif (self.first_reset_update_multiplier != 1 and
+              self._successful_resets == 2):
+            logging.info("\t Restoring the base gradient-update rate.")
+
+    def _num_update_groups_for_current_reset_phase(self):
+        """Returns the grouped-update count for the current reset phase."""
+        multiplier = (getattr(self, "first_reset_update_multiplier", 1)
+                      if getattr(self, "_successful_resets", 0) == 1 else 1)
+        return self._num_updates_per_train_step * multiplier
+
     def _training_step_update(self, step_index, offline=False):
         """Gradient update during every training step."""
         self.start = time.time()
@@ -1873,7 +1900,11 @@ class BBFAgent(JaxDQNAgent):
 
         if self._replay.add_count > self.min_replay_history:
             if self.training_steps % self.update_period == 0:
-                for i in range(self._num_updates_per_train_step):
+                # Each extra group advances grad_steps and cycle_grad_steps
+                # normally, so gradient-step schedules intentionally accelerate.
+                num_update_groups = (
+                    self._num_update_groups_for_current_reset_phase())
+                for i in range(num_update_groups):
                     self._training_step_update(i, offline=False)
         if self.reset_every > 0 and self.training_steps > self.next_reset:
             self.reset_weights()
