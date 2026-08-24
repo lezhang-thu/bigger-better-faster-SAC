@@ -1,16 +1,4 @@
 set -ex
-# Full 26-game Atari-100k suite at the combo candidate config:
-# reward_readout=True + imag_value_weight=0.05, coupled imagination entropy,
-# annealed imag discount, actor 0.1. Gate history (RUN=40): Jamesbond 1271,
-# Hero 12878.9 (project best), Pong 17.39, BankHeist 95.9 (weather-class
-# low-mode draw; baseline's own low mode is 75.6-285.8).
-#
-# Compare against the 10-seed anchor baselines in bbf-raw-scores.txt
-# (available on branch stage0123v2). Split across boxes via GAMES=...; keep
-# RUN=50 everywhere so the suite has a single id.
-# Between the first and second successful resets, the gradient-update rate is
-# doubled. TD horizon, gamma, and imagination warmup are keyed to gradient
-# steps, so they intentionally progress twice as fast during that phase.
 cd "$(dirname "$0")/.."
 # Each game runs in a fresh Python process, but many games share identical
 # action/shape signatures.  Persist compiled executables across those processes.
@@ -28,6 +16,9 @@ for game_name in $GAMES; do
 		--gin_bindings="BBFAgent.imag_actor_weight=0.1" \
 		--gin_bindings="BBFAgent.imag_entropy_weight=None" \
 		--gin_bindings="BBFAgent.imag_discount=None" \
-		--gin_bindings="BBFAgent.first_reset_update_multiplier=2" \
+		--gin_bindings="BBFAgent.first_reset_update_multiplier=1" \
+		--gin_bindings="BBFAgent.reset_priorities=False" \
+		--gin_bindings="BBFAgent.update_horizon=1" \
+		--gin_bindings="BBFAgent.cycle_steps=20_000" \
 		--run_number=$RUN
 done

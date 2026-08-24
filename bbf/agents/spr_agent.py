@@ -1248,6 +1248,7 @@ class BBFAgent(JaxDQNAgent):
         seed=None,
         log_every=None,
         explore_end_steps=None,
+        reset_priorities=True,
     ):
         logging.info(
             "Creating %s agent with the following parameters:",
@@ -1284,6 +1285,7 @@ class BBFAgent(JaxDQNAgent):
         self._successful_resets = 0
         self.reset_interval_scaling = reset_interval_scaling
         self.reset_offset = int(reset_offset)
+        self.reset_priorities = bool(reset_priorities)
         self.next_reset = self.reset_every + self.reset_offset
         self.first_reset_update_multiplier = int(
             first_reset_update_multiplier)
@@ -1650,10 +1652,11 @@ class BBFAgent(JaxDQNAgent):
          self.optimizer_state) = reset_result[:3]
 
         self.cycle_grad_steps = 0
-        # The reset critic invalidates the priorities estimated by the old
-        # critic. Uniformize populated replay entries before rebuilding the
-        # prefetcher so its first post-reset batch uses the reset priorities.
-        self._replay.reset_priorities()
+        if getattr(self, "reset_priorities", True):
+            # The reset critic invalidates the priorities estimated by the old
+            # critic. Uniformize populated replay entries before rebuilding the
+            # prefetcher so its first post-reset batch uses reset priorities.
+            self._replay.reset_priorities()
         # Returns and discounts are also materialized using the cycle schedule
         # at sampling time. Discard queued pre-reset samples so the reset
         # network immediately receives cycle-zero targets.
