@@ -1042,6 +1042,15 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
         indices = indices.astype(np.int32, copy=False)
         return np.asarray(self.sum_tree.get(indices), dtype=np.float32)
 
+    def mean_priority(self):
+        """Returns the replay-wide mean over populated priority leaves."""
+        if not getattr(self, '_prioritized_sampling', True):
+            return np.float32(1.0)
+        populated = self.sum_tree.highest_set + 1
+        if populated <= 0:
+            return np.float32(1.0)
+        return np.float32(self.sum_tree._total_priority() / populated)
+
     def get_transition_elements(self,
                                 batch_size=None,
                                 subseq_len=None,

@@ -17,6 +17,16 @@ BBFAgent.distributional = True
 BBFAgent.num_atoms = 51
 BBFAgent.update_horizon = 3
 BBFAgent.max_update_horizon = 10
+# Exact one-step target-policy mixing is independently opt-in and requires both
+# replay horizons to be one.
+BBFAgent.expected_one_step_backup = False
+# Distributional Retrace is opt-in so the default BBF target is unchanged.
+# Enabling it requires raw replay rows (update_horizon=max_update_horizon=1)
+# and a fixed gamma (min_gamma=None). Its real-trajectory horizon remains
+# independent of MODEL_HORIZON, which controls SPR and imagination depth.
+BBFAgent.retrace = False
+BBFAgent.retrace_horizon = 10
+BBFAgent.retrace_lambda = 1.0
 BBFAgent.min_gamma = 0.97
 BBFAgent.cycle_steps = 10_000
 BBFAgent.reset_every = 20_000 # Change if you change the replay ratio

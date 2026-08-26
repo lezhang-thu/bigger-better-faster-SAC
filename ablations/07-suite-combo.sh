@@ -7,6 +7,7 @@ GAMES=${GAMES:-"Alien Amidar Assault Asterix BankHeist BattleZone Boxing Breakou
 GPU=${GPU:-0}
 RUN=${RUN:-50}
 for game_name in $GAMES; do
+#for game_name in $(printf '%s\n' $GAMES | tac); do
 	CUDA_VISIBLE_DEVICES=$GPU python -m bbf.train \
 		--agent=BBF \
 		--gin_files=bbf/configs/BBF-100K.gin \
@@ -18,7 +19,9 @@ for game_name in $GAMES; do
 		--gin_bindings="BBFAgent.imag_discount=None" \
 		--gin_bindings="BBFAgent.first_reset_update_multiplier=1" \
 		--gin_bindings="BBFAgent.reset_priorities=False" \
+		--gin_bindings="BBFAgent.retrace=True" \
 		--gin_bindings="BBFAgent.update_horizon=1" \
-		--gin_bindings="BBFAgent.cycle_steps=20_000" \
+		--gin_bindings="BBFAgent.max_update_horizon=1" \
+		--gin_bindings="BBFAgent.min_gamma=None" \
 		--run_number=$RUN
 done

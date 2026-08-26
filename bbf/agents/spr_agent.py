@@ -85,6 +85,116 @@ def project_distribution(supports, weights, target_support):
     return jnp.squeeze(jnp.sum(inner_prod, -1))
 
 
+def categorical_retrace(policy_probabilities, target_probabilities,
+                        trace_actions, behavior_probabilities, rewards,
+                        terminals, support, gamma, lamb):
+    """Builds a finite-horizon Distributional Retrace target for C51.
+
+    The sampled raw trajectory is ``S0,A0,R1,D1,...,RH,DH,SH``. Policy and
+    target probabilities are evaluated at the endpoint states ``S1..SH``;
+    ``trace_actions`` and ``behavior_probabilities`` contain only the
+    intermediate behavior choices ``A1..A{H-1}``. The root action is excluded
+    because its importance ratio must not enter a target rooted at ``(S0,A0)``.
+
+    Following Reactor, an individual off-policy target is a signed categorical
+    measure. Its total mass is one, but individual bins may be negative; the
+    linear cross-entropy gradient remains the Distributional Retrace update.
+
+    Args:
+      policy_probabilities: Current-policy probabilities with shape ``[H, A]``.
+      target_probabilities: Target-critic distributions ``[H, A, Z]``.
+      trace_actions: Replay actions ``A1..A{H-1}``, shape ``[H - 1]``.
+      behavior_probabilities: Logged probabilities for those actions.
+      rewards: Raw rewards ``R1..RH``, shape ``[H]``.
+      terminals: Raw terminal flags ``D1..DH``, shape ``[H]``.
+      support: C51 support, shape ``[Z]``.
+      gamma: Scalar discount.
+      lamb: Retrace lambda in ``[0, 1]``.
+
+    Returns:
+      A stopped-gradient signed categorical target with shape ``[Z]``.
+    """
+    horizon = rewards.shape[0]
+    if horizon < 1:
+        raise ValueError("Retrace requires at least one transition.")
+    if policy_probabilities.shape[0] != horizon:
+        raise ValueError("Policy sequence length must match reward horizon.")
+    if target_probabilities.shape[0] != horizon:
+        raise ValueError("Target sequence length must match reward horizon.")
+    if terminals.shape[0] != horizon:
+        raise ValueError("Terminal sequence length must match reward horizon.")
+    if trace_actions.shape[0] != horizon - 1:
+        raise ValueError("Retrace needs one intermediate action per trace step.")
+    if behavior_probabilities.shape[0] != horizon - 1:
+        raise ValueError(
+            "Retrace needs one behavior probability per trace step.")
+
+    dtype = target_probabilities.dtype
+    gamma = jnp.asarray(gamma, dtype=dtype)
+    lamb = jnp.asarray(lamb, dtype=dtype)
+    target = jnp.zeros_like(support, dtype=dtype)
+    path_weight = jnp.asarray(1.0, dtype=dtype)
+    cumulative_reward = jnp.asarray(0.0, dtype=dtype)
+    discount = jnp.asarray(1.0, dtype=dtype)
+    num_actions = target_probabilities.shape[1]
+    tiny = jnp.asarray(jnp.finfo(dtype).tiny, dtype=dtype)
+
+    for endpoint in range(horizon):
+        cumulative_reward = cumulative_reward + discount * rewards[endpoint]
+        done = terminals[endpoint].astype(dtype)
+
+        # A true terminal consumes all residual trace mass at the accumulated
+        # return. Later replay rows may be from another episode and therefore
+        # have exactly zero influence.
+        terminal_weight = path_weight * done
+        target = target + project_distribution(
+            jnp.asarray([cumulative_reward]),
+            jnp.asarray([terminal_weight]), support)
+        live_weight = path_weight * (1.0 - done)
+
+        policy = policy_probabilities[endpoint]
+        if endpoint == horizon - 1:
+            coefficients = live_weight * policy
+        else:
+            replay_action = trace_actions[endpoint].astype(jnp.int32)
+            behavior_probability = jnp.maximum(
+                behavior_probabilities[endpoint].astype(dtype), tiny)
+            ratio = policy[replay_action] / behavior_probability
+            coefficient = lamb * jnp.minimum(
+                jnp.asarray(1.0, dtype=dtype), ratio)
+            coefficients = live_weight * (
+                policy - jax.nn.one_hot(
+                    replay_action, num_actions, dtype=dtype) * coefficient)
+            path_weight = live_weight * coefficient
+
+        transformed_support = cumulative_reward + discount * gamma * support
+        branch_supports = jnp.broadcast_to(
+            transformed_support,
+            target_probabilities[endpoint].shape,
+        ).reshape(-1)
+        branch_weights = (
+            coefficients[:, None] * target_probabilities[endpoint]).reshape(-1)
+        target = target + project_distribution(
+            branch_supports, branch_weights, support)
+        discount = discount * gamma
+
+    return jax.lax.stop_gradient(target)
+
+
+def categorical_retrace_priority(target, predicted_probabilities):
+    """Returns a bounded squared total-variation priority loss.
+
+    Retrace targets may contain negative bins, so their cross-entropy value is
+    not a safe nonnegative replay priority. Squared, clipped total variation is
+    finite and works with the caller's existing square-root PER transform.
+    """
+    if target.shape != predicted_probabilities.shape:
+        raise ValueError("Retrace target and prediction shapes must match.")
+    total_variation = 0.5 * jnp.sum(
+        jnp.abs(target - predicted_probabilities), axis=-1)
+    return jnp.square(jnp.clip(total_variation, 0.0, 1.0))
+
+
 def softmax_cross_entropy_loss_with_logits(labels: jnp.array,
                                            logits: jnp.array) -> jnp.ndarray:
     """Implementation of the softmax cross entropy loss."""
@@ -277,6 +387,91 @@ def validate_priority_cardinality(indices, priority_losses):
         raise AssertionError(
             'Replay priority cardinality mismatch: {} indices but {} '
             'per-example losses.'.format(num_indices, num_losses))
+
+
+def replay_loss_weights(priorities, retrace=False, mean_priority=None):
+    """Builds auxiliary weights and beta=1 Retrace critic weights."""
+    priorities = np.asarray(priorities, dtype=np.float32)
+    if priorities.size == 0:
+        raise ValueError("Replay priorities must not be empty.")
+    if (not np.all(np.isfinite(priorities)) or
+            np.any(priorities <= 0.0)):
+        raise FloatingPointError(
+            "Sampled replay priorities must be finite and positive.")
+
+    # Preserve the historical fixed beta=.5 correction for SPR, actor, model,
+    # and imagination losses.
+    auxiliary_weights = 1.0 / np.sqrt(priorities + 1e-10)
+    auxiliary_weights /= np.max(auxiliary_weights)
+    if not retrace:
+        return auxiliary_weights, auxiliary_weights
+
+    # Signed Retrace coefficients are nonnegative only in expectation over
+    # behavior trajectories, so the replay critic needs full beta=1 correction.
+    # A replay-wide scale keeps relative inverse-priority weights independent
+    # of which trajectories happen to share a sampled batch.
+    if (mean_priority is None or not np.isfinite(mean_priority) or
+            mean_priority <= 0.0):
+        raise FloatingPointError(
+            "Replay mean priority must be finite and positive.")
+    td_weights = np.asarray(
+        mean_priority / (priorities + 1e-10), dtype=np.float32)
+    if not np.all(np.isfinite(td_weights)):
+        raise FloatingPointError("Retrace TD importance weights must be finite.")
+    return auxiliary_weights, td_weights
+
+
+def validate_expected_one_step_backup(enabled, update_horizon,
+                                      max_update_horizon):
+    """Requires raw one-step replay when exact policy mixing is enabled."""
+    if not enabled:
+        return
+
+    update_horizon = int(update_horizon)
+    max_update_horizon = (update_horizon if max_update_horizon is None else
+                          int(max_update_horizon))
+    if update_horizon != 1 or max_update_horizon != 1:
+        raise ValueError(
+            "expected_one_step_backup requires update_horizon=1 and "
+            "max_update_horizon=1 (or None), got update_horizon={} and "
+            "max_update_horizon={}.".format(update_horizon,
+                                            max_update_horizon))
+
+
+def validate_retrace(enabled, expected_one_step_backup, update_horizon,
+                     max_update_horizon, retrace_horizon, retrace_lambda,
+                     min_gamma, cycle_steps, distributional):
+    """Validates the raw-transition and fixed-schedule Retrace contract."""
+    if not enabled:
+        return
+
+    update_horizon = int(update_horizon)
+    max_update_horizon = (update_horizon if max_update_horizon is None else
+                          int(max_update_horizon))
+    retrace_horizon = int(retrace_horizon)
+    retrace_lambda = float(retrace_lambda)
+    if expected_one_step_backup:
+        raise ValueError(
+            "retrace and expected_one_step_backup are mutually exclusive.")
+    if update_horizon != 1 or max_update_horizon != 1:
+        raise ValueError(
+            "retrace reads raw one-step replay rows and therefore requires "
+            "update_horizon=max_update_horizon=1, got {} and {}.".format(
+                update_horizon, max_update_horizon))
+    if retrace_horizon < 1:
+        raise ValueError(
+            "retrace_horizon must be positive, got {}.".format(
+                retrace_horizon))
+    if not 0.0 <= retrace_lambda <= 1.0:
+        raise ValueError(
+            "retrace_lambda must be in [0, 1], got {}.".format(
+                retrace_lambda))
+    if min_gamma is not None and int(cycle_steps) > 1:
+        raise ValueError(
+            "retrace requires a fixed replay-TD gamma; set min_gamma=None "
+            "instead of using the cyclic gamma schedule.")
+    if not distributional:
+        raise ValueError("retrace currently requires distributional C51.")
 
 
 def td_backup_parameter_sets(online_params, target_params, use_target_backups,
@@ -534,6 +729,10 @@ train_static_argnames = [
     'dtype',
     'batch_size',
     'use_target_backups',
+    'expected_one_step_backup',
+    'retrace',
+    'spr_horizon',
+    'retrace_horizon',
     'match_online_target_rngs',
     'target_eval_mode',
     'reward_weight',
@@ -556,6 +755,7 @@ def train(
     terminals,  # 9
     same_traj_mask,  # 10
     loss_weights,  # 11
+    td_loss_weights,
     support,  # 12
     cumulative_gamma,  # 13
     double_dqn,  # 14, static
@@ -566,6 +766,11 @@ def train(
     dtype,  # static
     batch_size,  # static
     use_target_backups,  # static
+    expected_one_step_backup,  # static
+    retrace,  # static
+    spr_horizon,  # static
+    retrace_horizon,  # static
+    retrace_lambda,
     target_update_tau,
     target_update_every,
     step,
@@ -574,6 +779,7 @@ def train(
     #ent_targ,
     x_ent_coef,
     per_step_rewards,
+    behavior_probabilities,
     reward_weight,  # static
     continue_weight,  # static
     reward_readout,  # static
@@ -609,13 +815,24 @@ def train(
             terminals,
             same_traj_mask,
             loss_weights,
+            td_loss_weights,
             cumulative_gamma,
             per_step_rewards,
+            behavior_probabilities,
         ) = inputs
+
+        # Retrace can request a longer real sequence than SPR/imagination.
+        # Keep representation and world-model learning at their configured
+        # depth while reserving the full raw trajectory for the TD target.
+        model_raw_states = raw_states[:, :spr_horizon + 1]
+        model_actions = actions[:, :spr_horizon]
+        model_same_traj = same_traj_mask[:, :spr_horizon + 1]
+        model_step_rewards = per_step_rewards[:, :spr_horizon]
+
         # World-model targets, aligned to arrival semantics: the feature of
         # state s_{k+1} (column k below) predicts reward r_k and whether the
         # episode continues at s_{k+1}.
-        continue_targets = same_traj_mask[:, 1:].astype(jnp.float32)
+        continue_targets = model_same_traj[:, 1:].astype(jnp.float32)
         model_mask = jnp.concatenate(
             [
                 jnp.ones_like(continue_targets[:, :1]),
@@ -623,25 +840,42 @@ def train(
             ],
             axis=1,
         )
-        model_rewards = per_step_rewards[:, :-1].astype(jnp.float32)
+        model_rewards = model_step_rewards.astype(jnp.float32)
 
-        same_traj_mask = same_traj_mask[:, 1:]
-        rewards = rewards[:, 0]
-        terminals = terminals[:, 0]
-        cumulative_gamma = cumulative_gamma[:, 0]
+        same_traj_mask = model_same_traj[:, 1:]
+        root_rewards = rewards[:, 0]
+        root_terminals = terminals[:, 0]
+        root_discount = cumulative_gamma[:, 0]
 
         rng, rng1, rng2 = jax.random.split(rng, num=3)
         states = spr_networks.process_inputs(
-            raw_states,
+            model_raw_states,
             rng=rng1,
             data_augmentation=data_augmentation,
             dtype=dtype)
-        next_states = spr_networks.process_inputs(
-            raw_next_states[:, 0],
-            rng=rng2,
-            data_augmentation=data_augmentation,
-            dtype=dtype,
-        )
+        if retrace:
+            # Importance ratios compare against the behavior policy, which saw
+            # unaugmented observations. Keep that contract for pi/mu while the
+            # target critic retains the configured DrQ augmentation.
+            retrace_policy_states = spr_networks.process_inputs(
+                raw_next_states[:, :retrace_horizon],
+                data_augmentation=False,
+                dtype=dtype,
+            )
+            retrace_value_states = spr_networks.process_inputs(
+                raw_next_states[:, :retrace_horizon],
+                rng=rng2,
+                data_augmentation=data_augmentation,
+                dtype=dtype,
+            )
+            next_states = retrace_value_states[:, 0]
+        else:
+            next_states = spr_networks.process_inputs(
+                raw_next_states[:, 0],
+                rng=rng2,
+                data_augmentation=data_augmentation,
+                dtype=dtype,
+            )
         current_state = states[:, 0]
 
         # Split the current rng to update the rng after this call
@@ -661,6 +895,16 @@ def train(
         def policy_backup(state, action_sample_key):
             return network_def.apply(
                 action_selection_params,
+                state,
+                rngs={"action_sample": action_sample_key},
+                method=network_def.get_policy,
+            )
+
+        def current_policy(state, action_sample_key):
+            # Retrace explicitly evaluates the current target policy. This is
+            # independent of Double-DQN's action-selection parameter routing.
+            return network_def.apply(
+                online_params,
                 state,
                 rngs={"action_sample": action_sample_key},
                 method=network_def.get_policy,
@@ -688,6 +932,7 @@ def train(
             spr_targets,
             future_latents,
             loss_multipliers,
+            td_loss_multipliers,
             key,
             imag_keys,
         ):
@@ -722,15 +967,24 @@ def train(
             x, logits = jax.vmap(all_results,
                                  in_axes=(0, 0, None),
                                  axis_name="batch")(current_state,
-                                                    actions[:, :-1], use_spr)
+                                                    model_actions, use_spr)
             spr_predictions = x.latent
             q_logits = x.logits
             chosen_action_logits = q_logits[jnp.arange(q_logits.shape[0]),
                                             actions[:, 0]]
             dqn_loss = jax.vmap(softmax_cross_entropy_loss_with_logits)(
                 target, chosen_action_logits)
-            td_error = dqn_loss + jnp.nan_to_num(
-                target * jnp.log(target)).sum(-1)
+            if retrace:
+                predicted_probabilities = jax.nn.softmax(chosen_action_logits)
+                retrace_tv = 0.5 * jnp.sum(
+                    jnp.abs(target - predicted_probabilities), axis=-1)
+                priority_loss = categorical_retrace_priority(
+                    target, predicted_probabilities)
+                td_error = retrace_tv
+            else:
+                priority_loss = dqn_loss
+                td_error = dqn_loss + jnp.nan_to_num(
+                    target * jnp.log(target)).sum(-1)
 
             spr_predictions = spr_predictions.transpose(1, 0, 2)
             spr_predictions = spr_networks.split_spr_branches(
@@ -750,8 +1004,14 @@ def train(
             spr_loss = (spr_loss * same_traj_mask.transpose(1, 0)).mean(0) * .5
             #logging.info("spr_loss.shape: {}".format(spr_loss.shape))
             #exit(0)
-            loss = dqn_loss + spr_weight * spr_loss
-            loss = loss_multipliers * loss
+            if retrace:
+                # Full beta=1 correction is used only for the signed Retrace
+                # critic estimator. Auxiliary losses retain legacy beta=.5.
+                loss = (td_loss_multipliers * dqn_loss +
+                        loss_multipliers * spr_weight * spr_loss)
+            else:
+                # Preserve historical operation order when Retrace is disabled.
+                loss = loss_multipliers * (dqn_loss + spr_weight * spr_loss)
 
             mean_loss = jnp.mean(loss)
 
@@ -922,7 +1182,7 @@ def train(
             aux_losses = {
                 "TotalLoss": total_loss,
                 "DQNLoss": jnp.mean(dqn_loss),
-                "PriorityLoss": dqn_loss,
+                "PriorityLoss": priority_loss,
                 "TD Error": jnp.mean(td_error),
                 "SPRLoss": jnp.mean(spr_loss),
                 "ent": jnp.mean(policy_out[1]),
@@ -930,23 +1190,59 @@ def train(
             }
             aux_losses.update(aux_model)
             aux_losses.update(imag_metrics)
+            if retrace:
+                aux_losses["RetraceNegativeMass"] = jnp.mean(
+                    jnp.sum(jnp.maximum(-target, 0.0), axis=-1))
+                aux_losses["RetraceTargetMass"] = jnp.mean(
+                    jnp.sum(target, axis=-1))
             return total_loss, (aux_losses)
 
         # Use the weighted mean loss for gradient computation.
-        target = jax.vmap(target_output,
-                          in_axes=(None, None, 0, 0, 0, None, 0, 0),
-                          axis_name="batch")(
-                              policy_backup,
-                              q_backup,
-                              next_states,
-                              rewards,
-                              terminals,
-                              support,
-                              cumulative_gamma,
-                              target_rng,
-                          )
+        if retrace:
+            retrace_keys = jax.random.split(
+                rng1, states.shape[0] * retrace_horizon).reshape(
+                    states.shape[0], retrace_horizon, 2)
+            retrace_policy_logits, _ = jax.vmap(
+                jax.vmap(current_policy, in_axes=(0, 0), axis_name="time"),
+                in_axes=(0, 0), axis_name="batch")(
+                    retrace_policy_states, retrace_keys)
+            retrace_policy_probabilities = jax.nn.softmax(
+                retrace_policy_logits, axis=-1)
+            retrace_target_output = jax.vmap(
+                jax.vmap(q_backup, in_axes=0, axis_name="time"),
+                in_axes=0, axis_name="batch")(retrace_value_states)
+            retrace_target_probabilities = retrace_target_output.probabilities
+            target = jax.vmap(
+                categorical_retrace,
+                in_axes=(0, 0, 0, 0, 0, 0, None, 0, None),
+                axis_name="batch")(
+                    retrace_policy_probabilities,
+                    retrace_target_probabilities,
+                    actions[:, 1:retrace_horizon],
+                    behavior_probabilities[:, 1:retrace_horizon],
+                    per_step_rewards[:, :retrace_horizon],
+                    terminals[:, :retrace_horizon],
+                    support,
+                    root_discount,
+                    retrace_lambda,
+                )
+        else:
+            target = jax.vmap(
+                target_output,
+                in_axes=(None, None, 0, 0, 0, None, 0, 0, None),
+                axis_name="batch")(
+                    policy_backup,
+                    q_backup,
+                    next_states,
+                    root_rewards,
+                    root_terminals,
+                    support,
+                    root_discount,
+                    target_rng,
+                    expected_one_step_backup,
+                )
 
-        future_states = states[:, 1:]
+        future_states = states[:, 1:spr_horizon + 1]
         spr_targets, future_latents = jax.vmap(jax.vmap(encode_project,
                                                         in_axes=0,
                                                         axis_name="time"),
@@ -967,6 +1263,7 @@ def train(
             spr_targets,
             future_latents,
             loss_weights,
+            td_loss_weights,
             key,
             imag_keys,
         )
@@ -1033,10 +1330,14 @@ def train(
         same_traj_mask.reshape(num_batches, batch_size,
                                *same_traj_mask.shape[1:]),
         loss_weights.reshape(num_batches, batch_size, *loss_weights.shape[1:]),
+        td_loss_weights.reshape(num_batches, batch_size,
+                                *td_loss_weights.shape[1:]),
         cumulative_gamma.reshape(num_batches, batch_size,
                                  *cumulative_gamma.shape[1:]),
         per_step_rewards.reshape(num_batches, batch_size,
                                  *per_step_rewards.shape[1:]),
+        behavior_probabilities.reshape(
+            num_batches, batch_size, *behavior_probabilities.shape[1:]),
     )
 
     (
@@ -1069,15 +1370,22 @@ def target_output(
     support,
     cumulative_gamma,
     rng,
+    expected_one_step_backup=False,
 ):
     gamma_with_terminal = (cumulative_gamma *
                            (1.0 - terminals.astype(jnp.float32)))
     target_dist = target_network(next_states)
-    _, next_qt_argmax = policy_info(next_states, rng)
+    policy_logits, next_qt_argmax = policy_info(next_states, rng)
 
     # Compute the target Q-value distribution
     probabilities = target_dist.probabilities
-    next_probabilities = probabilities[next_qt_argmax]
+    if expected_one_step_backup:
+        # Mix the complete target-critic distributions under the current policy
+        # instead of adding bootstrap-action sampling noise.
+        next_probabilities = jnp.einsum(
+            "a,az->z", jax.nn.softmax(policy_logits), probabilities)
+    else:
+        next_probabilities = probabilities[next_qt_argmax]
     target_support = rewards + gamma_with_terminal * support
     target = project_distribution(target_support, next_probabilities, support)
 
@@ -1210,6 +1518,10 @@ class BBFAgent(JaxDQNAgent):
         batches_to_group=1,
         update_horizon=10,
         max_update_horizon=None,
+        expected_one_step_backup=False,
+        retrace=False,
+        retrace_horizon=10,
+        retrace_lambda=1.0,
         min_gamma=None,
         reset_every=-1,
         no_resets_after=-1,
@@ -1271,6 +1583,24 @@ class BBFAgent(JaxDQNAgent):
         self._batch_size = int(batch_size)
         self._batches_to_group = int(batches_to_group)
         self.update_horizon = int(update_horizon)
+        self.expected_one_step_backup = bool(expected_one_step_backup)
+        validate_expected_one_step_backup(self.expected_one_step_backup,
+                                          self.update_horizon,
+                                          max_update_horizon)
+        self.retrace = bool(retrace)
+        self.retrace_horizon = int(retrace_horizon)
+        self.retrace_lambda = float(retrace_lambda)
+        validate_retrace(
+            self.retrace,
+            self.expected_one_step_backup,
+            self.update_horizon,
+            max_update_horizon,
+            self.retrace_horizon,
+            self.retrace_lambda,
+            min_gamma,
+            cycle_steps,
+            self._distributional,
+        )
         self._jumps = int(jumps)
         self.spr_weight = spr_weight
 
@@ -1340,6 +1670,11 @@ class BBFAgent(JaxDQNAgent):
         print(' self.target_eval_mode: {}'.format(self.target_eval_mode))
         print(' self.target_action_selection: {}'.format(
             self.target_action_selection))
+        print(' self.expected_one_step_backup: {}'.format(
+            self.expected_one_step_backup))
+        print(' self.retrace: {}'.format(self.retrace))
+        print(' self.retrace_horizon: {}'.format(self.retrace_horizon))
+        print(' self.retrace_lambda: {}'.format(self.retrace_lambda))
         print(" num_actions: {}".format(num_actions))
         print(" self.reset_target: {}".format(self.reset_target))
         # debug - end
@@ -1510,13 +1845,27 @@ class BBFAgent(JaxDQNAgent):
         #exit(0)
 
     def _build_replay_buffer(self):
+        # Endpoint states S1..SH come from the one-step next_state columns, so
+        # Retrace needs H raw replay rows. SPR independently needs jumps+1
+        # states and must not inherit the longer TD horizon.
+        subseq_len = max(
+            self._jumps + 1,
+            self.retrace_horizon if self.retrace else 1,
+        )
+        extra_storage_types = None
+        if self.retrace:
+            extra_storage_types = [
+                circular_replay_buffer.ReplayElement(
+                    'behavior_probability', (), np.float32)
+            ]
         prioritized_buffer = subsequence_replay_buffer.PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
             observation_shape=self.observation_shape,
             stack_size=self.stack_size,
             update_horizon=self.max_update_horizon,
             gamma=self.gamma,
-            subseq_len=self._jumps + 1,
+            subseq_len=subseq_len,
             batch_size=self._batch_size,
+            extra_storage_types=extra_storage_types,
             observation_dtype=self.observation_dtype,
         )
 
@@ -1572,15 +1921,22 @@ class BBFAgent(JaxDQNAgent):
 
     def _sample_replay_elements(self, rng):
         sample_batch_size = self._batch_size * self._batches_to_group
+        retrace_enabled = getattr(self, 'retrace', False)
+        root_next_state_only = not retrace_enabled
         types = self._replay.get_transition_elements(
-            batch_size=sample_batch_size, root_next_state_only=True)
+            batch_size=sample_batch_size,
+            root_next_state_only=root_next_state_only)
+        replay_horizon = (1 if retrace_enabled else
+                          self.update_horizon_scheduler(
+                              self.cycle_grad_steps))
+        replay_gamma = (self.gamma if retrace_enabled else
+                        self.gamma_scheduler(self.cycle_grad_steps))
         samples = self._replay.sample_transition_batch(
             rng,
             batch_size=sample_batch_size,
-            update_horizon=self.update_horizon_scheduler(
-                self.cycle_grad_steps),
-            gamma=self.gamma_scheduler(self.cycle_grad_steps),
-            root_next_state_only=True,
+            update_horizon=replay_horizon,
+            gamma=replay_gamma,
+            root_next_state_only=root_next_state_only,
         )
         replay_elements = collections.OrderedDict()
         for element, element_type in zip(samples, types):
@@ -1652,7 +2008,9 @@ class BBFAgent(JaxDQNAgent):
          self.optimizer_state) = reset_result[:3]
 
         self.cycle_grad_steps = 0
-        if getattr(self, "reset_priorities", True):
+        if (getattr(self, "reset_priorities",
+                    getattr(self, "retrace", True)) and
+                hasattr(self, "_replay")):
             # The reset critic invalidates the priorities estimated by the old
             # critic. Uniformize populated replay entries before rebuilding the
             # prefetcher so its first post-reset batch uses reset priorities.
@@ -1665,13 +2023,15 @@ class BBFAgent(JaxDQNAgent):
         if hasattr(self, "replay_elements"):
             del self.replay_elements
 
-        self._successful_resets += 1
-        if (self.first_reset_update_multiplier != 1 and
+        self._successful_resets = getattr(self, "_successful_resets", 0) + 1
+        first_reset_update_multiplier = getattr(
+            self, "first_reset_update_multiplier", 1)
+        if (first_reset_update_multiplier != 1 and
                 self._successful_resets == 1):
             logging.info(
                 "\t Multiplying gradient updates by %s until the next "
-                "successful reset.", self.first_reset_update_multiplier)
-        elif (self.first_reset_update_multiplier != 1 and
+                "successful reset.", first_reset_update_multiplier)
+        elif (first_reset_update_multiplier != 1 and
               self._successful_resets == 2):
             logging.info("\t Restoring the base gradient-update rate.")
 
@@ -1688,14 +2048,12 @@ class BBFAgent(JaxDQNAgent):
         if not hasattr(self, "replay_elements"):
             self._sample_from_replay_buffer()
 
-        # The original prioritized experience replay uses a linear exponent
-        # schedule 0.4 -> 1.0. Comparing the schedule to a fixed exponent of
-        # 0.5 on 5 games (Asterix, Pong, Q*Bert, Seaquest, Space Invaders)
-        # suggested a fixed exponent actually performs better, except on Pong.
         probs = self.replay_elements["sampling_probabilities"]
-        # Weight the loss by the inverse priorities.
-        loss_weights = 1.0 / np.sqrt(probs + 1e-10)
-        loss_weights /= np.max(loss_weights)
+        retrace_enabled = getattr(self, "retrace", False)
+        mean_priority = (float(self._replay.mean_priority())
+                         if retrace_enabled else None)
+        loss_weights, td_loss_weights = replay_loss_weights(
+            probs, retrace=retrace_enabled, mean_priority=mean_priority)
         indices = self.replay_elements["indices"]
 
         if False:
@@ -1724,11 +2082,21 @@ class BBFAgent(JaxDQNAgent):
         imag_actor_mult = self.imag_actor_weight * imag_ramp
         imag_value_mult = self.imag_value_weight * imag_ramp
 
-        # The Q function that bootstraps the imagined lambda-return is trained
-        # under BBF's annealed discount, so imagination discounts with that
-        # same value rather than with the fixed final gamma.
-        imag_discount = (self.gamma_scheduler(self.cycle_grad_steps)
-                         if self.imag_discount is None else self.imag_discount)
+        # Imagination follows the critic discount. Retrace owns a fixed final
+        # gamma rather than the historical cyclic replay-TD schedule.
+        critic_discount = (self.gamma if retrace_enabled else
+                           self.gamma_scheduler(self.cycle_grad_steps))
+        imag_discount = (critic_discount if self.imag_discount is None else
+                         self.imag_discount)
+
+        if (retrace_enabled and
+                "behavior_probability" not in self.replay_elements):
+            raise KeyError(
+                "Retrace replay samples must include behavior_probability.")
+        behavior_probabilities = self.replay_elements.get(
+            "behavior_probability",
+            np.ones_like(self.replay_elements["action"], dtype=np.float32),
+        )
 
         self._rng, train_rng = jax.random.split(self._rng)
         # Reserve the same next key the replay generator would have consumed,
@@ -1756,6 +2124,7 @@ class BBFAgent(JaxDQNAgent):
             self.replay_elements["terminal"],
             self.replay_elements["same_trajectory"],
             loss_weights,
+            td_loss_weights,
             self._support,
             self.replay_elements["discount"],
             self._double_dqn,
@@ -1766,6 +2135,11 @@ class BBFAgent(JaxDQNAgent):
             self.dtype,
             self._batch_size,
             self.use_target_network,
+            getattr(self, "expected_one_step_backup", False),
+            retrace_enabled,
+            getattr(self, "_jumps", 0),
+            getattr(self, "retrace_horizon", 1),
+            getattr(self, "retrace_lambda", 1.0),
             self.target_update_tau_scheduler(self.cycle_grad_steps),
             self.target_update_period,
             self.grad_steps,
@@ -1774,6 +2148,7 @@ class BBFAgent(JaxDQNAgent):
             #self.ent_targ,
             self.x_ent_coef,
             self.replay_elements["reward"],
+            behavior_probabilities,
             self.reward_weight,
             self.continue_weight,
             self.reward_readout,
@@ -1817,13 +2192,16 @@ class BBFAgent(JaxDQNAgent):
         # debug - end
 
         priorities = np.sqrt(priority_loss + 1e-10)
+        if not np.all(np.isfinite(priorities)):
+            raise FloatingPointError("Replay priorities must be finite.")
         validate_priority_cardinality(indices, priorities)
         self._replay.set_priority(indices, priorities)
 
         if self.grad_steps % 500 < self._batches_to_group:
             log_keys = ("RewardLoss", "ContinueLoss", "RewardCorr",
                         "ImagActorLoss", "ImagValueLoss", "ImagRet",
-                        "ImagReward", "ImagContinue", "ImagEntropy")
+                        "ImagReward", "ImagContinue", "ImagEntropy",
+                        "RetraceNegativeMass", "RetraceTargetMass")
             msgs = ["grad_step {}".format(self.grad_steps)]
             for k in log_keys:
                 if k in aux_losses:
@@ -1932,6 +2310,7 @@ class BBFAgent(JaxDQNAgent):
         """Resets the agent state by filling it with zeros."""
         self.state = np.zeros((n_envs, *self.state_shape),
                               dtype=self.observation_dtype)
+        self._behavior_probabilities = None
 
     def _record_observation(self, observation):
         """Records an observation and update state.
@@ -1959,6 +2338,7 @@ class BBFAgent(JaxDQNAgent):
         n_envs = new_obs.shape[0]
         self.state = np.zeros((n_envs, *self.state_shape),
                               dtype=self.observation_dtype)
+        self._behavior_probabilities = None
         self._record_observation(new_obs)
 
     def reset_one(self, env_id):
@@ -1967,21 +2347,29 @@ class BBFAgent(JaxDQNAgent):
     def delete_one(self, env_id):
         self.state = np.concatenate(
             [self.state[:env_id], self.state[env_id + 1:]], 0)
+        if getattr(self, "_behavior_probabilities", None) is not None:
+            self._behavior_probabilities = np.concatenate(
+                [self._behavior_probabilities[:env_id],
+                 self._behavior_probabilities[env_id + 1:]], 0)
 
     def retain_envs(self, env_ids):
         """Compacts batched inference state to the selected environment slots."""
         self.state = self.state[env_ids]
+        if getattr(self, "_behavior_probabilities", None) is not None:
+            self._behavior_probabilities = self._behavior_probabilities[
+                env_ids]
 
     def cache_train_state(self):
         self.training_state = (
             copy.deepcopy(self.state),
             copy.deepcopy(self._last_observation),
             copy.deepcopy(self._observation),
+            copy.deepcopy(getattr(self, "_behavior_probabilities", None)),
         )
 
     def restore_train_state(self):
-        (self.state, self._last_observation,
-         self._observation) = (self.training_state)
+        (self.state, self._last_observation, self._observation,
+         self._behavior_probabilities) = self.training_state
 
     def log_transition(self, observation, action, reward, terminal,
                        episode_end):
@@ -1989,11 +2377,26 @@ class BBFAgent(JaxDQNAgent):
         self._record_observation(observation)
 
         if not self.eval_mode:
+            extra_replay_values = ()
+            if getattr(self, "retrace", False):
+                if self._behavior_probabilities is None:
+                    raise RuntimeError(
+                        "Retrace requires the behavior probability recorded "
+                        "when the replay action was selected.")
+                behavior_probabilities = np.asarray(
+                    self._behavior_probabilities, dtype=np.float32)
+                if behavior_probabilities.shape != np.asarray(action).shape:
+                    raise ValueError(
+                        "Behavior probabilities must align with replay actions: "
+                        "{} versus {}.".format(behavior_probabilities.shape,
+                                              np.asarray(action).shape))
+                extra_replay_values = (behavior_probabilities,)
             self._store_transition(
                 self._last_observation,
                 action,
                 reward,
                 terminal,
+                *extra_replay_values,
                 episode_end=episode_end,
             )
 
@@ -2005,18 +2408,30 @@ class BBFAgent(JaxDQNAgent):
     ):
         if not eval_mode and self.training_steps < self.min_replay_history:
             self._rng, key = jax.random.split(self._rng)
-            return jax.random.randint(
+            action = jax.random.randint(
                 key,
                 (state.shape[0],),
                 0,
                 self.num_actions,
             )
+            if getattr(self, "retrace", True):
+                self._behavior_probabilities = np.full(
+                    (state.shape[0],),
+                    1.0 / self.num_actions,
+                    dtype=np.float32,
+                )
+            return action
         self._rng, action, probs = select_action(
             self.network_def,
             select_params,
             state,
             self._rng,
         )
+        if getattr(self, "retrace", True) and not eval_mode:
+            selected_probabilities = jnp.take_along_axis(
+                probs, action[:, None].astype(jnp.int32), axis=-1)[:, 0]
+            self._behavior_probabilities = np.asarray(
+                selected_probabilities, dtype=np.float32)
         #print(probs.shape)
         #if not self.eval_mode:
         if not self.eval_mode:
