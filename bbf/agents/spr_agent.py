@@ -1250,6 +1250,7 @@ class BBFAgent(JaxDQNAgent):
         explore_end_steps=None,
         reset_priorities=True,
         post_skipped_reset_update_multiplier=1,
+        post_final_reset_update_multiplier=1,
     ):
         logging.info(
             "Creating %s agent with the following parameters:",
@@ -1285,6 +1286,7 @@ class BBFAgent(JaxDQNAgent):
         self.cumulative_resets = 0
         self._successful_resets = 0
         self._reset_schedule_exhausted = False
+        self._final_successful_reset_completed = False
         self.reset_interval_scaling = reset_interval_scaling
         self.reset_offset = int(reset_offset)
         self.reset_priorities = bool(reset_priorities)
@@ -1308,6 +1310,16 @@ class BBFAgent(JaxDQNAgent):
                 "post_skipped_reset_update_multiplier must be a positive "
                 "integer, got {}.".format(
                     post_skipped_reset_update_multiplier))
+        self.post_final_reset_update_multiplier = int(
+            post_final_reset_update_multiplier)
+        if (isinstance(post_final_reset_update_multiplier, bool) or
+                self.post_final_reset_update_multiplier !=
+                post_final_reset_update_multiplier or
+                self.post_final_reset_update_multiplier < 1):
+            raise ValueError(
+                "post_final_reset_update_multiplier must be a positive "
+                "integer, got {}.".format(
+                    post_final_reset_update_multiplier))
 
         self.learning_rate = learning_rate
         self.encoder_learning_rate = encoder_learning_rate
@@ -1688,7 +1700,21 @@ class BBFAgent(JaxDQNAgent):
             del self.replay_elements
 
         self._successful_resets += 1
-        if (self.first_reset_update_multiplier != 1 and
+        # The next attempt happens one step after next_reset because _train_step
+        # uses a strict `>` check. If that attempt cannot leave a full reset
+        # interval before the cutoff, the reset just completed is the last one.
+        following_reset_attempt = self.next_reset + 1
+        self._final_successful_reset_completed = (
+            following_reset_attempt + int(interval) >
+            self.no_resets_after + self.reset_offset)
+        final_multiplier = getattr(
+            self, "post_final_reset_update_multiplier", 1)
+        if (self._final_successful_reset_completed and
+                final_multiplier != 1):
+            logging.info(
+                "\t Multiplying gradient updates by %s after the final "
+                "successful reset.", final_multiplier)
+        elif (self.first_reset_update_multiplier != 1 and
                 self._successful_resets == 1):
             logging.info(
                 "\t Multiplying gradient updates by %s until the next "
@@ -1699,9 +1725,19 @@ class BBFAgent(JaxDQNAgent):
 
     def _num_update_groups_for_current_reset_phase(self):
         """Returns the grouped-update count for the current reset phase."""
-        if getattr(self, "_reset_schedule_exhausted", False):
-            multiplier = getattr(
-                self, "post_skipped_reset_update_multiplier", 1)
+        skipped_multiplier = getattr(
+            self, "post_skipped_reset_update_multiplier", 1)
+        final_reset_multiplier = getattr(
+            self, "post_final_reset_update_multiplier", 1)
+        final_reset_phase = getattr(
+            self, "_final_successful_reset_completed", False)
+        if final_reset_phase and final_reset_multiplier != 1:
+            # Once enabled, the final-reset phase lasts through training end,
+            # including any later reset attempt that is denied.
+            multiplier = final_reset_multiplier
+        elif getattr(self, "_reset_schedule_exhausted", False):
+            # Preserve the existing post-skip behavior, including a neutral 1.
+            multiplier = skipped_multiplier
         else:
             multiplier = (getattr(self, "first_reset_update_multiplier", 1)
                           if getattr(self, "_successful_resets", 0) == 1

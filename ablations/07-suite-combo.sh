@@ -6,8 +6,8 @@ export JAX_COMPILATION_CACHE_DIR=${JAX_COMPILATION_CACHE_DIR:-/tmp/bbf-jax-compi
 GAMES=${GAMES:-"Alien Amidar Assault Asterix BankHeist BattleZone Boxing Breakout ChopperCommand CrazyClimber DemonAttack Freeway Frostbite Gopher Hero Jamesbond Kangaroo Krull KungFuMaster MsPacman Pong PrivateEye Qbert RoadRunner Seaquest UpNDown"}
 GPU=${GPU:-0}
 RUN=${RUN:-50}
-# The denied ~80k reset starts a 2x-update final phase. Its cycle schedule is
-# already clamped to a one-step TD target by then.
+# The final successful reset (~60k) starts a 2x-update phase through training
+# end. Its gradient-step schedules restart at that reset and advance at 2x.
 for game_name in $GAMES; do
 	CUDA_VISIBLE_DEVICES=$GPU python -m bbf.train \
 		--agent=BBF \
@@ -19,7 +19,7 @@ for game_name in $GAMES; do
 		--gin_bindings="BBFAgent.imag_entropy_weight=None" \
 		--gin_bindings="BBFAgent.imag_discount=None" \
 		--gin_bindings="BBFAgent.first_reset_update_multiplier=1" \
-		--gin_bindings="BBFAgent.post_skipped_reset_update_multiplier=2" \
+		--gin_bindings="BBFAgent.post_final_reset_update_multiplier=2" \
 		--gin_bindings="BBFAgent.reset_priorities=False" \
 		--gin_bindings="BBFAgent.update_horizon=1" \
 		--gin_bindings="BBFAgent.cycle_steps=40_000" \
