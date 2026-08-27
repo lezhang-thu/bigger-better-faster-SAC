@@ -1249,6 +1249,7 @@ class BBFAgent(JaxDQNAgent):
         log_every=None,
         explore_end_steps=None,
         reset_priorities=True,
+        post_skipped_reset_update_multiplier=1,
     ):
         logging.info(
             "Creating %s agent with the following parameters:",
@@ -1283,6 +1284,7 @@ class BBFAgent(JaxDQNAgent):
         self.no_resets_after = int(no_resets_after)
         self.cumulative_resets = 0
         self._successful_resets = 0
+        self._reset_schedule_exhausted = False
         self.reset_interval_scaling = reset_interval_scaling
         self.reset_offset = int(reset_offset)
         self.reset_priorities = bool(reset_priorities)
@@ -1296,6 +1298,16 @@ class BBFAgent(JaxDQNAgent):
             raise ValueError(
                 "first_reset_update_multiplier must be a positive integer, "
                 "got {}.".format(first_reset_update_multiplier))
+        self.post_skipped_reset_update_multiplier = int(
+            post_skipped_reset_update_multiplier)
+        if (isinstance(post_skipped_reset_update_multiplier, bool) or
+                self.post_skipped_reset_update_multiplier !=
+                post_skipped_reset_update_multiplier or
+                self.post_skipped_reset_update_multiplier < 1):
+            raise ValueError(
+                "post_skipped_reset_update_multiplier must be a positive "
+                "integer, got {}.".format(
+                    post_skipped_reset_update_multiplier))
 
         self.learning_rate = learning_rate
         self.encoder_learning_rate = encoder_learning_rate
@@ -1624,8 +1636,18 @@ class BBFAgent(JaxDQNAgent):
                 "\t Not resetting at step %s, as need at least"
                 " %s before %s to recover.", self.training_steps, interval,
                 self.no_resets_after)
+            entering_final_phase = not getattr(
+                self, "_reset_schedule_exhausted", False)
+            self._reset_schedule_exhausted = True
+            final_multiplier = getattr(
+                self, "post_skipped_reset_update_multiplier", 1)
+            if entering_final_phase and final_multiplier != 1:
+                logging.info(
+                    "\t Multiplying gradient updates by %s for the final "
+                    "training phase.", final_multiplier)
             return
         else:
+            self._reset_schedule_exhausted = False
             logging.info("\t Resetting weights at step %s.",
                          self.training_steps)
 
@@ -1677,8 +1699,13 @@ class BBFAgent(JaxDQNAgent):
 
     def _num_update_groups_for_current_reset_phase(self):
         """Returns the grouped-update count for the current reset phase."""
-        multiplier = (getattr(self, "first_reset_update_multiplier", 1)
-                      if getattr(self, "_successful_resets", 0) == 1 else 1)
+        if getattr(self, "_reset_schedule_exhausted", False):
+            multiplier = getattr(
+                self, "post_skipped_reset_update_multiplier", 1)
+        else:
+            multiplier = (getattr(self, "first_reset_update_multiplier", 1)
+                          if getattr(self, "_successful_resets", 0) == 1
+                          else 1)
         return self._num_updates_per_train_step * multiplier
 
     def _training_step_update(self, step_index, offline=False):
