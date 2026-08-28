@@ -1961,7 +1961,7 @@ class BBFAgent(JaxDQNAgent):
         # Retain a small amount of entropy regularization after the anneal for
         # both replay policy updates and coupled imagination policy updates.
         self.x_ent_coef = linearly_decaying_epsilon(
-            int(80e3), self.training_steps, 0, 1e-3)
+            int(80e3), self.training_steps, 0, 1e-4)
         if random.uniform(0, 1) < 1e-3:
             logging.info("step: {}, x_ent_coef: {}".format(
                 self.training_steps, self.x_ent_coef))
