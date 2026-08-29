@@ -493,6 +493,22 @@ def exponential_decay_scheduler(decay_period,
     return scheduler
 
 
+def linear_decay_scheduler(decay_period,
+                           warmup_steps,
+                           initial_value,
+                           final_value):
+    """Instantiate a clipped linear schedule for a parameter."""
+    if decay_period == 0:
+        return lambda x: initial_value if x < warmup_steps else final_value
+
+    def scheduler(step):
+        progress = np.clip(
+            (step - warmup_steps) / decay_period, 0.0, 1.0)
+        return initial_value + progress * (final_value - initial_value)
+
+    return scheduler
+
+
 @functools.partial(jax.jit, static_argnames=[
     "network_def",
 ])
@@ -1348,8 +1364,8 @@ class BBFAgent(JaxDQNAgent):
                               float(imag_discount))
         self.imag_lambda = float(imag_lambda)
         self.imag_warmup = int(imag_warmup)
-        # None -> imagination entropy follows the decaying x_ent_coef
-        # schedule (original behavior); a float decouples it. 3e-4 is
+        # None -> imagination entropy follows the reset-cycle x_ent_coef
+        # schedule; a float decouples it. 3e-4 is
         # DreamerV3's eta, calibrated for advantages normalized by the same
         # 5th-95th percentile return EMA this loss uses.
         self.imag_entropy_weight = (None if imag_entropy_weight is None else
@@ -1421,6 +1437,21 @@ class BBFAgent(JaxDQNAgent):
                                                                self.min_gamma,
                                                                self.gamma,
                                                                reverse=True)
+
+        # With a cycle configured, keep actor entropy on the same gradient-step
+        # and reset clock as the TD horizon and gamma. Preserve the original
+        # global 80k-step linear anneal for callers that do not configure one.
+        self._x_ent_coef_schedule_uses_cycle_steps = cycle_steps > 0
+        if self._x_ent_coef_schedule_uses_cycle_steps:
+            self.x_ent_coef_scheduler = linear_decay_scheduler(
+                cycle_steps, 0, 1e-2, 1e-3)
+            x_ent_step = self.cycle_grad_steps
+        else:
+            self.x_ent_coef_scheduler = linear_decay_scheduler(
+                int(80e3), 0, 1e-2, 1e-3)
+            x_ent_step = getattr(self, "training_steps", 0)
+        self.x_ent_coef = float(
+            self.x_ent_coef_scheduler(x_ent_step))
 
         self.cumulative_gamma = (np.ones(
             (self.max_update_horizon,)) * self.gamma).cumprod()
@@ -1686,6 +1717,10 @@ class BBFAgent(JaxDQNAgent):
          self.optimizer_state) = reset_result[:3]
 
         self.cycle_grad_steps = 0
+        if (hasattr(self, "x_ent_coef_scheduler") and
+                getattr(self, "_x_ent_coef_schedule_uses_cycle_steps", True)):
+            self.x_ent_coef = float(
+                self.x_ent_coef_scheduler(self.cycle_grad_steps))
         if getattr(self, "reset_priorities", True):
             # The reset critic invalidates the priorities estimated by the old
             # critic. Uniformize populated replay entries before rebuilding the
@@ -1747,6 +1782,23 @@ class BBFAgent(JaxDQNAgent):
     def _training_step_update(self, step_index, offline=False):
         """Gradient update during every training step."""
         self.start = time.time()
+
+        # Resolve per grouped update, before cycle_grad_steps advances. This
+        # matches the granularity of the replay horizon and gamma schedules.
+        x_ent_scheduler = getattr(self, "x_ent_coef_scheduler", None)
+        x_ent_schedule_step = (
+            self.cycle_grad_steps
+            if getattr(self, "_x_ent_coef_schedule_uses_cycle_steps", True)
+            else getattr(self, "training_steps", 0))
+        x_ent_coef = (float(x_ent_scheduler(x_ent_schedule_step))
+                      if x_ent_scheduler is not None else
+                      float(getattr(self, "x_ent_coef", 1e-3)))
+        self.x_ent_coef = x_ent_coef
+        if random.uniform(0, 1) < 1e-3:
+            logging.info(
+                "step: %s, cycle_grad_step: %s, x_ent_coef: %s",
+                getattr(self, "training_steps", -1), self.cycle_grad_steps,
+                x_ent_coef)
 
         if not hasattr(self, "replay_elements"):
             self._sample_from_replay_buffer()
@@ -1835,7 +1887,7 @@ class BBFAgent(JaxDQNAgent):
             self.match_online_target_rngs,
             self.target_eval_mode,
             #self.ent_targ,
-            self.x_ent_coef,
+            x_ent_coef,
             self.replay_elements["reward"],
             self.reward_weight,
             self.continue_weight,
@@ -1845,7 +1897,7 @@ class BBFAgent(JaxDQNAgent):
             imag_value_mult,
             imag_discount,
             self.imag_lambda,
-            (self.x_ent_coef if self.imag_entropy_weight is None else
+            (x_ent_coef if self.imag_entropy_weight is None else
              self.imag_entropy_weight),
             self.imag_return_ema,
         )
@@ -1923,49 +1975,6 @@ class BBFAgent(JaxDQNAgent):
             )
 
     def _train_step(self):
-        # linearly decay target entropy - start
-        def linearly_decaying_epsilon(decay_period, step, warmup_steps,
-                                      epsilon):
-            # Begin at 1. until warmup_steps steps have been taken; then
-            # Linearly decay epsilon from 1. to epsilon in decay_period steps; and then
-            # Use epsilon from there on.
-            steps_left = decay_period + warmup_steps - step
-            if False:
-                bonus = (1.0 - epsilon) * steps_left / decay_period
-                bonus = jnp.clip(bonus, 0., 1. - epsilon)
-            # Begin at 0.5 until warmup_steps steps have been taken; then
-            # Linearly decay epsilon from 0.5 to epsilon in decay_period steps; and then
-            elif False:
-                bonus = (0.5 - epsilon) * steps_left / decay_period
-                bonus = jnp.clip(bonus, 0., 0.5 - epsilon)
-            else:
-                bonus = (1e-2 - epsilon) * steps_left / decay_period
-                bonus = jnp.clip(bonus, 0., 1e-2 - epsilon)
-            return epsilon + bonus
-
-        ##frac = linearly_decaying_epsilon(1e5, self.training_steps, 0, 0.01)
-        #frac = linearly_decaying_epsilon(self.explore_end_steps,
-        #                                 self.training_steps, 0, 1e-3)
-        #x = np.full((self.num_actions,),
-        #            fill_value=frac / self.num_actions,
-        #            dtype=np.float32)
-        #x[0] += 1 - frac
-        #self.ent_targ = jnp.asarray(scipy.stats.entropy(x))
-        ##if random.uniform(0, 1) < 1e-3:
-        #if False:
-        #    logging.info("step: {}, frac: {}, ent_targ: {}".format(
-        #        self.training_steps, frac, self.ent_targ))
-        ##exit(0)
-        # linearly decay target entropy - end
-
-        # Retain a small amount of entropy regularization after the anneal for
-        # both replay policy updates and coupled imagination policy updates.
-        self.x_ent_coef = linearly_decaying_epsilon(
-            int(80e3), self.training_steps, 0, 1e-4)
-        if random.uniform(0, 1) < 1e-3:
-            logging.info("step: {}, x_ent_coef: {}".format(
-                self.training_steps, self.x_ent_coef))
-
         if (self._replay.add_count >= self.min_replay_history and
                 not hasattr(self, "prefetcher")):
             self.initialize_prefetcher()
