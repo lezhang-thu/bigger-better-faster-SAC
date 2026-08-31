@@ -131,11 +131,11 @@ def imagined_lambda_return(rewards, continues, values, discount, lamb):
 
 def prefetch_to_device(iterator, size):
     queue = collections.deque()
+    device = jax.local_devices()[0]
 
     def enqueue(n):  # Enqueues *up to* `n` elements from the iterator.
         for data in itertools.islice(iterator, n):
-            #queue.append(jax.device_put(data, device=jax.local_devices()[0]))
-            queue.append(data)
+            queue.append(jax.device_put(data, device=device))
 
     enqueue(size)  # Fill up the buffer.
     while queue:
@@ -534,20 +534,28 @@ def train(
                 method=network_def.get_policy,
             )
 
-        def q_target(state):
+        def encode_target(obs):
             return network_def.apply(
                 target_params,
-                state,
-                support=support,
+                obs,
                 eval_mode=target_eval_mode,
+                method=network_def.encode,
             )
 
-        def encode_project(state):
+        def probabilities_from_spatial(spatial):
             return network_def.apply(
                 target_params,
-                state,
-                eval_mode=True,
-                method=network_def.encode_project_with_latent,
+                spatial,
+                target_eval_mode,
+                method=network_def.probabilities_from_spatial,
+            )
+
+        def features_from_spatial(spatial):
+            return network_def.apply(
+                target_params,
+                spatial,
+                True,
+                method=network_def.features_from_spatial,
             )
 
         def loss_fn(
@@ -821,26 +829,33 @@ def train(
             aux_losses.update(imag_metrics)
             return total_loss, (aux_losses)
 
-        # Use the weighted mean loss for gradient computation.
-        target = jax.vmap(target_output,
-                          in_axes=(None, None, 0, 0, 0, None, 0, 0),
-                          axis_name="batch")(
-                              policy_online,
-                              q_target,
-                              next_states,
-                              rewards,
-                              terminals,
-                              support,
-                              cumulative_gamma,
-                              target_rng,
-                          )
-
+        # One target-encoder pass over n-step next states and SPR future
+        # frames (same FLOPs, one larger batch instead of 32 + 160).
         future_states = states[:, 1:]
-        spr_targets, future_latents = jax.vmap(jax.vmap(encode_project,
-                                                        in_axes=0,
-                                                        axis_name="time"),
-                                               in_axes=0,
-                                               axis_name="batch")(future_states)
+        bsz = next_states.shape[0]
+        n_future = future_states.shape[1]
+        all_obs = jnp.concatenate(
+            [next_states, future_states.reshape(-1, *future_states.shape[2:])],
+            axis=0)
+        all_spatial = jax.vmap(encode_target)(all_obs)
+        next_spatial = all_spatial[:bsz]
+        future_spatial = all_spatial[bsz:].reshape(
+            bsz, n_future, *all_spatial.shape[1:])
+
+        next_probs = jax.vmap(probabilities_from_spatial)(next_spatial)
+        _, next_actions = jax.vmap(policy_online,
+                                   in_axes=(0, 0),
+                                   axis_name="batch")(next_states, target_rng)
+        chosen_probs = next_probs[jnp.arange(bsz), next_actions]
+        gamma_with_terminal = cumulative_gamma * (
+            1.0 - terminals.astype(jnp.float32))
+        tz = rewards[:, None] + gamma_with_terminal[:, None] * support
+        target = jax.vmap(lambda loc, wt: project_distribution(
+            loc, wt, support))(tz, chosen_probs)
+        target = jax.lax.stop_gradient(target)
+
+        spr_targets, future_latents = jax.vmap(
+            jax.vmap(features_from_spatial))(future_spatial)
         spr_targets = spr_targets.transpose(1, 0, 2)
 
         n_samples = current_state.shape[0]
@@ -1646,11 +1661,11 @@ class BBFAgent(JaxDQNAgent):
         # schedule 0.4 -> 1.0. Comparing the schedule to a fixed exponent of
         # 0.5 on 5 games (Asterix, Pong, Q*Bert, Seaquest, Space Invaders)
         # suggested a fixed exponent actually performs better, except on Pong.
-        probs = self.replay_elements["sampling_probabilities"]
+        probs = np.asarray(self.replay_elements["sampling_probabilities"])
         # Weight the loss by the inverse priorities.
         loss_weights = 1.0 / np.sqrt(probs + 1e-10)
         loss_weights /= np.max(loss_weights)
-        indices = self.replay_elements["indices"]
+        indices = np.asarray(self.replay_elements["indices"]).astype(np.int32)
 
         if False:
             # debug - start

@@ -22,29 +22,15 @@ from jax import numpy as jnp
 import numpy as np
 
 
-@functools.partial(jax.jit, backend='cpu')
-def step(i, args):  # pylint: disable=unused-argument
-    query_value, index, nodes = args
-    left_child = index * 2 + 1
-    left_sum = nodes[left_child]
-    index = jax.lax.cond(query_value < left_sum, lambda x: x, lambda x: x + 1,
-                         left_child)
-    query_value = jax.lax.cond(query_value < left_sum, lambda x: x,
-                               lambda x: x - left_sum, query_value)
-    return query_value, index, nodes
+@functools.partial(jax.jit, static_argnums=(1,))
+def stratified_queries(rng, n):
+    """Stratum-uniform queries in [0, 1), matching the previous JAX sampler."""
 
+    def one(i):
+        r = jax.random.fold_in(rng, i)
+        return jax.random.uniform(r, minval=i / n, maxval=(i + 1) / n)
 
-@functools.partial(jax.jit, backend='cpu')
-@functools.partial(jax.vmap, in_axes=(None, None, 0, None, None))
-def parallel_stratified_sample(rng, nodes, i, n, depth):
-    rng = jax.random.fold_in(rng, i)
-    total_priority = nodes[0]
-    upper_bound = (i + 1) / n
-    lower_bound = i / n
-    query = jax.random.uniform(rng, minval=lower_bound, maxval=upper_bound)
-    _, index, _ = jax.lax.fori_loop(0, depth, step,
-                                    (query * total_priority, 0, nodes))
-    return index
+    return jax.vmap(one)(jnp.arange(n))
 
 
 class DeterministicSumTree(sum_tree.SumTree):
@@ -91,27 +77,39 @@ class DeterministicSumTree(sum_tree.SumTree):
     """
         return self.nodes[0]
 
+    def _walk(self, queries):
+        """Walk the numpy tree; queries are in [0, 1)."""
+        total = self.nodes[0]
+        q = np.asarray(queries, dtype=np.float64) * total
+        out = np.empty(q.shape[0], dtype=np.int64)
+        nodes = self.nodes
+        depth = self.depth
+        for k in range(q.shape[0]):
+            qq = q[k]
+            index = 0
+            for _ in range(depth):
+                left = index * 2 + 1
+                left_sum = nodes[left]
+                if qq < left_sum:
+                    index = left
+                else:
+                    index = left + 1
+                    qq = qq - left_sum
+            out[k] = index
+        return np.minimum(out - self.low_idx, self.highest_set)
+
     def sample(self, rng, query_value=None):
         """Samples an element from the sum tree."""
-        nodes = jnp.array(self.nodes)
-        query_value = (jax.random.uniform(rng)
-                       if query_value is None else query_value)
-        query_value *= self._total_priority()
-
-        _, index, _ = jax.lax.fori_loop(0, self.depth, step,
-                                        (query_value, 0, nodes))
-
-        return np.minimum(index - self.low_idx, self.highest_set)
+        if query_value is None:
+            query_value = np.asarray(jax.random.uniform(rng))
+        return int(self._walk(np.atleast_1d(query_value))[0])
 
     def stratified_sample(self, batch_size, rng):
         """Performs stratified sampling using the sum tree."""
         if self._total_priority() == 0.0:
             raise Exception('Cannot sample from an empty sum tree.')
-
-        indices = parallel_stratified_sample(rng, self.nodes,
-                                             np.arange(batch_size), batch_size,
-                                             self.depth)
-        return np.minimum(indices - self.low_idx, self.highest_set)
+        queries = stratified_queries(rng, int(batch_size))
+        return self._walk(queries)
 
     def get(self, node_index):
         """Returns the value of the leaf node corresponding to the index.

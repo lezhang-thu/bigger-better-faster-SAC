@@ -12,7 +12,7 @@ import jax
 import numpy as np
 
 from bbf.replay_memory import deterministic_sum_tree as sum_tree
-from bbf.replay_memory.circular_replay_buffer import modulo_range, invalid_range, ReplayElement
+from bbf.replay_memory.circular_replay_buffer import invalid_range, ReplayElement
 
 
 @gin.configurable
@@ -144,6 +144,8 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
             dtype=np.float32)
         self._next_experience_is_episode_start = True
         self._episode_end_indices = set()
+        self._episode_end_mask = np.zeros((self._replay_length, self._n_envs),
+                                          dtype=bool)
 
     def _create_storage(self):
         """Creates the numpy arrays used to store transitions."""
@@ -191,6 +193,7 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
             zero_transition.append(
                 np.zeros(element_type.shape, dtype=element_type.type))
         self._episode_end_indices.discard(self.cursor())  # If present
+        self._episode_end_mask[self.cursor()] = False
         self._add(*zero_transition)
 
     def add(self,
@@ -235,12 +238,13 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
         self._check_add_types(observation, action, reward, terminal, *args)
 
         resets = episode_end + terminal
+        cursor = self.cursor()
+        self._episode_end_mask[cursor] = np.asarray(resets).astype(bool)
         for i in range(resets.shape[0]):
             if resets[i]:
-                self._episode_end_indices.add((self.cursor(), i))
+                self._episode_end_indices.add((cursor, i))
             else:
-                self._episode_end_indices.discard(
-                    (self.cursor(), i))  # If present
+                self._episode_end_indices.discard((cursor, i))  # If present
 
         self._add(observation, action, reward, terminal, *args)
 
@@ -355,6 +359,33 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
     def get_terminal_stack(self, index_t, index_b):
         return self.parallel_get_stack('terminal', index_t, index_b, 0)
 
+    def validate_indices(self, t_indices, b_indices):
+        """Vectorized validity + episode-start censor for a batch of indices."""
+        t = np.asarray(t_indices).reshape(-1)
+        b = np.asarray(b_indices).reshape(-1)
+        valid = (t >= 0) & (t < self._replay_length)
+        if not self.is_full():
+            valid &= t < (self.cursor() - self._update_horizon -
+                          self._subseq_len)
+            valid &= t >= (self._stack_size - 1)
+        valid &= ~np.isin(t, self.invalid_range)
+
+        term_stack = self.parallel_get_stack('terminal', t, b, 0)
+        early = term_stack[:, :-1]
+        has_term = early.any(axis=1)
+        censor = np.where(
+            has_term,
+            t - self._stack_size + early.argmax(axis=1) + 2,
+            0,
+        )
+
+        ts = (t[:, None] + np.arange(self._update_horizon)[None, :]
+              ) % self._replay_length
+        ends = self._episode_end_mask[ts, b[:, None]]
+        terms = self._store['terminal'][ts, b[:, None]]
+        valid &= ~np.any(ends & (terms == 0), axis=1)
+        return valid, censor
+
     def is_valid_transition(self, index_t, index_b):
         """Checks if the index contains a valid transition.
 
@@ -368,40 +399,8 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
       Is the index valid: Boolean.
       Start of the current episode (if within our stack size): Integer.
     """
-        # Check the index is in the valid range
-        if index_t < 0 or index_t >= self._replay_length:
-            return False, 0
-        if not self.is_full():
-            # The indices and next_indices must be smaller than the cursor.
-            if index_t >= self.cursor(
-            ) - self._update_horizon - self._subseq_len:
-                return False, 0
-            # The first few indices contain the padding states of the first episode.
-            if index_t < self._stack_size - 1:
-                return False, 0
-
-        # Skip transitions that straddle the cursor.
-        if index_t[0] in set(self.invalid_range):
-            return False, 0
-
-        # If there are terminal flags in any other frame other than the last one
-        # the stack is not valid, so don't sample it.
-        terminals = self.get_terminal_stack(index_t, index_b)[0, :-1]
-        if terminals.any():
-            ep_start = index_t - self._stack_size + terminals.argmax() + 2
-        else:
-            ep_start = 0
-
-        # If the episode ends before the update horizon, without a terminal signal,
-        # it is invalid.
-        for i in modulo_range(index_t, self._update_horizon,
-                              self._replay_length):
-            if (i.item(), index_b.item()
-               ) in self._episode_end_indices and not self._store['terminal'][
-                   i, index_b]:
-                return False, 0
-
-        return True, ep_start
+        valid, censor = self.validate_indices(index_t, index_b)
+        return bool(valid[0]), censor[0]
 
     def _create_batch_arrays(self, batch_size):
         """Create a tuple of arrays with the type of get_transition_elements.
@@ -456,35 +455,34 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
                     'Cannot sample a batch with fewer than stack size '
                     '({}) + update_horizon ({}) transitions.'.format(
                         self._stack_size, self._update_horizon))
-        t_indices = jax.random.randint(rng, (batch_size,), min_id,
-                                       max_id) % self._replay_length
-        b_indices = jax.random.randint(rng, (batch_size,), 0, self._n_envs)
+        t_indices = np.array(
+            jax.random.randint(rng, (batch_size,), min_id, max_id) %
+            self._replay_length)
+        b_indices = np.array(
+            jax.random.randint(rng, (batch_size,), 0, self._n_envs))
         allowed_attempts = self._max_sample_attempts
-        t_indices = np.array(t_indices)
-        censor_before = np.zeros_like(t_indices)
-        for i in range(len(t_indices)):
-            is_valid, ep_start = self.is_valid_transition(
-                t_indices[i:i + 1], b_indices[i:i + 1])
-            censor_before[i] = ep_start
-            if not is_valid:
-                if allowed_attempts == 0:
-                    raise RuntimeError(
-                        'Max sample attempts: Tried {} times but only sampled {}'
-                        ' valid indices. Batch size is {}'.format(
-                            self._max_sample_attempts, i, batch_size))
-                while not is_valid and allowed_attempts > 0:
-                    # If index i is not valid keep sampling others. Note that this
-                    # is not stratified.
-                    self._rng, rng = jax.random.split(self._rng)
-                    t_index = jax.random.randint(rng, (1,), min_id,
-                                                 max_id) % self._replay_length
-                    b_index = jax.random.randint(rng, (1,), 0, self._n_envs)
-                    allowed_attempts -= 1
-                    t_indices[i] = t_index
-                    b_indices[i] = b_index
-                    is_valid, first_valid = self.is_valid_transition(
-                        t_indices[i:i + 1], b_indices[i:i + 1])
-                    censor_before[i] = first_valid
+        valid, censor_before = self.validate_indices(t_indices, b_indices)
+        for i in np.flatnonzero(~valid):
+            if allowed_attempts == 0:
+                raise RuntimeError(
+                    'Max sample attempts: Tried {} times but only sampled {}'
+                    ' valid indices. Batch size is {}'.format(
+                        self._max_sample_attempts, i, batch_size))
+            is_valid = False
+            first_valid = 0
+            while not is_valid and allowed_attempts > 0:
+                self._rng, rng = jax.random.split(self._rng)
+                t_index = int(jax.random.randint(rng, (), min_id, max_id) %
+                              self._replay_length)
+                b_index = int(jax.random.randint(rng, (), 0, self._n_envs))
+                allowed_attempts -= 1
+                t_indices[i] = t_index
+                b_indices[i] = b_index
+                ok, first_valid = self.validate_indices(
+                    t_indices[i:i + 1], b_indices[i:i + 1])
+                is_valid = bool(ok[0])
+                first_valid = first_valid[0]
+            censor_before[i] = first_valid
         return t_indices, b_indices, censor_before
 
     def restore_leading_dims(self, batch_size, subseq_len, tensor):
@@ -788,36 +786,34 @@ class PrioritizedJaxSubsequenceParallelEnvReplayBuffer(
         """Returns a batch of valid indices sampled as in Schaul et al. (2015)."""
         # Sample stratified indices. Some of them might be invalid.
         # start = time.time()
-        indices = self.sum_tree.stratified_sample(batch_size, self._rng)
-        indices = np.array(indices)
-        # print("Sampling from sum tree took {}".format(time.time() - start))
+        indices = np.array(
+            self.sum_tree.stratified_sample(batch_size, self._rng))
         allowed_attempts = self._max_sample_attempts
 
         t_indices, b_indices = self.unravel_indices(indices)  # pylint: disable=unbalanced-tuple-unpacking
-        censor_before = np.zeros_like(t_indices)
-        for i in range(len(indices)):
-            is_valid, ep_start = self.is_valid_transition(
-                t_indices[i:i + 1], b_indices[i:i + 1])
+        t_indices = np.asarray(t_indices)
+        b_indices = np.asarray(b_indices)
+        valid, censor_before = self.validate_indices(t_indices, b_indices)
+        for i in np.flatnonzero(~valid):
+            if allowed_attempts == 0:
+                raise RuntimeError(
+                    'Max sample attempts: Tried {} times but only sampled {}'
+                    ' valid indices. Batch size is {}'.format(
+                        self._max_sample_attempts, i, batch_size))
+            is_valid = False
+            ep_start = 0
+            while (not is_valid) and allowed_attempts > 0:
+                self._rng, rng = jax.random.split(self._rng)
+                index = int(self.sum_tree.stratified_sample(1, rng=rng))
+                t_index, b_index = self.unravel_indices(index)  # pylint: disable=unbalanced-tuple-unpacking
+                allowed_attempts -= 1
+                t_indices[i] = t_index
+                b_indices[i] = b_index
+                ok, ep_start = self.validate_indices(
+                    t_indices[i:i + 1], b_indices[i:i + 1])
+                is_valid = bool(ok[0])
+                ep_start = ep_start[0]
             censor_before[i] = ep_start
-            if not is_valid:
-                if allowed_attempts == 0:
-                    raise RuntimeError(
-                        'Max sample attempts: Tried {} times but only sampled {}'
-                        ' valid indices. Batch size is {}'.format(
-                            self._max_sample_attempts, i, batch_size))
-                while (not is_valid) and allowed_attempts > 0:
-                    # If index i is not valid keep sampling others. Note that this
-                    # is not stratified.
-                    self._rng, rng = jax.random.split(self._rng)
-                    index = int(self.sum_tree.stratified_sample(1, rng=rng))
-                    t_index, b_index = self.unravel_indices(index)  # pylint: disable=unbalanced-tuple-unpacking
-
-                    allowed_attempts -= 1
-                    t_indices[i] = t_index
-                    b_indices[i] = b_index
-                    is_valid, ep_start = self.is_valid_transition(
-                        t_indices[i:i + 1], b_indices[i:i + 1])
-                    censor_before[i] = ep_start
         return t_indices, b_indices, censor_before
 
     def sample_transition_batch(

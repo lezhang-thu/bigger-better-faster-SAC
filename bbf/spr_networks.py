@@ -508,13 +508,22 @@ class RainbowDQNNetwork(nn.Module):
 
     def encode_project_with_latent(self, x, eval_mode):
         latent = self.encode(x, eval_mode)
-        representation = latent.reshape(-1)
+        return self.features_from_spatial(latent, eval_mode)
+
+    def features_from_spatial(self, spatial, eval_mode):
+        representation = spatial.reshape(-1)
         projection = jnp.concatenate([
             self.project(representation, eval_mode),
             self.policy_projection(representation, eval_mode)
         ],
                                      axis=-1)
         return projection, representation
+
+    def probabilities_from_spatial(self, spatial, eval_mode):
+        representation = spatial.reshape(-1)
+        logits = self.head(
+            nn.relu(self.project(representation, eval_mode)), eval_mode)
+        return jnp.squeeze(nn.softmax(logits))
 
     def project(self, x, eval_mode):
         projected = self.projection(x, eval_mode=eval_mode)
