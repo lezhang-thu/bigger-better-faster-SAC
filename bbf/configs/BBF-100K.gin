@@ -28,17 +28,20 @@ BBFAgent.no_resets_after = 100_000 # Need to change if training longer
 BBFAgent.log_every = 100
 BBFAgent.replay_ratio = 64
 #BBFAgent.replay_ratio = 256
-# Late-phase update multiplier (off by default). late_update_after is in env
-# steps like reset_every; from it onwards the agent runs
-# late_update_multiplier x the update phases per env step, i.e. a higher
-# effective replay ratio for the tail of the run only. Note the coupling: the
-# gin default schedule resets at 20k/40k/60k and skips 80k (needs 20_000 env
-# steps of recovery before no_resets_after), so the final phase is already
-# 40k env steps = 80k grad steps, twice the 40k-grad reset cycle. Doubling
-# updates there without also shortening reset_every makes it 160k grad steps
-# in one un-reset stretch.
+# Late-phase update multiplier (off by default). Two window types, exclusive
+# on the right (-1 = unbounded): env-step (late_update_after / _until) or
+# completed-reset count (late_update_after_resets / _until_resets). Reset
+# counts take precedence when after_resets >= 0. The gin schedule actually
+# resets a few steps after 20k/40k/60k (reset_offset and a strict `>`), and
+# skips 80k (needs 20_000 env steps of recovery before no_resets_after).
+# after_resets=1, until_resets=2 is the cycle between the first and second
+# actual reset. Env-step 20k-40k is not that cycle. Doubling a cycle without
+# shortening reset_every lengthens it in gradient steps; cycle_grad_steps
+# anneals (horizon, gamma, imag_warmup) run correspondingly faster.
 BBFAgent.late_update_after = -1
 BBFAgent.late_update_until = -1
+BBFAgent.late_update_after_resets = -1
+BBFAgent.late_update_until_resets = -1
 BBFAgent.late_update_multiplier = 1
 BBFAgent.batches_to_group = 2
 BBFAgent.batch_size = 32

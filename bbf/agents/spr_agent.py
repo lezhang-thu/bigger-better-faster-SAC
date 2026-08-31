@@ -1224,6 +1224,8 @@ class BBFAgent(JaxDQNAgent):
         half_precision=False,
         late_update_after=-1,
         late_update_until=-1,
+        late_update_after_resets=-1,
+        late_update_until_resets=-1,
         late_update_multiplier=1,
         seed=None,
         log_every=None,
@@ -1265,23 +1267,24 @@ class BBFAgent(JaxDQNAgent):
         self.reset_offset = int(reset_offset)
         self.next_reset = self.reset_every + self.reset_offset
 
-        # Late-phase update multiplier: from env step late_update_after
-        # onwards, do late_update_multiplier x the usual number of update
-        # phases per env step (-1 / 1 = off). Counted in env steps, like
-        # reset_every, because that is the unit the schedule is specified in;
-        # what it actually changes is the gradient-step rate, so it moves the
-        # post-reset recovery budget the same way replay_ratio does. Anything
-        # keyed on cycle_grad_steps (update horizon, gamma, imag_warmup)
-        # therefore anneals proportionally faster in the multiplied phase, as
-        # it does under a higher replay_ratio; reset_every does NOT adapt on
-        # its own (it is in env steps), so multiplying without shortening it
-        # lengthens the final un-reset stretch in gradient steps.
-        # late_update_until bounds the window on the right (-1 = run to the end
-        # of training). A bounded window is what lets the multiplier target the
-        # post-reset recovery phase specifically, rather than everything after
-        # a threshold.
+        # Late-phase update multiplier: late_update_multiplier x the usual
+        # number of update phases per env step (-1 / 1 = off). Two ways to
+        # bound the window, exclusive on the right (-1 = unbounded):
+        #   * env steps: late_update_after / late_update_until, like
+        #     reset_every. Resets do not land on those round numbers
+        #     (reset_offset and a strict `>` push them a few steps later),
+        #     so a 20k-40k env-step window is not "first reset to second".
+        #   * completed resets: late_update_after_resets /
+        #     late_update_until_resets. after=1, until=2 is the cycle
+        #     between the first actual reset and the second. This takes
+        #     precedence when after_resets >= 0.
+        # Anything keyed on cycle_grad_steps (update horizon, gamma,
+        # imag_warmup) anneals proportionally faster in the multiplied
+        # phase; reset_every does not adapt (it is in env steps).
         self.late_update_after = int(late_update_after)
         self.late_update_until = int(late_update_until)
+        self.late_update_after_resets = int(late_update_after_resets)
+        self.late_update_until_resets = int(late_update_until_resets)
         self.late_update_multiplier = int(late_update_multiplier)
         self.late_updates_active = False
 
@@ -1619,7 +1622,6 @@ class BBFAgent(JaxDQNAgent):
         self.replay_elements = next(self.prefetcher)
 
     def reset_weights(self):
-        self.cumulative_resets += 1
         interval = self.reset_every
 
         self.next_reset = int(interval) + self.training_steps
@@ -1629,9 +1631,10 @@ class BBFAgent(JaxDQNAgent):
                 " %s before %s to recover.", self.training_steps, interval,
                 self.no_resets_after)
             return
-        else:
-            logging.info("\t Resetting weights at step %s.",
-                         self.training_steps)
+
+        self.cumulative_resets += 1
+        logging.info("\t Resetting weights at step %s (reset %s).",
+                     self.training_steps, self.cumulative_resets)
 
         self._rng, reset_rng = jax.random.split(self._rng, 2)
 
@@ -1881,20 +1884,37 @@ class BBFAgent(JaxDQNAgent):
         if self._replay.add_count > self.min_replay_history:
             if self.training_steps % self.update_period == 0:
                 num_updates = self._num_updates_per_train_step
-                late_on = (self.late_update_after >= 0
-                           and self.training_steps >= self.late_update_after
-                           and (self.late_update_until < 0 or
-                                self.training_steps < self.late_update_until))
+                if self.late_update_after_resets >= 0:
+                    late_on = (
+                        self.cumulative_resets >=
+                        self.late_update_after_resets and
+                        (self.late_update_until_resets < 0 or
+                         self.cumulative_resets <
+                         self.late_update_until_resets))
+                    window_lo = self.late_update_after_resets
+                    window_hi = self.late_update_until_resets
+                    window_kind = "resets"
+                else:
+                    late_on = (
+                        self.late_update_after >= 0 and
+                        self.training_steps >= self.late_update_after and
+                        (self.late_update_until < 0 or
+                         self.training_steps < self.late_update_until))
+                    window_lo = self.late_update_after
+                    window_hi = self.late_update_until
+                    window_kind = "env steps"
                 if late_on:
                     num_updates *= self.late_update_multiplier
                 if late_on != self.late_updates_active:
                     self.late_updates_active = late_on
                     logging.info(
-                        "\t Late-phase updates %s at step %s: %s update phase(s)"
-                        " per env step (x%s over [%s, %s)).",
+                        "\t Late-phase updates %s at step %s (resets done %s):"
+                        " %s update phase(s) per env step (x%s over %s"
+                        " [%s, %s)).",
                         "ON" if late_on else "OFF", self.training_steps,
-                        num_updates, self.late_update_multiplier,
-                        self.late_update_after, self.late_update_until)
+                        self.cumulative_resets, num_updates,
+                        self.late_update_multiplier, window_kind, window_lo,
+                        window_hi)
                 for i in range(num_updates):
                     self._training_step_update(i, offline=False)
         if self.reset_every > 0 and self.training_steps > self.next_reset:
