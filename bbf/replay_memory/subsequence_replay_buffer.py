@@ -563,15 +563,23 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
         censor_before = censor_before[:, None].repeat(
             subseq_len, axis=1).reshape(batch_size * subseq_len)
 
-        # shape: horizon X batch_size*subseq_len
-        # Offset by one; a `d
+        # Rewards r_t ... r_{t+H-1}. Terminals used for reward masking are
+        # offset by one so a done at t does not drop r_t:
+        # valid_mask = [1, 1-d_t, (1-d_t)(1-d_{t+1}), ...]. That window
+        # misses d_{t+H-1}, which is OR'd in below so a terminal on the last
+        # consumed transition still disables the bootstrap. next_state is
+        # s_{t+H}, not s_{t+H-1}.
         trajectory_indices = (np.arange(-1, update_horizon - 1)[:, None] +
                               state_indices[None, :]) % self._replay_length
         trajectory_b_indices = b_indices[None,].repeat(update_horizon, axis=0)
         trajectory_terminals = self._store['terminal'][trajectory_indices,
                                                        trajectory_b_indices]
         trajectory_terminals[0, :] = 0
-        is_terminal_transition = trajectory_terminals.any(0)
+        last_indices = (state_indices + update_horizon -
+                        1) % self._replay_length
+        last_terminals = self._store['terminal'][last_indices, b_indices]
+        is_terminal_transition = np.logical_or(trajectory_terminals.any(0),
+                                               last_terminals)
         valid_mask = (1 - trajectory_terminals).cumprod(0)
         trajectory_discount_vector = valid_mask * (
             cumulative_discount_vector[:update_horizon, None])
@@ -586,7 +594,7 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
                                    dtype=jnp.int32) * (update_horizon - 1)
         returns = returns[update_horizons, np.arange(batch_size * subseq_len)]
 
-        next_indices = (state_indices + update_horizons) % self._replay_length
+        next_indices = (state_indices + update_horizon) % self._replay_length
         outputs = []
         for element in transition_elements:
             name = element.name
@@ -619,11 +627,15 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
                 output = self.restore_leading_dims(batch_size, subseq_len,
                                                    output)
             elif name == 'same_trajectory':
+                # same_traj[k] is 1 iff s_{t+k} is still in the start state's
+                # episode: a done at step j invalidates arrival states j+1
+                # onward. Layout is (batch, time); [0, :] would wipe sample 0.
                 output = self._store['terminal'][state_indices, b_indices]
                 output = self.restore_leading_dims(batch_size, subseq_len,
                                                    output)
-                output[0, :] = 0
-                output = (1 - output).cumprod(1)
+                shifted = np.zeros_like(output)
+                shifted[:, 1:] = output[:, :-1]
+                output = (1 - shifted).cumprod(axis=1)
             elif name in ('next_action', 'next_reward'):
                 output = self._store[name.lstrip('next_')][next_indices,
                                                            b_indices]

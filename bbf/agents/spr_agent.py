@@ -82,8 +82,10 @@ def sigmoid_binary_cross_entropy(logits, labels):
         jnp.exp(-jnp.abs(logits)))
 
 
-def masked_mean(values, mask, eps=1e-6):
+def masked_mean(values, mask, eps=1e-6, weights=None):
     mask = mask.astype(jnp.float32)
+    if weights is not None:
+        values = values * weights
     return jnp.sum(values * mask) / (jnp.sum(mask) + eps)
 
 
@@ -675,17 +677,21 @@ def train(
                 pred_reward_real = jax.vmap(jax.vmap(reward_fn))(real_reps)
                 # Real frames past a terminal belong to the next episode.
                 real_mask = model_mask * continue_targets
+                per_weights = loss_multipliers[:, None]
                 reward_loss = (masked_mean(
                     jnp.square(pred_reward_roll - model_rewards),
-                    model_mask) + masked_mean(
+                    model_mask,
+                    weights=per_weights) + masked_mean(
                         jnp.square(pred_reward_real - model_rewards),
-                        real_mask))
+                        real_mask,
+                        weights=per_weights))
                 continue_logits = jax.vmap(
                     jax.vmap(continue_fn))(continue_reps)
                 continue_loss = masked_mean(
                     sigmoid_binary_cross_entropy(continue_logits,
                                                  continue_targets),
-                    model_mask)
+                    model_mask,
+                    weights=per_weights)
                 model_loss = (reward_weight * reward_loss +
                               continue_weight * continue_loss)
                 aux_model.update({
@@ -743,8 +749,11 @@ def train(
                     imagined_lambda_return(imag_rewards, imag_continues,
                                            imag_values, imag_discount,
                                            imag_lambda))
+                # w_0 = 1, w_t = γ^t Π_{i=1}^{t} c_i. cumprod(c * γ) puts
+                # an extra γ on every step because c_0 is forced to 1.
                 weight = jax.lax.stop_gradient(
-                    jnp.cumprod(imag_continues * imag_discount, axis=1))
+                    jnp.cumprod(imag_continues * imag_discount, axis=1) /
+                    imag_discount)
 
                 percentiles = jnp.percentile(ret, jnp.asarray([5.0, 95.0]))
                 new_return_ema = jnp.where(
