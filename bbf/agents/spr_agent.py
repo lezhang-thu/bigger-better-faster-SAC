@@ -7,7 +7,6 @@ import copy
 import functools
 import itertools
 import time
-import scipy
 import math
 
 from absl import logging
@@ -392,8 +391,7 @@ def select_action(
     key = jax.random.split(key, state.shape[0])
     logits, samples = jax.vmap(logits_w_samples, in_axes=0,
                                axis_name="batch")(state, key)
-    # On-policy categorical sampling for both training and evaluation.
-    return rng, samples, jax.nn.softmax(logits)
+    return rng, samples
 
 
 train_static_argnames = [
@@ -463,10 +461,6 @@ def train(
     return_ema,
 ):
 
-    @functools.partial(
-        jax.jit,
-        donate_argnums=(0,),
-    )
     def train_one_batch(state, inputs):
         """Runs a training step."""
         # Unpack inputs from scan
@@ -576,22 +570,12 @@ def train(
 
             def policy_loss(q_values, logits, x_key):
                 samples = jax.random.categorical(x_key, logits)
-
                 log_prob = jax.nn.log_softmax(logits)
                 prob = jax.nn.softmax(logits)
                 q_values = q_values[samples] - (q_values * prob).sum()
-                ent_coef = network_def.apply(params,
-                                             method=network_def.entropy_scale)
                 x_ent = -(prob * log_prob).sum()
-                #if True:
-                if False:
-                    return -(jax.lax.stop_gradient(q_values) * log_prob[samples]
-                            ) + ent_coef * (-x_ent + ent_targ), x_ent
-                else:
-                    return -(jax.lax.stop_gradient(q_values) *
-                             log_prob[samples]) + x_ent_coef * (-x_ent), x_ent
-                    #return -(jax.lax.stop_gradient(q_values) *
-                    #         log_prob[samples]), x_ent
+                return -(jax.lax.stop_gradient(q_values) *
+                         log_prob[samples]) + x_ent_coef * (-x_ent), x_ent
 
             x, logits = jax.vmap(all_results,
                                  in_axes=(0, 0, None),
@@ -1416,7 +1400,6 @@ class BBFAgent(JaxDQNAgent):
         # debug - start
         self.greedy_action = False
         # debug - end
-        self.stats_ent = 0
         self.explore_end_steps = explore_end_steps
         print('explore_end_steps: {}'.format(explore_end_steps))
         sys.stdout.flush()
@@ -1755,12 +1738,14 @@ class BBFAgent(JaxDQNAgent):
              if self.imag_value_trust is None else self.imag_value_trust),
             self.imag_return_ema,
         )
-        self.imag_return_ema = np.asarray(new_return_ema)
         self.grad_steps += self._batches_to_group
         self.cycle_grad_steps += self._batches_to_group
 
-        # Sample asynchronously while we wait for training
+        # Sample the next batch before touching train_fn outputs so the
+        # CPU sampler overlaps the GPU step. Converting return_ema to
+        # numpy here used to sync first and serialize the two.
         self._sample_from_replay_buffer()
+        self.imag_return_ema = new_return_ema
         # Rainbow and prioritized replay are parametrized by an exponent
         # alpha, but in both cases it is set to 0.5 - for simplicity's sake we
         # leave it as is here, using the more direct sqrt(). Taking the square
@@ -1839,7 +1824,7 @@ class BBFAgent(JaxDQNAgent):
                 bonus = jnp.clip(bonus, 0., 0.5 - epsilon)
             else:
                 bonus = (1e-2 - epsilon) * steps_left / decay_period
-                bonus = jnp.clip(bonus, 0., 1e-2 - epsilon)
+                bonus = np.clip(bonus, 0., 1e-2 - epsilon)
             return epsilon + bonus
 
         ##frac = linearly_decaying_epsilon(1e5, self.training_steps, 0, 0.01)
@@ -1860,7 +1845,7 @@ class BBFAgent(JaxDQNAgent):
         self.x_ent_coef = linearly_decaying_epsilon(self.x_ent_decay_steps,
                                                     self.training_steps, 0, .0)
         if self.x_ent_floor > 0.0:
-            self.x_ent_coef = jnp.maximum(self.x_ent_coef, self.x_ent_floor)
+            self.x_ent_coef = np.maximum(self.x_ent_coef, self.x_ent_floor)
         if random.uniform(0, 1) < 1e-3:
             logging.info("step: {}, x_ent_coef: {}".format(
                 self.training_steps, self.x_ent_coef))
@@ -1996,20 +1981,12 @@ class BBFAgent(JaxDQNAgent):
                 0,
                 self.num_actions,
             )
-        self._rng, action, probs = select_action(
+        self._rng, action = select_action(
             self.network_def,
             select_params,
             state,
             self._rng,
         )
-        #print(probs.shape)
-        #if not self.eval_mode:
-        if not self.eval_mode:
-            self.stats_ent = 0.99 * self.stats_ent + 0.01 * scipy.stats.entropy(
-                probs[0])
-            if random.uniform(0, 1) < 1e-3:
-                logging.info('ema entropy: {}'.format(self.stats_ent))
-        #exit(0)
         return action
 
     def step(self):

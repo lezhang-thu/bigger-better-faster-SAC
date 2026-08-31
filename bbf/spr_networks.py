@@ -85,7 +85,6 @@ def _intensity_aug(key, x, scale=0.05):
     return x * noise
 
 
-@jax.jit
 def drq_image_aug(key, obs, img_pad=4):
     """Padding and cropping for DrQ."""
     flat_obs = obs.reshape(-1, *obs.shape[-3:])

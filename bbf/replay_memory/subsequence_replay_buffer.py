@@ -9,7 +9,6 @@ import pickle
 from absl import logging
 import gin
 import jax
-from jax import numpy as jnp
 import numpy as np
 
 from bbf.replay_memory import deterministic_sum_tree as sum_tree
@@ -588,11 +587,7 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
                                                    trajectory_b_indices]
 
         returns = np.cumsum(trajectory_discount_vector * trajectory_rewards,
-                            axis=0)
-
-        update_horizons = jnp.ones(batch_size * subseq_len,
-                                   dtype=jnp.int32) * (update_horizon - 1)
-        returns = returns[update_horizons, np.arange(batch_size * subseq_len)]
+                            axis=0)[-1]
 
         next_indices = (state_indices + update_horizon) % self._replay_length
         outputs = []
@@ -613,10 +608,9 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
                 output = self.restore_leading_dims(batch_size, subseq_len,
                                                    output)
             elif name == 'discount':
-                # compute the discounted sum of rewards in the trajectory.
-                output = cumulative_discount_vector[update_horizons + 1]
-                output = self.restore_leading_dims(batch_size, subseq_len,
-                                                   output)
+                output = np.full((batch_size, subseq_len),
+                                 cumulative_discount_vector[update_horizon],
+                                 dtype=np.float32)
             elif name == 'next_state':
                 output = self.parallel_get_stack(
                     'observation',
