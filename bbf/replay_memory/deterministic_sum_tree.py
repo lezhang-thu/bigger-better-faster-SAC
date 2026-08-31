@@ -22,9 +22,13 @@ from jax import numpy as jnp
 import numpy as np
 
 
-@functools.partial(jax.jit, static_argnums=(1,))
+@functools.partial(jax.jit, static_argnums=(1,), backend='cpu')
 def stratified_queries(rng, n):
-    """Stratum-uniform queries in [0, 1), matching the previous JAX sampler."""
+    """Stratum-uniform queries in [0, 1), matching the previous JAX sampler.
+
+    CPU-pinned so converting the result to NumPy does not wait on the GPU
+    train step that sampling is meant to overlap.
+    """
 
     def one(i):
         r = jax.random.fold_in(rng, i)
@@ -78,30 +82,35 @@ class DeterministicSumTree(sum_tree.SumTree):
         return self.nodes[0]
 
     def _walk(self, queries):
-        """Walk the numpy tree; queries are in [0, 1)."""
-        total = self.nodes[0]
-        q = np.asarray(queries, dtype=np.float64) * total
+        """Walk the numpy tree in float32; queries are in [0, 1).
+
+        The previous JAX walk ran under default x64-off, so the stored
+        float64 nodes were computed as float32. Matching that rounding
+        keeps the same leaf choices.
+        """
+        total = np.float32(self.nodes[0])
+        q = np.asarray(queries, dtype=np.float32) * total
         out = np.empty(q.shape[0], dtype=np.int64)
         nodes = self.nodes
         depth = self.depth
         for k in range(q.shape[0]):
-            qq = q[k]
+            qq = np.float32(q[k])
             index = 0
             for _ in range(depth):
                 left = index * 2 + 1
-                left_sum = nodes[left]
+                left_sum = np.float32(nodes[left])
                 if qq < left_sum:
                     index = left
                 else:
                     index = left + 1
-                    qq = qq - left_sum
+                    qq = np.float32(qq - left_sum)
             out[k] = index
         return np.minimum(out - self.low_idx, self.highest_set)
 
     def sample(self, rng, query_value=None):
         """Samples an element from the sum tree."""
         if query_value is None:
-            query_value = np.asarray(jax.random.uniform(rng))
+            query_value = stratified_queries(rng, 1)
         return int(self._walk(np.atleast_1d(query_value))[0])
 
     def stratified_sample(self, batch_size, rng):

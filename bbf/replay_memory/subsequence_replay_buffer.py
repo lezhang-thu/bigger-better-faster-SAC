@@ -384,6 +384,9 @@ class JaxSubsequenceParallelEnvReplayBuffer(object):
         ends = self._episode_end_mask[ts, b[:, None]]
         terms = self._store['terminal'][ts, b[:, None]]
         valid &= ~np.any(ends & (terms == 0), axis=1)
+        # Parent returned censor 0 on every invalid path (including after
+        # computing ep_start, then failing the timeout-end check).
+        censor = np.where(valid, censor, 0)
         return valid, censor
 
     def is_valid_transition(self, index_t, index_b):
