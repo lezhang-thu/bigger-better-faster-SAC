@@ -261,7 +261,8 @@ def jit_reset(
     do_rollout: Whether to do a dynamics model rollout (e.g., if SPR is being
       used).
     support: Support of the categorical distribution if using distributional RL.
-    reset_target: Whether to also reset the target network.
+    reset_target: Whether to also reset the target network (copy of the
+      freshly reset online net, as at construction).
     shrink_perturb_keys: Parameter keys to apply shrink-and-perturb to.
     shrink_factor: Factor to rescale current weights by (1 keeps , 0 deletes).
     perturb_factor: Factor to scale random noise by in [0, 1].
@@ -269,7 +270,9 @@ def jit_reset(
 
   Returns:
   """
-    online_rng, target_rng = jax.random.split(rng, 2)
+    # Split even though the target is copied from online below, so the
+    # online init consumes the same RNG stream as before this fix.
+    online_rng, _ = jax.random.split(rng, 2)
     state = jnp.zeros(state_shape, dtype=jnp.float32)
     # Create some dummy actions of arbitrary length to initialize the transition
     # model, if the network has one.
@@ -277,15 +280,6 @@ def jit_reset(
     random_params = flax.core.frozen_dict.FrozenDict(
         network_def.init(
             online_rng,
-            method=network_def.init_fn,
-            x=state,
-            actions=actions,
-            do_rollout=do_rollout,
-            support=support,
-        ))
-    target_random_params = flax.core.frozen_dict.FrozenDict(
-        network_def.init(
-            target_rng,
             method=network_def.init_fn,
             x=state,
             actions=actions,
@@ -316,18 +310,11 @@ def jit_reset(
     optimizer_state = tuple(updated_optim_state)
 
     if reset_target:
-        if shrink_perturb_keys:
-            target_network_params = interpolate_weights(
-                target_network_params,
-                target_random_params,
-                shrink_perturb_keys,
-                old_weight=shrink_factor,
-                new_weight=perturb_factor,
-            )
-        target_network_params = copy_params(target_network_params,
-                                            target_random_params,
-                                            keys=keys_to_copy)
-        target_network_params = FrozenDict(target_network_params)
+        # Match construction (target = copy of online). An independent
+        # target_rng init left collection (target policy, gin
+        # target_action_selection=True) on a different random net than the
+        # online actor being trained; Polyak tau=0.005 only slowly mixed them.
+        target_network_params = online_params
 
     return online_params, target_network_params, optimizer_state, random_params
 
