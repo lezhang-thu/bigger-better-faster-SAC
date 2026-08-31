@@ -1394,8 +1394,8 @@ class BBFAgent(JaxDQNAgent):
             self.update_horizon_scheduler = lambda x: self.update_horizon
         else:
             self.max_update_horizon = int(max_update_horizon)
-            #n_schedule = linear_decay_scheduler(
-            n_schedule = exponential_decay_scheduler(
+            n_schedule = linear_decay_scheduler(
+            #n_schedule = exponential_decay_scheduler(
                 cycle_steps, 0, 1,
                 self.update_horizon / self.max_update_horizon)
             self.update_horizon_scheduler = lambda x: int(  # pylint: disable=g-long-lambda
@@ -1433,15 +1433,15 @@ class BBFAgent(JaxDQNAgent):
             self.gamma_scheduler = lambda x: self.gamma
         else:
             self.min_gamma = min_gamma
-            self.gamma_scheduler = exponential_decay_scheduler(cycle_steps,
-                                                               0,
-                                                               self.min_gamma,
-                                                               self.gamma,
-                                                               reverse=True)
-            #self.gamma_scheduler = linear_decay_scheduler(cycle_steps,
-            #                                              0,
-            #                                              self.min_gamma,
-            #                                              self.gamma)
+            #self.gamma_scheduler = exponential_decay_scheduler(cycle_steps,
+            #                                                   0,
+            #                                                   self.min_gamma,
+            #                                                   self.gamma,
+            #                                                   reverse=True)
+            self.gamma_scheduler = linear_decay_scheduler(cycle_steps,
+                                                          0,
+                                                          self.min_gamma,
+                                                          self.gamma)
 
         # With a cycle configured, keep actor entropy on the same gradient-step
         # and reset clock as the TD horizon and gamma. Preserve the original
