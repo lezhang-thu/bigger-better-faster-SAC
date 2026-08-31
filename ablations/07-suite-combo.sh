@@ -14,10 +14,9 @@ for game_name in $GAMES; do
 		--gin_bindings="BBFAgent.imag_actor_weight=0.1" \
 		--gin_bindings="BBFAgent.imag_entropy_weight=None" \
 		--gin_bindings="BBFAgent.imag_discount=None" \
-		--gin_bindings="BBFAgent.first_reset_update_multiplier=1" \
-		--gin_bindings="BBFAgent.post_skipped_reset_update_multiplier=2" \
+		--gin_bindings="BBFAgent.first_reset_update_multiplier=2" \
 		--gin_bindings="BBFAgent.reset_priorities=False" \
 		--gin_bindings="BBFAgent.update_horizon=1" \
-		--gin_bindings="BBFAgent.cycle_steps=20_000" \
+		--gin_bindings="BBFAgent.cycle_steps=40_000" \
 		--run_number=$RUN
 done
