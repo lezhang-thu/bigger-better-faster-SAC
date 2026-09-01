@@ -442,9 +442,13 @@ class DataEfficientAtariRunner(Runner):
         create_environment_fn = functools.partial(create_environment_fn,
                                                   game_name=game_name)
         env_index = [0]
+        # Dummy env + train envs + eval envs. Multiply by run seed so adjacent
+        # --run_number values own disjoint ALE streams.
+        env_stride = 1 + int(num_train_envs) + int(num_eval_envs)
 
         def seeded_create_environment():
-            env_seed = (None if seed is None else int(seed) + env_index[0])
+            env_seed = (None if seed is None else
+                        int(seed) * env_stride + env_index[0])
             env_index[0] += 1
             return create_environment_fn(seed=env_seed)
 
