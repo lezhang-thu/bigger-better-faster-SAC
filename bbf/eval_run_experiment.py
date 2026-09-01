@@ -156,7 +156,7 @@ def create_env_wrapper(create_env_fn):
 
 
 @gin.configurable
-def create_atari_environment(game_name=None, sticky_actions=True):
+def create_atari_environment(game_name=None, sticky_actions=True, seed=None):
     assert game_name is not None
     game_version = 'v0' if sticky_actions else 'v4'
     full_game_name = '{}NoFrameskip-{}'.format(game_name, game_version)
@@ -166,7 +166,7 @@ def create_atari_environment(game_name=None, sticky_actions=True):
     # Gym stripped TimeLimit with env.env (it was outermost). Gymnasium
     # stacks OrderEnforcing/PassiveEnvChecker instead; unwrapped is ALE.
     env = env.unwrapped
-    env = AtariPreprocessing(env)
+    env = AtariPreprocessing(env, seed=seed)
     return env
 
 
@@ -191,7 +191,8 @@ class AtariPreprocessing(object):
                  environment,
                  frame_skip=4,
                  terminal_on_life_loss=False,
-                 screen_size=84):
+                 screen_size=84,
+                 seed=None):
         """Constructor for an Atari 2600 preprocessor.
 
     Args:
@@ -215,6 +216,9 @@ class AtariPreprocessing(object):
 
         self.environment = environment
         self.ale = self.environment.unwrapped.ale
+        # Used once, on the first reset, so later episode resets keep the ALE
+        # RNG stream instead of replaying the same start.
+        self._pending_seed = None if seed is None else int(seed)
         self.terminal_on_life_loss = terminal_on_life_loss
         self.frame_skip = frame_skip
         self.screen_size = screen_size
@@ -254,14 +258,20 @@ class AtariPreprocessing(object):
     def close(self):
         return self.environment.close()
 
-    def reset(self):
+    def reset(self, seed=None):
         """Resets the environment.
 
     Returns:
       observation: numpy array, the initial observation emitted by the
         environment.
     """
-        raw_observation, _ = self.environment.reset()
+        if seed is None:
+            seed = self._pending_seed
+            self._pending_seed = None
+        if seed is None:
+            raw_observation, _ = self.environment.reset()
+        else:
+            raw_observation, _ = self.environment.reset(seed=int(seed))
         self.lives = self.ale.lives()
         np.copyto(self.screen_buffer[0], raw_observation)
         self.screen_buffer[1].fill(0)
@@ -425,13 +435,21 @@ class DataEfficientAtariRunner(Runner):
         num_eval_envs=100,
         num_train_envs=4,
         eval_one_to_one=True,
+        seed=None,
     ):
         logging.info("game_name: {}".format(game_name))
         """Specify the number of evaluation episodes."""
         create_environment_fn = functools.partial(create_environment_fn,
                                                   game_name=game_name)
+        env_index = [0]
+
+        def seeded_create_environment():
+            env_seed = (None if seed is None else int(seed) + env_index[0])
+            env_index[0] += 1
+            return create_environment_fn(seed=env_seed)
+
         super().__init__(create_agent_fn,
-                         create_environment_fn=create_environment_fn)
+                         create_environment_fn=seeded_create_environment)
 
         self._num_iterations = int(self._num_iterations)
         self._start_iteration = int(self._start_iteration)
@@ -441,7 +459,8 @@ class DataEfficientAtariRunner(Runner):
         self._evaluation_steps = None
         self.num_steps = 0
         self.total_steps = self._training_steps * self._num_iterations
-        self.create_environment_fn = create_env_wrapper(create_environment_fn)
+        self.create_environment_fn = create_env_wrapper(
+            seeded_create_environment)
 
         self.max_noops = max_noops
         self.parallel_eval = parallel_eval

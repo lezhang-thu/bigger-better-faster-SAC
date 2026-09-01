@@ -123,7 +123,7 @@ def main(unused_argv):
     print("FLAGS.max_episode_eval: {}".format(FLAGS.max_episode_eval))
     runner_fn = eval_run_experiment.DataEfficientAtariRunner
     logging.info('Using MaxEpisodeEvalRunner for evaluation.')
-    runner = runner_fn(create_agent_fn,)
+    runner = runner_fn(create_agent_fn, seed=seed)
 
     print(f'Found devices {jax.local_devices()}')
 
