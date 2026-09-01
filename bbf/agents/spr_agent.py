@@ -1364,7 +1364,7 @@ class BBFAgent(JaxDQNAgent):
                               float(imag_discount))
         self.imag_lambda = float(imag_lambda)
         self.imag_warmup = int(imag_warmup)
-        # None -> imagination entropy follows the actor's 80k-env-step
+        # None -> imagination entropy follows the actor's reset-cycle
         # x_ent_coef anneal; a float decouples it. 3e-4 is
         # DreamerV3's eta, calibrated for advantages normalized by the same
         # 5th-95th percentile return EMA this loss uses.
@@ -1449,13 +1449,13 @@ class BBFAgent(JaxDQNAgent):
                                                           self.min_gamma,
                                                           self.gamma)
 
-        # Entropy is an 80k-env-step anneal (1e-2 -> 1e-4). cycle_steps only
-        # schedules n-step and gamma; it must not retarget or restart this.
-        self._x_ent_coef_schedule_uses_cycle_steps = False
+        # Entropy is annealed from 1e-2 -> 1e-3 on the same gradient-step
+        # clock as the n-step and gamma schedules, then restarted after every
+        # successful network reset.
         self.x_ent_coef_scheduler = linear_decay_scheduler(
-            int(80e3), 0, 1e-2, 1e-4)
+            cycle_steps, 0, 1e-2, 1e-3)
         self.x_ent_coef = float(
-            self.x_ent_coef_scheduler(getattr(self, "training_steps", 0)))
+            self.x_ent_coef_scheduler(self.cycle_grad_steps))
 
         self.cumulative_gamma = (np.ones(
             (self.max_update_horizon,)) * self.gamma).cumprod()
@@ -1725,6 +1725,10 @@ class BBFAgent(JaxDQNAgent):
             self.target_network_params = copy.deepcopy(self.online_params)
 
         self.cycle_grad_steps = 0
+        x_ent_scheduler = getattr(self, "x_ent_coef_scheduler", None)
+        if x_ent_scheduler is not None:
+            self.x_ent_coef = float(
+                x_ent_scheduler(self.cycle_grad_steps))
         if getattr(self, "reset_priorities", True):
             # The reset critic invalidates the priorities estimated by the old
             # critic. Uniformize populated replay entries before rebuilding the
@@ -1787,12 +1791,11 @@ class BBFAgent(JaxDQNAgent):
         """Gradient update during every training step."""
         self.start = time.time()
 
-        # Entropy follows env steps. Extra gradient groups in a reset phase
-        # reuse this coefficient instead of annealing faster.
+        # Entropy follows gradient steps within the current reset cycle.
         x_ent_scheduler = getattr(self, "x_ent_coef_scheduler", None)
-        x_ent_coef = (float(x_ent_scheduler(getattr(self, "training_steps", 0)))
+        x_ent_coef = (float(x_ent_scheduler(self.cycle_grad_steps))
                       if x_ent_scheduler is not None else
-                      float(getattr(self, "x_ent_coef", 1e-4)))
+                      float(getattr(self, "x_ent_coef", 1e-3)))
         self.x_ent_coef = x_ent_coef
         if random.uniform(0, 1) < 1e-3:
             logging.info(
