@@ -8,7 +8,9 @@ import functools
 import os
 import sys
 import time
-import gym
+import gymnasium as gym
+import ale_py
+gym.register_envs(ale_py)
 import cv2
 
 from absl import logging
@@ -161,11 +163,9 @@ def create_atari_environment(game_name=None, sticky_actions=True):
     # The preprocessing wrapper consumes grayscale pixels.  Ask ALE for them
     # directly instead of materializing an ignored RGB frame on every raw step.
     env = gym.make(full_game_name, obs_type='grayscale')
-    # Strip out the TimeLimit wrapper from Gym, which caps us at 100k frames. We
-    # handle this time limit internally instead, which lets us cap at 108k frames
-    # (30 minutes). The TimeLimit wrapper also plays poorly with saving and
-    # restoring states.
-    env = env.env
+    # Gym stripped TimeLimit with env.env (it was outermost). Gymnasium
+    # stacks OrderEnforcing/PassiveEnvChecker instead; unwrapped is ALE.
+    env = env.unwrapped
     env = AtariPreprocessing(env)
     return env
 
@@ -214,6 +214,7 @@ class AtariPreprocessing(object):
                     screen_size))
 
         self.environment = environment
+        self.ale = self.environment.unwrapped.ale
         self.terminal_on_life_loss = terminal_on_life_loss
         self.frame_skip = frame_skip
         self.screen_size = screen_size
@@ -260,8 +261,8 @@ class AtariPreprocessing(object):
       observation: numpy array, the initial observation emitted by the
         environment.
     """
-        raw_observation = self.environment.reset()
-        self.lives = self.environment.ale.lives()
+        raw_observation, _ = self.environment.reset()
+        self.lives = self.ale.lives()
         np.copyto(self.screen_buffer[0], raw_observation)
         self.screen_buffer[1].fill(0)
         return self._pool_and_resize()
@@ -307,12 +308,13 @@ class AtariPreprocessing(object):
         accumulated_reward = 0.
 
         for time_step in range(self.frame_skip):
-            raw_observation, reward, game_over, info = (
+            raw_observation, reward, terminated, truncated, info = (
                 self.environment.step(action))
+            game_over = terminated or truncated
             accumulated_reward += reward
 
             if self.terminal_on_life_loss:
-                new_lives = self.environment.ale.lives()
+                new_lives = self.ale.lives()
                 is_terminal = game_over or new_lives < self.lives
                 self.lives = new_lives
             else:
@@ -346,7 +348,7 @@ class AtariPreprocessing(object):
     Returns:
       observation: numpy array, the current observation in grayscale.
     """
-        self.environment.ale.getScreenGrayscale(output)
+        self.ale.getScreenGrayscale(output)
         return output
 
     def _pool_and_resize(self):
