@@ -1394,8 +1394,7 @@ class BBFAgent(JaxDQNAgent):
             self.update_horizon_scheduler = lambda x: self.update_horizon
         else:
             self.max_update_horizon = int(max_update_horizon)
-            n_schedule = linear_decay_scheduler(
-            #n_schedule = exponential_decay_scheduler(
+            n_schedule = exponential_decay_scheduler(
                 cycle_steps, 0, 1,
                 self.update_horizon / self.max_update_horizon)
             self.update_horizon_scheduler = lambda x: int(  # pylint: disable=g-long-lambda
@@ -1439,20 +1438,16 @@ class BBFAgent(JaxDQNAgent):
             self.gamma_scheduler = lambda x: self.gamma
         else:
             self.min_gamma = min_gamma
-            #self.gamma_scheduler = exponential_decay_scheduler(cycle_steps,
-            #                                                   0,
-            #                                                   self.min_gamma,
-            #                                                   self.gamma,
-            #                                                   reverse=True)
-            self.gamma_scheduler = linear_decay_scheduler(cycle_steps,
-                                                          0,
-                                                          self.min_gamma,
-                                                          self.gamma)
+            self.gamma_scheduler = exponential_decay_scheduler(cycle_steps,
+                                                               0,
+                                                               self.min_gamma,
+                                                               self.gamma,
+                                                               reverse=True)
 
         # Entropy is annealed from 1e-2 -> 1e-3 on the same gradient-step
         # clock as the n-step and gamma schedules, then restarted after every
         # successful network reset.
-        self.x_ent_coef_scheduler = linear_decay_scheduler(
+        self.x_ent_coef_scheduler = exponential_decay_scheduler(
             cycle_steps, 0, 1e-2, 1e-3)
         self.x_ent_coef = float(
             self.x_ent_coef_scheduler(self.cycle_grad_steps))
