@@ -1447,7 +1447,7 @@ class BBFAgent(JaxDQNAgent):
         # Entropy is annealed from 1e-2 -> 1e-3 on the same gradient-step
         # clock as the n-step and gamma schedules, then restarted after every
         # successful network reset.
-        self.x_ent_coef_scheduler = exponential_decay_scheduler(
+        self.x_ent_coef_scheduler = linear_decay_scheduler(
             cycle_steps, 0, 1e-2, 1e-3)
         self.x_ent_coef = float(
             self.x_ent_coef_scheduler(self.cycle_grad_steps))
