@@ -1388,17 +1388,12 @@ class BBFAgent(JaxDQNAgent):
         self.cycle_grad_steps = 0
         self.target_update_period = int(target_update_period)
         self.target_update_tau = target_update_tau
-
+        self.cycle_steps = int(cycle_steps)
+        self._dynamic_update_horizon = max_update_horizon is not None
         if max_update_horizon is None:
             self.max_update_horizon = self.update_horizon
-            self.update_horizon_scheduler = lambda x: self.update_horizon
         else:
             self.max_update_horizon = int(max_update_horizon)
-            n_schedule = exponential_decay_scheduler(
-                cycle_steps, 0, 1,
-                self.update_horizon / self.max_update_horizon)
-            self.update_horizon_scheduler = lambda x: int(  # pylint: disable=g-long-lambda
-                np.round(n_schedule(x) * self.max_update_horizon))
 
         self.max_target_update_tau = target_update_tau
         self.target_update_tau_scheduler = lambda x: self.target_update_tau
@@ -1433,22 +1428,19 @@ class BBFAgent(JaxDQNAgent):
 
         self.set_replay_settings()
 
-        if min_gamma is None or cycle_steps <= 1:
+        self._dynamic_gamma = (min_gamma is not None and
+                               self.cycle_steps > 1)
+        if min_gamma is None or self.cycle_steps <= 1:
             self.min_gamma = self.gamma
-            self.gamma_scheduler = lambda x: self.gamma
         else:
             self.min_gamma = min_gamma
-            self.gamma_scheduler = exponential_decay_scheduler(cycle_steps,
-                                                               0,
-                                                               self.min_gamma,
-                                                               self.gamma,
-                                                               reverse=True)
 
         # Entropy is annealed from 1e-2 -> 1e-3 on the same gradient-step
         # clock as the n-step and gamma schedules, then restarted after every
-        # successful network reset.
-        self.x_ent_coef_scheduler = exponential_decay_scheduler(
-            cycle_steps, 0, 1e-2, 1e-3)
+        # successful network reset. first_reset_update_multiplier stretches
+        # that clock so the schedules still finish at the end of the boosted
+        # phase instead of halfway through it.
+        self._configure_cycle_schedulers(self.cycle_steps)
         self.x_ent_coef = float(
             self.x_ent_coef_scheduler(self.cycle_grad_steps))
 
@@ -1668,6 +1660,75 @@ class BBFAgent(JaxDQNAgent):
         self.replay_elements = (next(self.prefetcher) if rng is None else
                                 self._sample_replay_elements(rng))
 
+    def _first_reset_update_boost_active(self):
+        """True while extra updates from first_reset_update_multiplier run."""
+        if getattr(self, "_final_successful_reset_completed", False) and (
+                getattr(self, "post_final_reset_update_multiplier", 1) != 1):
+            return False
+        if getattr(self, "_reset_schedule_exhausted", False):
+            return False
+        return (getattr(self, "_successful_resets", 0) == 1 and
+                getattr(self, "first_reset_update_multiplier", 1) != 1)
+
+    def _cycle_steps_for_current_reset_phase(self):
+        """Gradient-step duration of n-step, gamma, and entropy this phase.
+
+        Doubling gradient updates would otherwise finish those schedules at
+        half the phase's environment steps. Stretch cycle_steps by the same
+        first-reset multiplier so they still land at phase end.
+        """
+        cycle_steps = int(self.cycle_steps)
+        if self._first_reset_update_boost_active():
+            return cycle_steps * int(self.first_reset_update_multiplier)
+        return cycle_steps
+
+    def _configure_cycle_schedulers(self, cycle_steps):
+        """Rebuild n-step, gamma, and entropy schedules for a cycle length."""
+        cycle_steps = int(cycle_steps)
+        if not getattr(self, "_dynamic_update_horizon", False):
+            self.update_horizon_scheduler = lambda x: self.update_horizon
+        else:
+            n_schedule = exponential_decay_scheduler(
+                cycle_steps, 0, 1,
+                self.update_horizon / self.max_update_horizon)
+            self.update_horizon_scheduler = lambda x: int(  # pylint: disable=g-long-lambda
+                np.round(n_schedule(x) * self.max_update_horizon))
+
+        if not getattr(self, "_dynamic_gamma", False):
+            self.gamma_scheduler = lambda x: self.gamma
+        else:
+            self.gamma_scheduler = exponential_decay_scheduler(
+                cycle_steps,
+                0,
+                self.min_gamma,
+                self.gamma,
+                reverse=True)
+
+        self.x_ent_coef_scheduler = exponential_decay_scheduler(
+            cycle_steps, 0, 1e-2, 1e-3)
+        self._active_cycle_steps = cycle_steps
+
+    def _sync_cycle_schedulers_to_reset_phase(self):
+        """Stretch or restore cycle_steps when the first-reset boost toggles.
+
+        Returns True if the active schedule length changed.
+        """
+        if not hasattr(self, "cycle_steps"):
+            return False
+        active_cycle_steps = self._cycle_steps_for_current_reset_phase()
+        if active_cycle_steps == getattr(self, "_active_cycle_steps", None):
+            return False
+        logging.info(
+            "\t Setting cycle_steps to %s for n-step, gamma, and entropy "
+            "schedules (configured cycle_steps=%s).",
+            active_cycle_steps, self.cycle_steps)
+        self._configure_cycle_schedulers(active_cycle_steps)
+        x_ent_scheduler = getattr(self, "x_ent_coef_scheduler", None)
+        if x_ent_scheduler is not None:
+            self.x_ent_coef = float(
+                x_ent_scheduler(self.cycle_grad_steps))
+        return True
+
     def reset_weights(self):
         self.cumulative_resets += 1
         interval = self.reset_every
@@ -1687,6 +1748,12 @@ class BBFAgent(JaxDQNAgent):
                 logging.info(
                     "\t Multiplying gradient updates by %s for the final "
                     "training phase.", final_multiplier)
+            if self._sync_cycle_schedulers_to_reset_phase():
+                # Queued samples still use the previous cycle length.
+                if hasattr(self, "prefetcher"):
+                    self.initialize_prefetcher()
+                if hasattr(self, "replay_elements"):
+                    del self.replay_elements
             return
         else:
             self._reset_schedule_exhausted = False
@@ -1720,22 +1787,11 @@ class BBFAgent(JaxDQNAgent):
             self.target_network_params = copy.deepcopy(self.online_params)
 
         self.cycle_grad_steps = 0
-        x_ent_scheduler = getattr(self, "x_ent_coef_scheduler", None)
-        if x_ent_scheduler is not None:
-            self.x_ent_coef = float(
-                x_ent_scheduler(self.cycle_grad_steps))
         if getattr(self, "reset_priorities", True):
             # The reset critic invalidates the priorities estimated by the old
             # critic. Uniformize populated replay entries before rebuilding the
             # prefetcher so its first post-reset batch uses reset priorities.
             self._replay.reset_priorities()
-        # Returns and discounts are also materialized using the cycle schedule
-        # at sampling time. Discard queued pre-reset samples so the reset
-        # network immediately receives cycle-zero targets.
-        if hasattr(self, "prefetcher"):
-            self.initialize_prefetcher()
-        if hasattr(self, "replay_elements"):
-            del self.replay_elements
 
         self._successful_resets += 1
         # The next attempt happens one step after next_reset because _train_step
@@ -1745,6 +1801,18 @@ class BBFAgent(JaxDQNAgent):
         self._final_successful_reset_completed = (
             following_reset_attempt + int(interval) >
             self.no_resets_after + self.reset_offset)
+        self._sync_cycle_schedulers_to_reset_phase()
+        x_ent_scheduler = getattr(self, "x_ent_coef_scheduler", None)
+        if x_ent_scheduler is not None:
+            self.x_ent_coef = float(
+                x_ent_scheduler(self.cycle_grad_steps))
+        # Returns and discounts are also materialized using the cycle schedule
+        # at sampling time. Discard queued pre-reset samples so the reset
+        # network immediately receives cycle-zero targets.
+        if hasattr(self, "prefetcher"):
+            self.initialize_prefetcher()
+        if hasattr(self, "replay_elements"):
+            del self.replay_elements
         final_multiplier = getattr(
             self, "post_final_reset_update_multiplier", 1)
         if (self._final_successful_reset_completed and
@@ -1979,8 +2047,9 @@ class BBFAgent(JaxDQNAgent):
 
         if self._replay.add_count > self.min_replay_history:
             if self.training_steps % self.update_period == 0:
-                # Each extra group advances grad_steps and cycle_grad_steps
-                # normally, so gradient-step schedules intentionally accelerate.
+                # Extra groups still advance cycle_grad_steps. The first-reset
+                # update boost stretches cycle_steps so n-step, gamma, and
+                # entropy still finish at the end of that phase.
                 num_update_groups = (
                     self._num_update_groups_for_current_reset_phase())
                 for i in range(num_update_groups):
